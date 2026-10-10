@@ -196,7 +196,8 @@ def fetch_report(folder: str, cache_dir: Path, session=None) -> dict | None:
     cache = Path(cache_dir) / "minutes" / f"{folder_name(folder)}.json"
     if cache.exists():
         data = json.loads(cache.read_text(encoding="utf-8"))
-        return data or None
+        if not data or data.get("v") == 2:
+            return data or None  # older cache entries lack the Tdoc list: fetch again
     s = session or new_session()
     url = report_url(folder, s)
     result = None
@@ -218,10 +219,143 @@ def fetch_report(folder: str, cache_dir: Path, session=None) -> dict | None:
                         doc = _convert_doc(doc)
                     except LegacyDocError:
                         return None  # not cached: may work once LibreOffice/Word is there
-                result = {"meeting": meeting_label(folder), "folder": folder, "url": url, "items": parse_report(doc)}
+                xl = [n for n in z.namelist() if n.lower().endswith(".xlsx") and "tdoc" in n.lower()]
+                tdoc_list = parse_tdoc_list(z.read(xl[0])) if xl else []
+                result = {"v": 2, "meeting": meeting_label(folder), "folder": folder, "url": url,
+                          "items": parse_report(doc), "tdocs": tdoc_list}
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps(result or {}, ensure_ascii=False), encoding="utf-8")
     return result
+
+
+# ---------------------------------------------------------------- Tdoc list and feature lead summaries
+
+_X = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_SUMMARY = re.compile(r"\b(summary|summaries)\b", re.I)
+
+
+def _xlsx_rows(data: bytes) -> list[dict]:
+    import io
+
+    z = zipfile.ZipFile(io.BytesIO(data))
+    shared = []
+    if "xl/sharedStrings.xml" in z.namelist():
+        for si in etree.fromstring(z.read("xl/sharedStrings.xml")).iter(f"{_X}si"):
+            shared.append("".join(t.text or "" for t in si.iter(f"{_X}t")))
+    sheet = sorted(n for n in z.namelist() if n.startswith("xl/worksheets/sheet"))[0]
+    rows = []
+    for r in etree.fromstring(z.read(sheet)).iter(f"{_X}row"):
+        row = {}
+        for c in r.iter(f"{_X}c"):
+            col = re.match(r"[A-Z]+", c.get("r") or "A").group(0)
+            v, t = c.find(f"{_X}v"), c.get("t")
+            if t == "s" and v is not None:
+                row[col] = shared[int(v.text)]
+            elif t == "inlineStr":
+                row[col] = "".join(x.text or "" for x in c.iter(f"{_X}t"))
+            else:
+                row[col] = v.text if v is not None and v.text else ""
+        rows.append(row)
+    return rows
+
+
+def parse_tdoc_list(data: bytes) -> list[dict]:
+    """The meeting's Tdoc list (TDoc_List_Meeting_RAN1#95.xlsx): title, source, agenda item, status, revisions."""
+    rows = _xlsx_rows(data)
+    if not rows:
+        return []
+    col = {v.strip(): k for k, v in rows[0].items()}
+    want = {"tdoc": "TDoc", "title": "Title", "source": "Source", "type": "Type", "agenda": "Agenda item",
+            "agenda_desc": "Agenda item description", "status": "TDoc Status", "revised_to": "Revised to",
+            "spec": "Spec", "cr": "CR"}
+    out = []
+    for r in rows[1:]:
+        d = {k: (r.get(col.get(v, ""), "") or "").strip() for k, v in want.items()}
+        if d["tdoc"]:
+            out.append(d)
+    return out
+
+
+def _norm_agenda(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", re.sub(r"^[\d.]+\s*", "", text.lower())).strip()
+
+
+def feature_lead_summaries(report: dict, agenda: str, limit: int = 12) -> list[dict]:
+    """FL / moderator summaries of an agenda item, every revision (an issue settled in v1 is gone from v3)."""
+    want = _norm_agenda(agenda)
+    if not want:
+        return []
+    rows = [t for t in report.get("tdocs", [])
+            if _SUMMARY.search(t["title"]) and t["type"].lower() in ("discussion", "other", "")
+            and (_norm_agenda(t["agenda_desc"]) == want or _norm_agenda(t["agenda"]) == want)]
+    rows.sort(key=lambda t: tdoc_value(t["tdoc"]))
+    return rows[:limit]
+
+
+def fetch_tdoc_text(folder: str, tdoc: str, cache_dir: Path, session=None) -> list[str] | None:
+    """Paragraph texts of a meeting Tdoc (e.g. a feature lead summary), cached."""
+    cache = Path(cache_dir) / "minutes" / folder_name(folder) / f"{tdoc}.json"
+    if cache.exists():
+        return json.loads(cache.read_text(encoding="utf-8")) or None
+    s = session or new_session()
+    r = _get(s, f"{folder}/Docs/{tdoc}.zip")
+    paras = None
+    if r is not None and r.content[:2] == b"PK":
+        import io
+
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            docs = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc")) and not n.startswith("__MACOSX")]
+            if docs:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                doc = cache.parent / Path(docs[0]).name
+                doc.write_bytes(z.read(docs[0]))
+                if doc.suffix.lower() == ".doc":
+                    from .download import LegacyDocError, _convert_doc
+
+                    try:
+                        doc = _convert_doc(doc)
+                    except LegacyDocError:
+                        return None
+                paras = [t for _, t in _paragraphs(doc) if t]
+                doc.unlink(missing_ok=True)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(paras or [], ensure_ascii=False), encoding="utf-8")
+    return paras
+
+
+_DISCUSSION = re.compile(r"^\s*\[[^\]]{2,40}\]|\b(proposal|issue|observation|concern|views?|FL\s*(?:proposal|comment))\b", re.I)
+
+
+def excerpt(paras: list[str], focus: set[str], must: set[str], budget: int = 2500,
+            context: set[str] = frozenset()) -> tuple[str, int]:
+    """The parts of a long summary about this change and how strongly the summary is about it. Paragraphs
+    sharing the changed words count double, parameter names triple; company views and proposals (the "why")
+    get a bonus over quoted spec text."""
+    scores = []
+    for i, p in enumerate(paras):
+        words = _terms(p)
+        sc = 2 * len(focus & words) + len(context & words) + 3 * len(must & words)
+        if sc >= 4 and _DISCUSSION.search(p):
+            sc += 4
+        if sc >= 4:
+            scores.append((sc, i))
+    scores.sort(reverse=True)
+    # a summary about this change has paragraphs where several changed words or a parameter come together
+    if not any(len(focus & _terms(paras[i])) >= 3 or must & _terms(paras[i]) for _, i in scores[:8]):
+        return "", 0
+    total = sum(sc for sc, _ in scores[:8])
+    picked: set[int] = set()
+    for _, i in scores:
+        if sum(len(paras[j]) for j in picked) > budget:
+            break
+        picked |= {j for j in range(max(0, i - 1), min(len(paras), i + 3))}
+    out, last = [], -2
+    for j in sorted(picked):
+        if j != last + 1:
+            out.append("…")
+        out.append(paras[j][:600])
+        last = j
+    return "\n".join(out).strip()[:budget + 600], total
 
 
 # ---------------------------------------------------------------- matching
@@ -268,4 +402,37 @@ def match_agreements(change: dict, reports: list[dict], tdocs: set[str], spec: s
                 scored.append((score, rep, it, "tdoc" if hit_t else "clause" if named else "terms"))
     scored.sort(key=lambda x: -x[0])
     return [{"meeting": rep["meeting"], "agenda": it["agenda"], "kind": it["kind"], "text": it["text"][:1500],
-             "source": rep["url"], "via": via} for _, rep, it, via in scored[:top]]
+             "source": rep["url"], "folder": rep.get("folder"), "via": via} for _, rep, it, via in scored[:top]]
+
+
+def summaries_for(change: dict, agreements: list[dict], reports: dict[str, dict], cache_dir: Path,
+                  max_items: int = 2) -> list[dict]:
+    """The feature lead summaries (any revision) of the agreements' agenda items that are most about the change,
+    cut down to the paragraphs that concern it."""
+    focus = _terms(" ".join(change.get("changes") or [])) | _terms(change["text"])
+    must = {p.lower() for p in _PARAM.findall(change["text"] + " " + (change.get("old_text") or ""))}
+    found, seen = [], set()
+    for a in agreements:
+        rep = reports.get(a.get("folder") or "")
+        if not rep or (a["folder"], a["agenda"]) in seen:
+            continue
+        seen.add((a["folder"], a["agenda"]))
+        agreed = _terms(a["text"]) - focus
+        for t in feature_lead_summaries(rep, a["agenda"]):
+            paras = fetch_tdoc_text(a["folder"], t["tdoc"], cache_dir)
+            text, score = excerpt(paras or [], focus, must, context=agreed)
+            if text and score >= 20:
+                found.append((score, {"tdoc": t["tdoc"], "title": t["title"], "source": t["source"],
+                                      "meeting": rep["meeting"], "agenda": a["agenda"], "excerpt": text,
+                                      "url": f"{a['folder']}/Docs/{t['tdoc']}.zip"}))
+    found.sort(key=lambda x: -x[0])
+    found = [x for x in found if x[0] >= found[0][0] * 0.6] if found else []  # drop summaries mostly about something else
+    out, titles = [], set()
+    for _, f in found:  # one revision per summary family
+        key = re.sub(r"\W+|v\d+|#\d+", "", f["title"].lower())
+        if key not in titles:
+            titles.add(key)
+            out.append(f)
+        if len(out) >= max_items:
+            break
+    return out

@@ -37,3 +37,43 @@ def test_parse_and_match(tmp_path):
 def test_labels_and_tdoc_order():
     assert minutes.meeting_label("https://x/WG1_RL1/TSGR1_100b_e") == "RAN1#100b-e"
     assert minutes.tdoc_value("R1-101711") < minutes.tdoc_value("R1-1813585") < minutes.tdoc_value("R1-2005128")
+
+
+def _xlsx(rows):
+    import io
+    import zipfile
+
+    strings, cells = [], []
+    for r, row in enumerate(rows, 1):
+        cs = []
+        for c, v in enumerate(row):
+            strings.append(v)
+            cs.append(f'<c r="{chr(65 + c)}{r}" t="s"><v>{len(strings) - 1}</v></c>')
+        cells.append(f'<row r="{r}">{"".join(cs)}</row>')
+    ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("xl/sharedStrings.xml", f"<sst {ns}>" + "".join(f"<si><t>{s}</t></si>" for s in strings) + "</sst>")
+        z.writestr("xl/worksheets/sheet1.xml", f"<worksheet {ns}><sheetData>{''.join(cells)}</sheetData></worksheet>")
+    return buf.getvalue()
+
+
+def test_tdoc_list_and_summaries():
+    head = ["TDoc", "Title", "Source", "Type", "Agenda item", "Agenda item description", "TDoc Status", "Revised to"]
+    rows = minutes.parse_tdoc_list(_xlsx([
+        head,
+        ["R1-1811838", "Summary of DMRS Issues", "Qualcomm", "discussion", "7.1.3", "Maintenance for Reference signals and QCL", "revised", "R1-1811997"],
+        ["R1-1811997", "Summary of DMRS Issues", "Qualcomm", "discussion", "7.1.3", "Maintenance for Reference signals and QCL", "noted", ""],
+        ["R1-1810565", "On DMRS sequence hopping", "ZTE", "discussion", "7.1.3", "Maintenance for Reference signals and QCL", "noted", ""],
+        ["R1-1812427", "Feature lead summary for NR-U", "Nokia", "discussion", "7.2.2", "DL Signals and Channels", "noted", ""],
+    ]))
+    assert rows[0]["title"] == "Summary of DMRS Issues" and rows[0]["revised_to"] == "R1-1811997"
+    got = minutes.feature_lead_summaries({"tdocs": rows}, "Maintenance for Reference signals and QCL")
+    assert [t["tdoc"] for t in got] == ["R1-1811838", "R1-1811997"]  # every revision: v1 may hold the settled issue
+
+    paras = ["Issue 3: DMRS sequence hopping",
+             "[ZTE] There is no explicit agreement of no sequence and group hopping at the same time.",
+             "", "", "", "Unrelated text about PT-RS density."]
+    text, score = minutes.excerpt(paras, {"sequence", "group", "hopping"}, set())
+    assert "no explicit agreement" in text and "PT-RS" not in text and score > 0
+    assert minutes.excerpt(["PT-RS density per RB"], {"sequence", "group", "hopping"}, set()) == ("", 0)

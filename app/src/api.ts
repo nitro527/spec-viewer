@@ -76,6 +76,7 @@ export interface Annotation {
   crs: { cr: string; tdoc: string; subject: string }[]; features: string[];
   agreements: { meeting?: string; agenda?: string; kind?: string; text: string; source?: string; via?: "tdoc" | "clause" | "terms" }[]; intent: Intent | null; intent_error?: string;
   draft_crs?: { tdoc: string; title: string; parent_cr: string; meeting: string }[];
+  fl_summaries?: { tdoc: string; title: string; source: string; meeting: string; agenda: string; url: string; excerpt: string }[];
 }
 
 export interface Note { clause_key: string; bookmark: number; text: string; version: string | null; updated: string }

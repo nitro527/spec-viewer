@@ -184,6 +184,12 @@ class AgreementFinder:
         tdocs = {c["detail"]["wg_tdoc"] for c in hit if c["detail"].get("wg_tdoc")} | {d["wg_tdoc"] for d in drafts}
         return self.m.match_agreements(change, reports, tdocs, spec) if reports else []
 
+    def summaries(self, change: dict, agreements: list[dict]) -> list[dict]:
+        try:
+            return self.m.summaries_for(change, agreements, {f: r for f, r in self.reports.items() if r}, self.cache_dir)
+        except Exception:  # a missing summary must not cost the whole change
+            return []
+
 
 def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None = None,
                progress: Callable[[int, int], None] | None = None, limit: int | None = None,
@@ -229,6 +235,9 @@ def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None 
             if finder and hit:
                 ch["agreements"] = finder.find(ctx, spec, hit, ctx.get("draft_covers", []))
                 ctx["agreements"] = ch["agreements"]
+                ctx["fl_summaries"] = finder.summaries(ctx, ch["agreements"])
+                ch["fl_summaries"] = [{k: f[k] for k in ("tdoc", "title", "source", "meeting", "agenda", "url")}
+                                      | {"excerpt": f["excerpt"][:1200]} for f in ctx["fl_summaries"]]
             try:
                 ch["intent"] = model.intent(ctx)
             except QuotaExceeded as e:  # every later request would fail the same way

@@ -98,6 +98,15 @@ export function AnnotationPanel({ spec, version, clauseKey, rawHash }: {
               <p className="muted tiny">신뢰도 {a.intent.confidence}{a.intent.model ? ` · ${a.intent.model}` : ""} · AI 요약은 CR 원문으로 확인하세요</p>
             </>
           ) : <p className="muted small">의도 요약 없음{a.intent_error ? ` (${a.intent_error})` : " (CR 매핑만 있음)"}</p>}
+          {!!a.fl_summaries?.length && <p className="small"><b>회의 논의 (FL summary)</b> <span className="muted tiny">쟁점·제안·회사 의견 중 이 변경 관련 부분</span></p>}
+          {a.fl_summaries?.map((f) => (
+            <details key={f.tdoc} className="agreement small">
+              <summary><b>{f.meeting}</b> · <a href={tdocUrl(f.tdoc)} target="_blank" rel="noreferrer">{f.tdoc}</a> {f.title}
+                <span className="muted tiny"> ({f.source})</span></summary>
+              <blockquote>{f.excerpt}</blockquote>
+              <a href={f.url} target="_blank" rel="noreferrer" className="tiny">원문 받기</a>
+            </details>
+          ))}
           {a.agreements.length > 0 && <p className="small"><b>회의 합의</b> <span className="muted tiny">WG 회의록에서 찾은 근거</span></p>}
           {a.agreements.map((g, j) => (
             <details key={j} className="agreement small">
