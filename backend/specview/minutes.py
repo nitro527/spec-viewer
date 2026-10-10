@@ -28,6 +28,8 @@ WG_PATH = {"1": "WG1_RL1", "2": "WG2_RL2", "3": "WG3_Iu", "4": "WG4_Radio", "5":
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _MARK = re.compile(r"^\s*(Agreements?|Decision|Conclusions?|Working assumptions?)\s*:?\s*(.*)$", re.I)
 _TDOC = re.compile(r"\bR([1-5])-(\d{6,7})\b")
+_ANY_TDOC = re.compile(r"\bR([1-5P])-(\d{6,7})\b")  # WG Tdocs and TSG RAN ones (RP-221713)
+_TSG_FOLDER = re.compile(r"^TSGR_(\d+)(e)?$")  # TSGR_96, TSGR_88e
 # TSGR1_95, TSGR1_100b_e, TSGR5__113_Calgary (RAN5 adds the city)
 _FOLDER = re.compile(r"^TSGR([1-5])_+(\d+)(b|bis)?(_e)?(?:_[A-Za-z][A-Za-z_-]*)?$", re.I)
 
@@ -46,7 +48,7 @@ def meeting_label(folder_url: str) -> str:
 
 def tdoc_value(tdoc: str) -> int:
     """Comparable number: R1-1813585 -> 18_13585, R1-101711 -> 10_01711 (6-digit Tdocs use a 4-digit counter)."""
-    m = _TDOC.match(tdoc)
+    m = _ANY_TDOC.match(tdoc)
     if not m:
         return -1
     d = m.group(2)
@@ -69,8 +71,12 @@ def _get(session, url: str) -> requests.Response | None:
 
 
 def list_meetings(wg: str, session=None) -> list[str]:
-    """Regular meeting folders of a WG in order (ad hoc meetings with other names are left out)."""
+    """Regular meeting folders of a WG ("1".."5", or "P" for TSG RAN) in order (ad hoc meetings are left out)."""
     s = session or new_session()
+    if wg == "P":
+        r = _get(s, f"{FTP}/TSG_RAN/")
+        names = {n for n in re.findall(r"/(TSGR_[0-9A-Za-z_-]+)/?\"", r.text) if _TSG_FOLDER.match(n)} if r else set()
+        return [f"{FTP}/TSG_RAN/{n}" for n in sorted(names, key=lambda n: int(_TSG_FOLDER.match(n).group(1)))]
     r = _get(s, f"{FTP}/{WG_PATH[wg]}/")
     if r is None:
         return []
@@ -94,14 +100,14 @@ class TdocIndex:
     def _range(self, folder: str) -> list[int] | None:
         if folder not in self.ranges:
             r = _get(self.s, f"{folder}/Docs/")
-            vals = [tdoc_value(f"R{m[0]}-{m[1]}") for m in _TDOC.findall(r.text)] if r is not None else []
+            vals = [tdoc_value(f"R{m[0]}-{m[1]}") for m in _ANY_TDOC.findall(r.text)] if r is not None else []
             self.ranges[folder] = [min(vals), max(vals)] if vals else []
             self.file.parent.mkdir(parents=True, exist_ok=True)
             self.file.write_text(json.dumps(self.ranges))
         return self.ranges[folder] or None
 
     def meeting_of(self, tdoc: str) -> str | None:
-        m = _TDOC.match(tdoc)
+        m = _ANY_TDOC.match(tdoc)
         if not m:
             return None
         v = tdoc_value(tdoc)

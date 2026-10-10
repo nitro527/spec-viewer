@@ -1,3 +1,4 @@
+import re
 import zipfile
 from pathlib import Path
 
@@ -133,3 +134,28 @@ def test_libreoffice_gets_its_own_profile(tmp_path, monkeypatch):
         assert download._convert_doc(tmp_path / name).suffix == ".docx"
     profiles = [next(a for a in c if a.startswith("-env:UserInstallation=")) for c in calls]
     assert len(set(profiles)) == 2
+
+
+@pytest.mark.parametrize("names,want", [
+    # 36.523-1: underscores inside the clause range (clauses 7 and 8 were dropped)
+    (["36523-1-j40_cover.docx", "36523-1-j40_s00-s06.docx", "36523-1-j40_s07_01_01-s07_01_04.docx",
+      "36523-1-j40_s07_01_05-s07_01e.docx", "36523-1-j40_s08_03.docx", "36523-1-j40_s09.docx"], None),
+    # 38.133 v16.0.0: "-sB.1-XX"; 36.521-3: stray words; 36.777: numbered parts
+    (["38133-g00_s0-7.docx", "38133-g00_sA.1-A.3.docx", "38133-g00-sB.1-XX.docx"], None),
+    (["36521-3-g90_s00-s06_noTOC_wrongfilenames!.docx", "36521-3-g90_s07-s09.docx"], None),
+    (["36777-f00_1.doc", "36777-f00_2.doc"], None),
+    # copies with revision marks are not parts
+    (["36133-ba0_s00-s09.doc", "36133-ba0_sA.7-A.8.doc", "36133-ba0_sA.7-A.8_with_rev_marks.doc"],
+     ["36133-ba0_s00-s09.doc", "36133-ba0_sA.7-A.8.doc"]),
+    # annex files written without a space: "_AnnexB1"
+    (["38859-i10.docx", "38859-i10_AnnexB4.docx", "38859-i10_AnnexB1_B2_B3.docx"],
+     ["38859-i10.docx", "38859-i10_AnnexB1_B2_B3.docx", "38859-i10_AnnexB4.docx"]),
+])
+def test_split_part_name_variants(tmp_path, names, want):
+    zp = tmp_path / (re.match(r"\d+(?:-\d+)?-[0-9a-z]{3}", names[0]).group(0) + ".zip")  # "38859-i10.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        for n in names:
+            z.writestr(n, b"x")
+    with zipfile.ZipFile(zp) as z:
+        got = download._word_parts(z)
+    assert got == (want or sorted(names, key=download._natural))

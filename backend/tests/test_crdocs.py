@@ -92,3 +92,67 @@ def test_ttcn_cr_tdoc_found_by_year(tmp_path):
 
     assert crdocs.fetch_pack("R5s260219", "RAN#113", tmp_path, Session()).name == "R5s260219.zip"
     assert asked == [f"{crdocs.FTP}/tsg_ran/WG5_Test_ex-T1/TTCN/TTCN_CRs/2026/Docs/R5s260219.zip"]
+
+
+def test_cr_in_nested_zip_found_by_cover_number(tmp_path):
+    # RAN4 packs: one zip per CR (with JSON band combinations), names without the CR number or even the spec
+    doc = tmp_path / "Big CR on DC_R20_HPUE.docx"
+    _cr_docx(doc)
+    inner = tmp_path / "R4-2606264.zip"
+    with zipfile.ZipFile(inner, "w") as z:
+        z.write(doc, doc.name)
+        z.writestr("JSON Files/DC_n1A.json", "{}")
+    pack = tmp_path / "RP-261384.zip"
+    with zipfile.ZipFile(pack, "w") as z:
+        z.write(inner, inner.name)
+        z.writestr("R4-2607775.zip", b"not a zip")
+        z.writestr("R4-2607776 CR 38.211 removing tables.docx", b"another CR, unreadable")
+        z.writestr("RP-261384_cover.docx", b"cover")
+    got = crdocs.find_cr_doc(pack, "38.211", "123", tmp_path / "out")
+    assert got.name == doc.name and crdocs.parse_cover(got).cr == "0123"
+    assert crdocs.find_cr_doc(pack, "38.211", "124", tmp_path / "out2") is None
+
+
+def test_single_cr_tdoc_with_macos_junk_and_coverage_in_name(tmp_path):
+    doc = tmp_path / "R5-265096_38521-2_Spherical_Coverage_Test_Procedure.docx"
+    _cr_docx(doc)
+    pack = tmp_path / "R5-265096.zip"
+    with zipfile.ZipFile(pack, "w") as z:
+        z.write(doc, doc.name)
+        z.writestr(f"__MACOSX/._{doc.name}", b"resource fork")
+    assert crdocs.find_cr_doc(pack, "38.521-2", "1287", tmp_path / "out").name == doc.name
+
+
+class _Site:
+    """3GPP FTP stand-in: url -> text (listings) or zip bytes; anything else is a 404."""
+
+    def __init__(self, pages):
+        self.pages, self.asked = pages, []
+
+    def get(self, url, timeout=None):
+        self.asked.append(url)
+        body = self.pages.get(url)
+
+        class R:
+            status_code = 200 if body is not None else 404
+            content = body if isinstance(body, bytes) else (body or "").encode()
+            text = body if isinstance(body, str) else ""
+        return R()
+
+
+def test_tsg_meeting_found_by_tdoc_number_when_change_history_has_none(tmp_path):
+    ran = f"{crdocs.FTP}/tsg_ran/TSG_RAN"
+    site = _Site({
+        f"{ran}/": "".join(f'<a href="{ran}/{n}/">' for n in ("TSGR_95e", "TSGR_96", "TSGR_97e", "TSGR_AHs")),
+        f"{ran}/TSGR_95e/Docs/": '<a href="RP-220001.zip">RP-220001.zip</a> RP-220950.zip',
+        f"{ran}/TSGR_96/Docs/": "RP-221000.zip RP-221800.zip",
+        f"{ran}/TSGR_97e/Docs/": "RP-222000.zip RP-223500.zip",
+        f"{ran}/TSGR_96/Docs/RP-221713.zip": b"PK\x03\x04",
+    })
+    assert crdocs.fetch_pack("RP-221713", "", tmp_path, site).name == "RP-221713.zip"  # 36.323: no meeting given
+
+
+def test_e_meeting_folder_tried_when_change_history_drops_the_e(tmp_path):
+    ran = f"{crdocs.FTP}/tsg_ran/TSG_RAN"
+    site = _Site({f"{ran}/TSGR_88e/Docs/RP-201167.zip": b"PK\x03\x04"})
+    assert crdocs.fetch_pack("RP-201167", "RP-88", tmp_path, site).name == "RP-201167.zip"  # 36.302

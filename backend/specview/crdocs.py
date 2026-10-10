@@ -8,6 +8,7 @@ code" and, crucially, "Clauses affected".
 """
 from __future__ import annotations
 
+import io
 import json
 import re
 import time
@@ -145,8 +146,9 @@ def fetch_pack(tdoc: str, meeting: str, cache_dir: Path, session: requests.Sessi
         return target
     s = session or new_session()
     folder = meeting_folder(tdoc, meeting)
-    if not folder and re.match(r"R[1-5]-\d{6,7}$", tdoc):
-        # conformance specs (38.5xx) list the RAN5 Tdoc itself: find the WG meeting by its Tdoc number
+    if not folder and re.match(r"R[1-5P]-\d{6,7}$", tdoc):
+        # conformance specs (38.5xx) list the RAN5 Tdoc itself, and some Change histories leave the meeting
+        # empty (36.323): find the meeting by its Tdoc number
         from .minutes import TdocIndex
 
         folder = TdocIndex(cache_dir, s).meeting_of(tdoc)
@@ -156,7 +158,12 @@ def fetch_pack(tdoc: str, meeting: str, cache_dir: Path, session: requests.Sessi
     if not folder:
         return None
     target.parent.mkdir(parents=True, exist_ok=True)
-    for url in (f"{folder}/Docs/{tdoc}.zip", f"{folder}/Docs/{tdoc.lower()}.zip"):
+    # "RP-88" in a Change history is the e-meeting folder TSGR_88e
+    folders = [folder]
+    if re.search(r"/TSG[RSC]_\d+e?$", folder):
+        folders.append(folder[:-1] if folder.endswith("e") else f"{folder}e")
+    urls = [f"{f}/Docs/{t}.zip" for f in folders for t in (tdoc, tdoc.lower())]
+    for url in urls:
         for attempt in range(3):  # the 3GPP server times out now and then
             try:
                 r = s.get(url, timeout=120)
@@ -171,22 +178,71 @@ def fetch_pack(tdoc: str, meeting: str, cache_dir: Path, session: requests.Sessi
     return None
 
 
+def _is_doc(name: str) -> bool:
+    """A Word file, not a pack cover sheet nor macOS zip junk ("__MACOSX/._R5-264584 ....docx")."""
+    base = Path(name).name.lower()
+    # pack cover sheets end in "cover" ("RP-261383_cover.docx", "CR cover sheet.doc"); "Spherical_Coverage" and
+    # "SL CR to TR 38.786 ... cover RAN4#110bis.docx" are CRs
+    cover = re.search(r"(?<![a-z])cover(?:[ _-]?sheet)?\.docx?$", base)
+    return (base.endswith((".docx", ".doc")) and not cover and not base.startswith("._")
+            and "__macosx" not in name.lower())
+
+
+def _pack_docs(z: zipfile.ZipFile) -> list[tuple[str, str, zipfile.ZipFile]]:
+    """(name, enclosing zip name, zip) of every Word file in a pack, one level of nested zips included:
+    RAN4 packs hold one zip per CR (the CR plus its band-combination JSON files)."""
+    out = []
+    for n in z.namelist():
+        if _is_doc(n):
+            out.append((n, "", z))
+        elif n.lower().endswith(".zip") and "__macosx" not in n.lower():
+            try:
+                inner = zipfile.ZipFile(io.BytesIO(z.read(n)))
+            except zipfile.BadZipFile:
+                continue
+            out += [(m, n, inner) for m in inner.namelist() if _is_doc(m)]
+    return out
+
+
+def _cover_matches(path: Path, spec: str, cr: str) -> bool:
+    try:
+        cover = parse_cover(path)
+    except (zipfile.BadZipFile, KeyError, etree.XMLSyntaxError):
+        return False
+    return cover.cr.lstrip("0") == cr.lstrip("0") and spec_digits(cover.spec or "") == spec_digits(spec)
+
+
 def find_cr_doc(pack: Path, spec: str, cr: str, out_dir: Path) -> Path | None:
     """Extract the .docx for ``spec`` CR ``cr`` from a CR pack (or a single-CR Tdoc); older packs hold .doc files."""
     digits = spec_digits(spec)
     want = re.compile(rf"{digits}[_-]?CR0*{int(cr)}\D", re.I) if cr.isdigit() else None
     with zipfile.ZipFile(pack) as z:
-        docs = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc")) and "cover" not in n.lower()]
-        pick = next((n for n in docs if want and want.search(n)), None)
+        docs = _pack_docs(z)
+        pick = next((d for d in docs if want and want.search(d[0])), None) or \
+            next((d for d in docs if want and want.search(d[1])), None)
         if pick is None and len(docs) == 1:
             pick = docs[0]
+        if pick is None and cr.isdigit():
+            # names without the CR number ("R4-2607773 CR 38.101-1 removing ...docx", "Big CR on DC_R20_...docx"):
+            # read the cover pages, those naming the spec first
+            mention = re.compile(rf"{re.escape(spec)}|{digits}", re.I)
+            for name, outer, src in sorted(docs, key=lambda d: not mention.search(f"{d[0]} {d[1]}")):
+                if not name.lower().endswith(".docx"):
+                    continue
+                out = Path(out_dir) / Path(name).name
+                out.parent.mkdir(parents=True, exist_ok=True)
+                if not out.exists():
+                    out.write_bytes(src.read(name))
+                if _cover_matches(out, spec, cr):
+                    return out
         if pick is None:
             return None
-        out = Path(out_dir) / Path(pick).name
+        name, _, src = pick
+        out = Path(out_dir) / Path(name).name
         out.parent.mkdir(parents=True, exist_ok=True)
         if out.suffix.lower() == ".doc" and out.with_suffix(".docx").exists():
             return out.with_suffix(".docx")
-        out.write_bytes(z.read(pick))
+        out.write_bytes(src.read(name))
     if out.suffix.lower() == ".doc":
         from .download import _convert_doc
 
