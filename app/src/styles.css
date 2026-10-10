@@ -264,3 +264,10 @@ del { background: var(--del); color: var(--del-text); border-radius: 2px; }
 .mo-M { background: #dcefdc; color: #1f5f24; }
 .mo-O { background: #e7e3fb; color: #463a8c; }
 .tiny { font-size: 10.5px; }
+
+/* annotations */
+.annotations { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 8px; }
+.annotations h4 { margin: 0 0 6px; font-size: 13px; }
+.intent { font-size: 12.5px; padding: 6px 0; border-bottom: 1px dashed var(--border); }
+.intent p { margin: 3px 0; }
+.intent blockquote { margin: 4px 0; padding-left: 8px; border-left: 3px solid var(--border); }

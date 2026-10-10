@@ -102,6 +102,41 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         threading.Thread(target=_run_features, args=(job_id,), daemon=True).start()
         return jobs[job_id]
 
+    @app.get("/api/settings")
+    def get_settings():
+        return {"annotation_url": lib.get_setting("annotation_url", os.environ.get("SPECVIEW_ANNOTATION_URL", ""))}
+
+    @app.put("/api/settings")
+    def put_settings(body: dict):
+        if "annotation_url" in body:
+            with lock:
+                lib.set_setting("annotation_url", str(body["annotation_url"]).rstrip("/"))
+        return get_settings()
+
+    @app.post("/api/annotations/sync/{spec}")
+    def sync_annotations(spec: str):
+        base = get_settings()["annotation_url"]
+        if not base:
+            raise HTTPException(400, "annotation server URL is not set")
+        s = download.new_session()
+        try:
+            index = s.get(f"{base}/v1/packs", timeout=30).json()
+            have = {v["version"] for v in lib.versions(spec)}
+            n = 0
+            for item in index:
+                if item["spec"] == spec and item["version"] in have:
+                    pack = s.get(base + item["url"], timeout=120).json()
+                    with lock:
+                        lib.import_pack(pack)
+                    n += 1
+        except Exception as e:
+            raise HTTPException(502, f"annotation server: {e}")
+        return {"packs": n}
+
+    @app.get("/api/specs/{spec}/{version}/clause/{key}/annotations")
+    def clause_annotations(spec: str, version: str, key: str):
+        return _get(lib.clause_annotations, spec, version, key)
+
     @app.get("/api/specs/{spec}/compare")
     def compare(spec: str, old: str, new: str, changed_only: bool = True):
         return _get(lib.compare, spec, old, new, changed_only)

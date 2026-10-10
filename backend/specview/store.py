@@ -98,6 +98,11 @@ CREATE TABLE IF NOT EXISTS ue_feature (
   idx TEXT NOT NULL, grp TEXT, components TEXT, prerequisite TEXT,
   field_name TEXT, parent_ie TEXT, mandatory TEXT, note TEXT, terms TEXT
 );
+CREATE TABLE IF NOT EXISTS annotation (
+  spec TEXT NOT NULL, version TEXT NOT NULL, raw_hash TEXT NOT NULL, clause TEXT, data TEXT NOT NULL,
+  PRIMARY KEY (spec, version, raw_hash)
+);
+CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT);
 CREATE VIRTUAL TABLE IF NOT EXISTS blob_fts USING fts5(hash UNINDEXED, text, tokenize = 'unicode61');
 """
 
@@ -251,9 +256,9 @@ class Library:
         for r in rows:
             blocks = [{
                 "kind": b["kind"], "style": b["style"], "html": b["html"], "introduced": b["introduced"],
-                "changed": b["changed"], "history": json.loads(b["history"]),
+                "changed": b["changed"], "history": json.loads(b["history"]), "raw_hash": b["raw_hash"],
             } for b in self.db.execute(
-                "SELECT b.kind, b.style, a.html, a.introduced, a.changed, a.history FROM block_ver b "
+                "SELECT b.kind, b.style, b.raw_hash, a.html, a.introduced, a.changed, a.history FROM block_ver b "
                 "JOIN annot a ON a.hash=b.annot_hash WHERE b.version_id=? AND b.clause_key=? ORDER BY b.ord",
                 (vid, r["key"]))]
             out.append({
@@ -426,6 +431,41 @@ class Library:
                 params.append({**_feature_out(f), "matched": hit})
         return {"available": True, "work_items": sorted(wis.values(), key=lambda w: w["wi_code"]),
                 "parameters": params[:50]}
+
+    # ------------------------------------------------------------ settings / annotation packs
+
+    def get_setting(self, key: str, default: str | None = None) -> str | None:
+        r = self.db.execute("SELECT value FROM setting WHERE key=?", (key,)).fetchone()
+        return r["value"] if r else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO setting VALUES (?,?)", (key, value))
+
+    def import_pack(self, pack: dict) -> int:
+        if not str(pack.get("format", "")).startswith("specview-annotations/"):
+            raise ValueError("not a specview annotation pack")
+        with self.db:
+            self.db.execute("DELETE FROM annotation WHERE spec=? AND version=?", (pack["spec"], pack["version"]))
+            self.db.executemany("INSERT OR REPLACE INTO annotation VALUES (?,?,?,?,?)", [
+                (pack["spec"], pack["version"], ch["raw_hash"], ch.get("clause"),
+                 json.dumps({**ch, "generated": pack.get("generated")}, ensure_ascii=False))
+                for ch in pack["changes"]])
+        return len(pack["changes"])
+
+    def clause_annotations(self, spec: str, version: str, key: str) -> list[dict]:
+        """Server annotations for the blocks of a clause (any version that introduced their current text)."""
+        vid = self.version_id(spec, version)
+        hashes = [r["raw_hash"] for r in self.db.execute(
+            "SELECT raw_hash FROM block_ver WHERE version_id=? AND clause_key=? ORDER BY ord", (vid, key))]
+        if not hashes:
+            return []
+        q = ",".join("?" * len(hashes))
+        rows = self.db.execute(f"SELECT version, raw_hash, data FROM annotation WHERE spec=? AND raw_hash IN ({q})",
+                               (spec, *hashes)).fetchall()
+        out = [{**json.loads(r["data"]), "version": r["version"]} for r in rows]
+        out.sort(key=lambda a: (hashes.index(a["raw_hash"]), Version.parse(a["version"]).sort_key))
+        return out
 
     def asset(self, h: str) -> tuple[str, bytes] | None:
         r = self.db.execute("SELECT mime, data FROM asset WHERE hash=?", (h,)).fetchone()

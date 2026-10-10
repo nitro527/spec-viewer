@@ -11,7 +11,7 @@ export interface TocEntry {
 
 export interface Block {
   kind: string; style: string; html: string;
-  introduced: string; changed: string | null; history: HistoryEntry[];
+  introduced: string; changed: string | null; history: HistoryEntry[]; raw_hash: string;
 }
 
 export interface Clause extends TocEntry {
@@ -62,6 +62,13 @@ export interface FeatureSection { section: string; title: string; layer: string;
 export interface WorkItemFeatures { wi_code: string; releases: string[]; crs: { cr: string; version: string; subject: string }[]; sections: FeatureSection[] }
 export interface ClauseFeatures { available: boolean; work_items: WorkItemFeatures[]; parameters: UEFeature[] }
 
+export interface Intent { summary: string; motivation: string; impact: string; cr: string; confidence: string; model?: string }
+export interface Annotation {
+  clause: string; raw_hash: string; change: string; version: string; generated?: string;
+  crs: { cr: string; tdoc: string; subject: string }[]; features: string[];
+  agreements: { meeting?: string; text: string; source?: string }[]; intent: Intent | null;
+}
+
 export interface SearchHit { ord: number; key: string; number: string; title: string; block: number | null; snippet: string }
 export interface Job { id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[] }
 
@@ -85,6 +92,18 @@ export const api = {
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
   stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),
   jobs: () => get<Job[]>("/api/jobs"),
+  annotations: (spec: string, v: string, key: string) =>
+    get<Annotation[]>(`/api/specs/${s(spec)}/${s(v)}/clause/${s(key)}/annotations`),
+  settings: () => get<{ annotation_url: string }>("/api/settings"),
+  saveSettings: async (body: { annotation_url: string }) => {
+    const r = await fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    return r.json() as Promise<{ annotation_url: string }>;
+  },
+  syncAnnotations: async (spec: string): Promise<{ packs: number }> => {
+    const r = await fetch(`/api/annotations/sync/${s(spec)}`, { method: "POST" });
+    if (!r.ok) throw new Error((await r.json()).detail ?? r.statusText);
+    return r.json();
+  },
   clauseFeatures: (spec: string, v: string, key: string) =>
     get<ClauseFeatures>(`/api/specs/${s(spec)}/${s(v)}/clause/${s(key)}/features`),
   fetchFeatures: async (): Promise<Job> => {

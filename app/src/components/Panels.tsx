@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cmpVersion, crTouches, tdocUrl, type CR, type TocEntry } from "../api";
 import type { VersionColor } from "../colors";
+import { AnnotationPanel } from "./AnnotationPanel";
 import { FeaturePanel } from "./FeaturePanel";
 import type { Selection } from "./HistoryView";
 
@@ -180,6 +181,7 @@ export function InfoPanel({ spec, selection, version, baseline, crsByVersion, co
             <p className="small note">CR 표지(변경 이유·Clauses affected)를 아직 받지 않았습니다.{" "}
               <button className="link" onClick={onFetchCrs}>CR 표지 받기</button></p>
           )}
+          <AnnotationPanel spec={spec} version={version} clauseKey={selection.clause.key} rawHash={block?.raw_hash} />
           <FeaturePanel spec={spec} version={version} clauseKey={selection.clause.key} />
         </>
       ) : (

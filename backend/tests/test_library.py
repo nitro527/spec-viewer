@@ -79,3 +79,16 @@ def test_compare_marks_moves(library):
     cmp = library.compare("99.211", "16.1.0", "16.2.0")
     ops = {(c["key"], b["op"]) for c in cmp["clauses"] for b in c["blocks"]}
     assert ("4.3.1", "move-out") in ops and ("7.4.1.1.1", "move-in") in ops
+
+
+def test_annotation_pack_roundtrip(library):
+    c = _clause(library, "16.2.0", "7.4.1.1.1")
+    moved = next(b for b in c["blocks"] if "shared spectrum" in b["html"])
+    pack = {"format": "specview-annotations/1", "spec": "99.211", "version": "16.2.0", "generated": "now",
+            "changes": [{"clause": "7.4.1.1.1", "raw_hash": moved["raw_hash"], "change": "moved",
+                         "crs": [], "features": [], "agreements": [], "intent": {"summary": "moved"}}]}
+    assert library.import_pack(pack) == 1
+    ann = library.clause_annotations("99.211", "16.2.0", "7.4.1.1.1")
+    assert ann[0]["intent"]["summary"] == "moved" and ann[0]["version"] == "16.2.0"
+    library.set_setting("annotation_url", "http://x")
+    assert library.get_setting("annotation_url") == "http://x"

@@ -12,8 +12,10 @@ export function Home({ prefill, onOpen }: { prefill?: string; onOpen: (spec: str
   const [latestOnly, setLatestOnly] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [annUrl, setAnnUrl] = useState("");
+  const [annSaved, setAnnSaved] = useState(false);
   const refresh = () => api.specs().then(setSpecs, (e) => setError(String(e)));
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => { refresh(); api.settings().then((s) => setAnnUrl(s.annotation_url)).catch(() => {}); }, []);
 
   const running = jobs.some((j) => j.state === "running");
   useEffect(() => {
@@ -73,6 +75,13 @@ export function Home({ prefill, onOpen }: { prefill?: string; onOpen: (spec: str
           <button className="primary" onClick={start} disabled={running}>다운로드</button>
         </div>
         {error && <p className="error small">{error}</p>}
+        <h2>Annotation 서버 <span className="muted small">(선택)</span></h2>
+        <p className="muted small">변경 의도 요약·Chairman’s notes 연결 등 서버에서 만든 결과를 받아 함께 보여줍니다. 없어도 뷰어는 그대로 동작합니다.</p>
+        <div className="dl-form">
+          <input value={annUrl} placeholder="http://annotation-server:8800" onChange={(e) => { setAnnUrl(e.target.value); setAnnSaved(false); }} />
+          <button onClick={async () => { await api.saveSettings({ annotation_url: annUrl }); setAnnSaved(true); }}>저장</button>
+          {annSaved && <span className="small muted">저장됨</span>}
+        </div>
         {jobs.map((j) => (
           <div key={j.id} className={`job job-${j.state}`}>
             <b>{j.specs.join(", ")}</b> <span className="small">{j.message}</span>
