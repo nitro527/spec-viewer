@@ -8,6 +8,7 @@ code" and, crucially, "Clauses affected".
 """
 from __future__ import annotations
 
+import json
 import re
 import time
 import zipfile
@@ -183,3 +184,82 @@ def find_cr_doc(pack: Path, spec: str, cr: str, out_dir: Path) -> Path | None:
 
         return _convert_doc(out)
     return out
+
+
+# ---------------------------------------------------------------- individual draft CRs behind a combined CR
+
+_WG = {  # Tdoc prefix -> (FTP path, meeting folder prefix)
+    "R1": ("tsg_ran/WG1_RL1", "TSGR1_"),
+    "R2": ("tsg_ran/WG2_RL2", "TSGR2_"),
+    "R3": ("tsg_ran/WG3_Iu", "TSGR3_"),
+    "R4": ("tsg_ran/WG4_Radio", "TSGR4_"),
+}
+_WG_MEETING = re.compile(r"RAN\s*([1-4])\s*#\s*(\d+)\s*(bis|b)?(?:\s*-?\s*(e))?", re.I)
+_WG_TDOC = re.compile(r"\b(R[1-4]-\d{6,7})\b")
+
+
+def wg_meetings(text: str) -> list[str]:
+    """Working-group meeting folders named in a cover: "RAN1#94bis and RAN1#95" -> [.../TSGR1_94b, .../TSGR1_95]."""
+    out = []
+    for wg, num, bis, e in _WG_MEETING.findall(text):
+        path, prefix = _WG[f"R{wg}"]
+        folder = f"{FTP}/{path}/{prefix}{num}{'b' if bis else ''}{'_e' if e else ''}"
+        if folder not in out:
+            out.append(folder)
+    return out
+
+
+def listed_tdocs(cover: dict) -> list[str]:
+    """WG Tdocs a combined CR lists as its individual draft CRs (its own WG Tdoc excluded)."""
+    text = " ".join(cover.get(k) or "" for k in ("reason", "summary", "consequences", "other_comments"))
+    found = []
+    for t in _WG_TDOC.findall(text):
+        if t != cover.get("wg_tdoc") and t not in found:
+            found.append(t)
+    return found
+
+
+def fetch_draft_cr(tdoc: str, cover: dict, cache_dir: Path, session: requests.Session | None = None) -> dict | None:
+    """Cover of an individual draft CR (e.g. R1-1813585) listed in ``cover``; cached as JSON, None if not found."""
+    cache = Path(cache_dir) / "tdocs" / f"{tdoc}.cover.json"
+    if cache.exists():
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        return data or None
+    text = " ".join(cover.get(k) or "" for k in ("title", "reason", "summary", "consequences"))
+    folders = [f for f in wg_meetings(text) if f"/{_WG.get(tdoc[:2], ('', ''))[1]}" in f]
+    s = session or new_session()
+    result = None
+    for folder in folders:
+        for url in (f"{folder}/Docs/{tdoc}.zip",):
+            try:
+                r = s.get(url, timeout=120)
+            except requests.RequestException:
+                continue
+            if r.status_code != 200 or r.content[:2] != b"PK":
+                continue
+            out_dir = Path(cache_dir) / "tdocs" / tdoc
+            out_dir.mkdir(parents=True, exist_ok=True)
+            pack = out_dir / f"{tdoc}.zip"
+            pack.write_bytes(r.content)
+            with zipfile.ZipFile(pack) as z:
+                docs = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc"))]
+                if not docs:
+                    break
+                doc = out_dir / Path(docs[0]).name
+                doc.write_bytes(z.read(docs[0]))
+            if doc.suffix.lower() == ".doc":
+                from .download import LegacyDocError, _convert_doc
+
+                try:
+                    doc = _convert_doc(doc)
+                except LegacyDocError:
+                    return None  # not cached: a later run with LibreOffice/Word may succeed
+            c = parse_cover(doc)
+            if c.title or c.reason:
+                result = {**c.to_dict(), "wg_tdoc": tdoc, "meeting_folder": folder}
+            break
+        if result:
+            break
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(result or {}, ensure_ascii=False), encoding="utf-8")
+    return result

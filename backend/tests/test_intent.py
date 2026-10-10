@@ -166,3 +166,21 @@ def test_pack_counts_skips_and_limits(library):
     assert g["requested"] == 1 and g["over_limit"] == len(pack["changes"]) - 1
     one = pack["changes"][0]["raw_hash"]
     assert [c["raw_hash"] for c in build_pack(library, "99.211", "16.1.0", only_hashes={one})["changes"]] == [one]
+
+
+def test_change_evidence_helpers():
+    from specview import crdocs
+    from specview.pack import relevant_lines, word_changes
+
+    assert word_changes("if neither group, nor sequence hopping shall be used",
+                        "if neither group, nor sequence hopping is enabled") == [
+        "- …group, nor sequence hopping [shall be used]", "+ …group, nor sequence hopping [is enabled]"]
+    cover = {"cr": "0004", "summary": "Clarification of the definition on Point A in 4.4.4.2.\n"
+             "Clarification to PUSCH DM-RS sequence hopping; a UE does not support combined sequence and group hopping.\n"
+             "R1-1813585 Differentiation of PxSCH allocation length", "reason": "", "consequences": "", "wg_tdoc": ""}
+    ch = {"text": "if group hopping is enabled and sequence hopping is disabled", "title": "Sequence generation",
+          "changes": ["+ …if group hopping [is enabled and]", "- …but not sequence hopping [shall be used]"]}
+    assert relevant_lines([cover], ch)[0].startswith("[CR0004 summary] Clarification to PUSCH DM-RS sequence hopping")
+    assert crdocs.listed_tdocs(cover) == ["R1-1813585"]
+    assert crdocs.wg_meetings("from RAN1#94bis and RAN1#95") == [
+        "https://www.3gpp.org/ftp/tsg_ran/WG1_RL1/TSGR1_94b", "https://www.3gpp.org/ftp/tsg_ran/WG1_RL1/TSGR1_95"]

@@ -19,7 +19,8 @@ INTENT_SCHEMA = {
         "summary": {"type": "string", "description": "What changed in this paragraph, one or two sentences."},
         "motivation": {"type": "string", "description": "Why it changed, grounded in the CR reason/summary."},
         "impact": {"type": "string", "description": "What a UE/modem PHY implementer has to do differently."},
-        "cr": {"type": "string", "description": "CR number most likely responsible, or empty if unclear."},
+        "cr": {"type": "string", "description": "CR number (or draft CR Tdoc such as R1-1813585) most likely responsible, "
+                                                "or empty if unclear."},
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
     },
     "required": ["summary", "motivation", "impact", "cr", "confidence"],
@@ -28,21 +29,31 @@ INTENT_SCHEMA = {
 
 SYSTEM = (
     "You explain changes in 3GPP specifications to physical-layer modem engineers. "
-    "Use only the provided text and CR cover pages; when they do not explain the change, "
-    "say so and set confidence to low. Write in {language}; keep 3GPP terms (PDSCH, DM-RS, "
-    "parameter names) in English."
+    "<changes> lists exactly which words were removed (-) and added (+) in the paragraph. "
+    "A CR often bundles many corrections (\"Combined CR of all essential corrections ...\"): find the item that "
+    "matches these changes - first in <draft_crs> (the individual draft CRs that touched this clause), then in "
+    "<relevant_cr_lines> (cover-page lines ranked by overlap with the change) - and base the motivation on it. "
+    "Use only the provided material; when nothing in it explains the change, say so and set confidence to low. "
+    "Write in {language}; keep 3GPP terms (PDSCH, DM-RS, parameter names) in English."
 )
 
 
 def user_prompt(ch: dict) -> str:
     covers = [{k: c.get(k) for k in ("cr", "title", "wi_code", "category", "reason", "summary", "clauses_raw")}
               for c in ch.get("cr_covers", [])]
-    return (
-        f"Spec clause {ch['clause']} ({ch['title']}), change type: {ch['change']}.\n\n"
-        f"<old_text>\n{ch.get('old_text') or '(none - newly added)'}\n</old_text>\n\n"
-        f"<new_text>\n{ch['text']}\n</new_text>\n\n"
-        f"<cr_cover_pages>\n{json.dumps(covers, ensure_ascii=False, indent=1)}\n</cr_cover_pages>"
-    )
+    drafts = [{k: c.get(k) for k in ("wg_tdoc", "title", "reason", "summary", "clauses_raw")}
+              for c in ch.get("draft_covers", [])]
+    parts = [f"Spec clause {ch['clause']} ({ch['title']}), change type: {ch['change']}."]
+    if ch.get("changes"):
+        parts.append("<changes>\n" + "\n".join(ch["changes"]) + "\n</changes>")
+    parts.append(f"<old_text>\n{ch.get('old_text') or '(none - newly added)'}\n</old_text>")
+    parts.append(f"<new_text>\n{ch['text']}\n</new_text>")
+    if drafts:
+        parts.append(f"<draft_crs>\n{json.dumps(drafts, ensure_ascii=False, indent=1)}\n</draft_crs>")
+    if ch.get("relevant_lines"):
+        parts.append("<relevant_cr_lines>\n" + "\n".join(ch["relevant_lines"]) + "\n</relevant_cr_lines>")
+    parts.append(f"<cr_cover_pages>\n{json.dumps(covers, ensure_ascii=False, indent=1)}\n</cr_cover_pages>")
+    return "\n\n".join(parts)
 
 
 PRESETS = {
@@ -191,7 +202,9 @@ class OpenAICompatIntentModel:
         system = SYSTEM.format(language=self.language)
         if self._schema_mode != "json_schema":
             system += "\nReply with only a JSON object matching this schema:\n" + json.dumps(INTENT_SCHEMA)
-        return [{"role": "system", "content": system}, {"role": "user", "content": user_prompt(change)}]
+        # small models drop the language from the system prompt: repeat it last
+        return [{"role": "system", "content": system},
+                {"role": "user", "content": user_prompt(change) + f"\n\nWrite summary, motivation and impact in {self.language}."}]
 
     def intent(self, change: dict) -> dict | None:
         try:

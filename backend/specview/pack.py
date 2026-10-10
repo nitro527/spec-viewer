@@ -14,7 +14,9 @@ Used by the annotation server (offline, whole specs) and by the desktop app
 from __future__ import annotations
 
 import datetime as dt
+import difflib
 import json
+import re
 from typing import Callable, Protocol
 
 from .diff import strip_tags
@@ -66,10 +68,77 @@ def changed_blocks(lib: Library, spec: str, version: str, clause_key: str | None
     return out
 
 
+_WORD = re.compile(r"[A-Za-z][A-Za-z0-9_\-]{2,}")
+_STOP = {"the", "and", "for", "with", "that", "this", "from", "are", "not", "shall", "which", "when", "where", "used",
+         "given", "according", "clause", "otherwise", "than", "each", "also", "into", "only", "both", "then", "case"}
+
+
+def word_changes(old: str | None, new: str, limit: int = 12) -> list[str]:
+    """Removed (-) and added (+) word runs between two texts, with a little context."""
+    if not old:
+        return []
+    a, b = old.split(), new.split()
+    out = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            continue
+        ctx = " ".join(a[max(0, i1 - 4):i1])
+        if i2 > i1:
+            out.append(f"- …{ctx} [{' '.join(a[i1:i2])}]")
+        if j2 > j1:
+            out.append(f"+ …{ctx} [{' '.join(b[j1:j2])}]")
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _terms(text: str) -> set[str]:
+    return {w.lower() for w in _WORD.findall(text)} - _STOP
+
+
+def relevant_lines(covers: list[dict], change: dict, top: int = 6) -> list[str]:
+    """Cover-page lines (combined CRs list one correction per line) ranked by overlap with the change."""
+    focus = _terms(" ".join(change.get("changes") or [])) or _terms(change["text"])
+    focus |= _terms(change.get("title") or "")
+    scored = []
+    for c in covers:
+        for field in ("summary", "reason", "consequences"):
+            for line in re.split(r"\n|(?<=[.;])\s+(?=[A-Z])", c.get(field) or ""):
+                line = line.strip()
+                n = len(focus & _terms(line))
+                if n >= 2 and len(line) > 15:
+                    scored.append((n, f"[CR{c.get('cr', '')} {field}] {line}"))
+    scored.sort(key=lambda x: -x[0])
+    seen, out = set(), []
+    for _, line in scored:
+        if line not in seen:
+            seen.add(line)
+            out.append(line)
+    return out[:top]
+
+
+def draft_crs(hit: list[dict], clause: str, cache_dir, session=None, max_per_cr: int = 40) -> list[dict]:
+    """Individual draft CRs listed in combined CRs that changed ``clause`` (their own covers say what and why)."""
+    from . import crdocs
+
+    out = []
+    for c in hit:
+        d = c["detail"]
+        for tdoc in crdocs.listed_tdocs(d)[:max_per_cr]:
+            try:
+                sub = crdocs.fetch_draft_cr(tdoc, d, cache_dir, session)
+            except Exception:  # a missing or broken Tdoc must not stop the summary
+                sub = None
+            if sub and any(_touches(x, clause) for x in sub.get("clauses") or []):
+                out.append({**sub, "parent_cr": c["cr"]})
+    return out
+
+
 def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None = None,
                progress: Callable[[int, int], None] | None = None, limit: int | None = None,
                clause_key: str | None = None, skip_uncovered: bool = False,
-               skip_hashes: set[str] | frozenset = frozenset(), only_hashes: set[str] | None = None) -> dict:
+               skip_hashes: set[str] | frozenset = frozenset(), only_hashes: set[str] | None = None,
+               resolve_drafts: bool = True) -> dict:
     """``limit`` caps the LLM requests; ``skip_uncovered`` leaves changes no CR explains (front matter,
     copyright year ...) to the rules; ``skip_hashes`` are blocks that already have a summary;
     ``only_hashes`` restricts the pack to those blocks (e.g. the texts a clause shows today)."""
@@ -98,7 +167,13 @@ def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None 
             capped += 1
         elif model is not None and not stopped:
             asked += 1
-            ctx = {**ch, "cr_covers": [c["detail"] for c in hit]}
+            ctx = {**ch, "cr_covers": [{**c["detail"], "cr": c["cr"]} for c in hit],
+                   "changes": word_changes(ch["old_text"], ch["text"])}
+            ctx["relevant_lines"] = relevant_lines(ctx["cr_covers"], ctx)
+            if resolve_drafts and hit:
+                ctx["draft_covers"] = draft_crs(hit, ch["clause"], lib.path.parent / "cache")
+                ch["draft_crs"] = [{"tdoc": d["wg_tdoc"], "title": d["title"], "parent_cr": d["parent_cr"],
+                                    "meeting": d.get("meeting_folder", "").rsplit("/", 1)[-1]} for d in ctx["draft_covers"]]
             try:
                 ch["intent"] = model.intent(ctx)
             except QuotaExceeded as e:  # every later request would fail the same way

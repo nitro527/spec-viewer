@@ -35,6 +35,7 @@ class IntentRequest(BaseModel):
     clause_key: str | None = None  # one clause (blocks shown in this version), else the whole version
     limit: int | None = 20
     skip_uncovered: bool = True
+    force: bool = False  # summarize again even where a summary exists (e.g. after better evidence is available)
 
 
 class FetchRequest(BaseModel):
@@ -277,7 +278,8 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 left = None if req.limit is None else max(req.limit - asked, 0)  # the limit is per job
                 pack = build_pack(reader, req.spec, v, model, progress=prog, limit=left,
                                   clause_key=req.clause_key, skip_uncovered=req.skip_uncovered,
-                                  skip_hashes=reader.intent_hashes(req.spec, v), only_hashes=current)
+                                  skip_hashes=set() if req.force else reader.intent_hashes(req.spec, v),
+                                  only_hashes=current)
                 with lock:
                     made += lib.merge_pack(pack)
                 errors += [c["intent_error"] for c in pack["changes"] if c.get("intent_error")]

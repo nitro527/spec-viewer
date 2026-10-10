@@ -75,6 +75,7 @@ export interface Annotation {
   clause: string; raw_hash: string; change: string; version: string; generated?: string;
   crs: { cr: string; tdoc: string; subject: string }[]; features: string[];
   agreements: { meeting?: string; text: string; source?: string }[]; intent: Intent | null; intent_error?: string;
+  draft_crs?: { tdoc: string; title: string; parent_cr: string; meeting: string }[];
 }
 
 export interface Note { clause_key: string; bookmark: number; text: string; version: string | null; updated: string }
@@ -88,7 +89,7 @@ export interface LlmSettings extends LlmProviderSettings {
   presets: Record<string, { base_url: string; model: string }>;
 }
 export interface LlmForm { provider?: string; base_url?: string; model?: string; api_key?: string; clear_key?: boolean }
-export interface IntentRequest { spec: string; version: string; clause_key?: string; limit?: number | null; skip_uncovered?: boolean }
+export interface IntentRequest { spec: string; version: string; clause_key?: string; limit?: number | null; skip_uncovered?: boolean; force?: boolean }
 
 export interface Job { id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[]; kind?: "intent" }
 
