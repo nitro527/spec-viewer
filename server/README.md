@@ -12,8 +12,14 @@ specview --home ./lib fetch-features
 # 2) pack 생성 (규칙 기반: CR 매핑 + 38.822 feature)
 specview-annotate --out packs build 38.211 --library ./lib/library.sqlite
 
-# 2') + Claude 변경 의도 요약 (ANTHROPIC_API_KEY 또는 `ant auth login` 필요, 비용 발생)
-specview-annotate --out packs build 38.211 --library ./lib/library.sqlite --version 16.1.0 --llm
+# 2') + 변경 의도 요약 (LLM 선택)
+#   사내 로컬 LLM (OpenAI 호환 API: vLLM / SGLang / Ollama / LM Studio 등)
+specview-annotate --out packs build 38.211 --library ./lib/library.sqlite --version 16.1.0 \
+    --llm openai --llm-base-url http://<사내LLM서버>:8000/v1 --llm-model glm-5.3      # 키가 필요하면 LLM_API_KEY
+#   Gemini (GEMINI_API_KEY)
+specview-annotate ... --llm gemini --llm-model gemini-3.8-flash --limit 10          # --limit: 처음 N개만 시험
+#   Claude (ANTHROPIC_API_KEY 또는 `ant auth login`)
+specview-annotate ... --llm claude
 
 # 3) 배포
 specview-annotate --out packs serve --port 8800
@@ -37,6 +43,9 @@ specview-annotate --out packs serve --port 8800
 ## 구성
 
 - `pack.py` — 버전별 변경 블록 추출, CR/feature 매핑, intent 모델 호출
-- `llm.py` — Claude(`claude-opus-5-5`) structured output 으로 의도 요약, 안전 거절 시 서버측 fallback
+- `prompting.py` — 모든 모델이 공유하는 프롬프트와 출력 스키마
+- `llm_openai.py` — OpenAI 호환 chat-completions (로컬 GLM 등, Gemini). json_schema 미지원 서버는 JSON 모드로 자동 전환,
+  `<think>` 블록·코드펜스 제거
+- `llm.py` — Claude(`claude-opus-5-5`) structured output, 안전 거절 시 서버측 fallback
 - `chairnotes.py` — RAN1 Chairman's notes 연결 (골격)
 - `app.py` — `GET /v1/packs`, `GET /v1/packs/{spec}/{version}.json`

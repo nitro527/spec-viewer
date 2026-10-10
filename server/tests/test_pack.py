@@ -72,3 +72,38 @@ def test_claude_model_request_shape():
     assert out["cr"] == "0123" and out["model"] == "claude-opus-5-5"
     assert calls["model"] == "claude-opus-5-5" and calls["output_config"]["format"]["type"] == "json_schema"
     assert calls["fallbacks"] == "default"
+
+
+def test_openai_compatible_model(monkeypatch):
+    from annotation_server.llm_openai import OpenAICompatIntentModel, _parse_json
+
+    sent = []
+
+    class Resp:
+        def __init__(self, code, body):
+            self.status_code, self._body = code, body
+
+        def json(self):
+            return self._body
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(self.status_code)
+
+    class Session:
+        def post(self, url, json, headers, timeout):
+            sent.append((url, json["response_format"]["type"], headers.get("Authorization")))
+            if json["response_format"]["type"] == "json_schema":
+                return Resp(400, {})  # server without json_schema support
+            content = '<think>reasoning</think>```json\n{"summary":"s","motivation":"m","impact":"i","cr":"0123","confidence":"low"}\n```'
+            return Resp(200, {"model": "glm-5.3", "choices": [{"message": {"content": content}}]})
+
+    m = OpenAICompatIntentModel("http://llm:8000/v1/", "glm-5.3", api_key="k", session=Session())
+    out = m.intent({"clause": "4.3.1", "title": "Frames", "change": "added", "text": "t", "cr_covers": []})
+    assert out["cr"] == "0123" and out["model"] == "glm-5.3"
+    assert [s[1] for s in sent] == ["json_schema", "json_object"]
+    assert sent[0][0] == "http://llm:8000/v1/chat/completions" and sent[0][2] == "Bearer k"
+    assert _parse_json('noise {"a": 1} tail') == {"a": 1}
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    g = OpenAICompatIntentModel.from_preset("gemini")
+    assert g.api_key == "g" and g.base_url.endswith("/v1beta/openai")

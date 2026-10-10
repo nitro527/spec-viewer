@@ -61,9 +61,9 @@ def changed_blocks(lib: Library, spec: str, version: str) -> list[dict]:
 
 
 def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None = None,
-               progress: Callable[[int, int], None] | None = None) -> dict:
+               progress: Callable[[int, int], None] | None = None, limit: int | None = None) -> dict:
     crs = [c for c in lib.crs(spec, version) if c["detail"]]
-    changes = changed_blocks(lib, spec, version)
+    changes = changed_blocks(lib, spec, version)[:limit]
     for n, ch in enumerate(changes, 1):
         hit = [c for c in crs if any(_touches(x, ch["clause"]) for x in c["detail"]["clauses"])]
         ch["crs"] = [{"cr": c["cr"], "rev": c["rev"], "tdoc": c["tdoc"], "wg_tdoc": c["detail"]["wg_tdoc"],
@@ -77,7 +77,11 @@ def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None 
         ch["intent"] = None
         if model is not None:
             ctx = {**ch, "cr_covers": [c["detail"] for c in hit]}
-            ch["intent"] = model.intent(ctx)
+            try:
+                ch["intent"] = model.intent(ctx)
+            except Exception as e:  # one bad response must not lose the whole pack
+                ch["intent"] = None
+                ch["intent_error"] = str(e)[:300]
         if progress:
             progress(n, len(changes))
     for ch in changes:
