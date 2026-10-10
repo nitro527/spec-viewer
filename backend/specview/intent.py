@@ -113,7 +113,10 @@ def _http_error(r) -> LLMError:
     detail = f" — {detail[0][:200]}" if detail else ""
     hint = {401: "API 키가 잘못됐습니다", 403: "API 키에 권한이 없습니다",
             404: "서버 주소 또는 모델 이름을 확인하세요", 429: "요청이 너무 많습니다. 잠시 후 다시 시도하세요"}
-    return LLMError(f"{hint.get(r.status_code, f'LLM 서버 오류 {r.status_code}')}{detail}")
+    text = hint.get(r.status_code, f"LLM 서버 오류 {r.status_code}")
+    if r.status_code == 400 and re.search(r"api[ _-]?key", detail, re.I):  # Gemini answers a bad key with 400
+        text = hint[401]
+    return LLMError(f"{text}{detail}")
 
 
 class OpenAICompatIntentModel:
@@ -159,7 +162,8 @@ class OpenAICompatIntentModel:
             body["response_format"] = {"type": "json_object"}
         for attempt in range(4):
             r = self._post(body)
-            if r.status_code == 400 and structured and self._schema_mode == "json_schema":
+            if (r.status_code == 400 and structured and self._schema_mode == "json_schema"
+                    and not re.search(r"api[ _-]?key", str(_error_body(r).get("message", "")), re.I)):
                 self._schema_mode = "json_object"  # older servers: fall back to plain JSON mode
                 return self._request(messages)
             if r.status_code == 429:
@@ -196,7 +200,7 @@ class OpenAICompatIntentModel:
         t = time.monotonic()
         data = self._request([{"role": "user", "content": "Reply with the single word: OK"}], structured=False)
         text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-        return {"model": data.get("model") or self.model, "reply": text.strip()[:100],
+        return {"model": data.get("model") or self.model, "reply": _THINK.sub("", text).strip()[:100],
                 "seconds": round(time.monotonic() - t, 1)}
 
     def list_models(self) -> list[str]:

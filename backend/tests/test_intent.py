@@ -103,3 +103,36 @@ def test_llm_settings_and_intent_job(library, monkeypatch, tmp_path):
     run(limit=None)  # already summarized blocks are not requested again
     assert len(seen) == len(library.intent_hashes("99.211", "16.1.0"))
     assert c.put("/api/llm", json={"clear_key": True}).json()["has_key"] is False
+
+
+def test_gemini_bad_key_400_and_think_in_ping():
+    class Session:
+        def __init__(self, resp):
+            self.resp, self.n = resp, 0
+
+        def post(self, url, json, headers, timeout):
+            self.n += 1
+            return self.resp
+
+    bad = Session(Resp(400, [{"error": {"message": "API key not valid. Please pass a valid API key."}}]))
+    with pytest.raises(intent.LLMError, match="^API 키가 잘못됐습니다"):
+        intent.OpenAICompatIntentModel("https://x", "m", "k", session=bad).intent(
+            {"clause": "1", "title": "t", "change": "added", "text": "x"})
+    assert bad.n == 1  # a key error is not mistaken for missing json_schema support
+    ok = Session(Resp(200, {"choices": [{"message": {"content": "<think>hmm</think>OK"}}]}))
+    assert intent.OpenAICompatIntentModel("https://x", "m", session=ok).ping()["reply"] == "OK"
+
+
+@needs_pandoc
+def test_pack_counts_skips_and_limits(library):
+    class Model:
+        name = "m"
+
+        def intent(self, ch):
+            return {"summary": "s"}
+
+    pack = build_pack(library, "99.211", "16.1.0", Model(), skip_uncovered=False, limit=1)
+    g = pack["generator"]
+    assert g["requested"] == 1 and g["over_limit"] == len(pack["changes"]) - 1
+    one = pack["changes"][0]["raw_hash"]
+    assert [c["raw_hash"] for c in build_pack(library, "99.211", "16.1.0", only_hashes={one})["changes"]] == [one]

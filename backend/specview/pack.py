@@ -69,15 +69,18 @@ def changed_blocks(lib: Library, spec: str, version: str, clause_key: str | None
 def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None = None,
                progress: Callable[[int, int], None] | None = None, limit: int | None = None,
                clause_key: str | None = None, skip_uncovered: bool = True,
-               skip_hashes: set[str] | frozenset = frozenset()) -> dict:
+               skip_hashes: set[str] | frozenset = frozenset(), only_hashes: set[str] | None = None) -> dict:
     """``limit`` caps the LLM requests; ``skip_uncovered`` leaves changes no CR explains (front matter,
-    copyright year ...) to the rules; ``skip_hashes`` are blocks that already have a summary."""
+    copyright year ...) to the rules; ``skip_hashes`` are blocks that already have a summary;
+    ``only_hashes`` restricts the pack to those blocks (e.g. the texts a clause shows today)."""
     crs = [c for c in lib.crs(spec, version) if c["detail"]]
     changes = changed_blocks(lib, spec, version, clause_key)
+    if only_hashes is not None:
+        changes = [ch for ch in changes if ch["raw_hash"] in only_hashes]
     if model is not None:  # only the blocks the model will see, so progress and limit count requests
         changes = [ch for ch in changes if ch["raw_hash"] not in skip_hashes]
     stopped = None
-    asked = 0
+    asked = uncovered = capped = 0
     for n, ch in enumerate(changes, 1):
         hit = [c for c in crs if any(_touches(x, ch["clause"]) for x in c["detail"]["clauses"])]
         ch["crs"] = [{"cr": c["cr"], "rev": c["rev"], "tdoc": c["tdoc"], "wg_tdoc": c["detail"]["wg_tdoc"],
@@ -89,9 +92,11 @@ def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None 
                                  for s in w["sections"] for f in s["features"] if f.get("shared")})
         ch["agreements"] = []  # TODO: chairman's notes (see annotation_server/chairnotes.py)
         ch["intent"] = None
-        wanted = (model is not None and not stopped and (hit or not skip_uncovered)
-                  and (limit is None or asked < limit))
-        if wanted:
+        if model is not None and not hit and skip_uncovered:
+            uncovered += 1
+        elif model is not None and not stopped and limit is not None and asked >= limit:
+            capped += 1
+        elif model is not None and not stopped:
             asked += 1
             ctx = {**ch, "cr_covers": [c["detail"] for c in hit]}
             try:
@@ -108,6 +113,8 @@ def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None 
         ch.pop("text")
         ch.pop("old_text")
     gen = {"intent_model": getattr(model, "name", None)}
+    if model is not None:
+        gen.update(requested=asked, skipped_uncovered=uncovered, over_limit=capped)
     if stopped:
         gen["stopped"] = stopped
     return {

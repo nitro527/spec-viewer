@@ -241,21 +241,24 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             if req.clause_key:  # blocks of the clause as shown, each under the version that introduced it
                 clause = next((c for c in reader.clauses(req.spec, req.version, 0, 100000)
                                if c["key"] == req.clause_key), None)
-                versions = sorted({b["changed"] for b in clause["blocks"] if b["changed"]} if clause else set(),
-                                  key=lambda v: Version.parse(v).sort_key)
+                blocks = clause["blocks"] if clause else []
+                versions = sorted({b["changed"] for b in blocks if b["changed"]}, key=lambda v: Version.parse(v).sort_key)
+                current = {b["raw_hash"] for b in blocks}  # not texts the clause replaced again later
             else:
-                versions = [req.version]
-            made, errors, stopped = 0, [], None
+                versions, current = [req.version], None
+            made, errors, stopped, uncovered, capped = 0, [], None, 0, 0
             for v in versions:
                 def prog(i, n):
                     job["done"], job["total"] = i, n
                     job["message"] = f"{req.spec} v{v}: AI 요약 {i}/{n}"
                 pack = build_pack(reader, req.spec, v, model, progress=prog, limit=req.limit,
                                   clause_key=req.clause_key, skip_uncovered=req.skip_uncovered,
-                                  skip_hashes=reader.intent_hashes(req.spec, v))
+                                  skip_hashes=reader.intent_hashes(req.spec, v), only_hashes=current)
                 with lock:
                     made += lib.merge_pack(pack)
                 errors += [c["intent_error"] for c in pack["changes"] if c.get("intent_error")]
+                uncovered += pack["generator"]["skipped_uncovered"]
+                capped += pack["generator"]["over_limit"]
                 if stopped := pack["generator"].get("stopped"):
                     break
             msg = f"AI 요약 {made}개 만듦 ({model.name})"
@@ -265,6 +268,12 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 msg += f" · 실패 {len(errors)}개: {errors[0]}"
             elif not versions:
                 msg = "이 절에는 변경된 문단이 없습니다"
+            if capped:
+                msg += f" · 최대 요청 수에 걸려 {capped}개 남음 (다시 시작하면 이어서 함)"
+            if uncovered:
+                msg += f" · CR 이 연결되지 않은 변경 {uncovered}개 건너뜀"
+                if not made and not errors and not stopped:
+                    msg += " ('CR 이 연결되지 않은 변경 건너뛰기'를 끄면 요청합니다)"
             job["state"] = "error" if (stopped or errors) and not made else "done"
             job["message"] = msg
         except Exception as e:
