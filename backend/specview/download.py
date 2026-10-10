@@ -64,6 +64,24 @@ def list_remote(spec: str, session: requests.Session | None = None) -> list[Remo
     return [found[v] for v in sorted(found)]
 
 
+_REPORT_ROW = re.compile(r"<td[^>]*>\s*(TS|TR)\s*<a[^>]*>([\d.\-]+)</a>.*?</td>\s*<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>",
+                         re.S)
+
+
+def catalog(series: str, session: requests.Session | None = None) -> list[dict]:
+    """Every TS/TR of a series with its title, from 3GPP's series report (e.g. dynareport/38-series.htm)."""
+    import html as _html
+
+    s = session or new_session()
+    r = s.get(f"https://www.3gpp.org/dynareport/{series}-series.htm", timeout=60)
+    r.raise_for_status()
+    rows = [{"number": num, "type": typ, "title": " ".join(_html.unescape(re.sub(r"<[^>]+>", "", title)).split()),
+             "withdrawn": "WITHDRAWN" in flag.upper()}
+            for typ, num, title, flag in _REPORT_ROW.findall(r.text)]
+    parents = {n["number"].rsplit("-", 1)[0] for n in rows if "-" in n["number"]}
+    return [x for x in rows if x["number"] not in parents]  # 38.101 itself only exists as 38.101-1, -2 ...
+
+
 def is_draft(v: Version) -> bool:
     """0.x/1.x/2.x are pre-approval drafts (major 3+ only after TSG approval)."""
     return v.major < 3
@@ -83,12 +101,14 @@ def select(versions: Iterable[RemoteVersion], releases: set[int] | None = None,
 
 
 # Large specs (e.g. TS 36.211 since Rel-14) ship as several documents: 36211-ef0_cover.docx, _s00-s05, _s06-s08 ...
-_PART = re.compile(r"_(cover|s\d+-s\w+)\.docx?$", re.I)
+_PART = re.compile(r"_(cover|s\w+-s\w+)\.docx?$", re.I)  # s00-s05, s09-sxx, sA0606-sA0611, sB01-sXX
 
 
 def _word_parts(z: zipfile.ZipFile) -> list[str]:
     names = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc"))]
-    parts = sorted(n for n in names if _PART.search(n))  # "_cover" sorts before "_s00"
+    # natural order: 38133-k10_2_s8 before 38133-k10_10_sA06; "_cover" before "_s00"
+    parts = sorted((n for n in names if _PART.search(n)),
+                   key=lambda n: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", n)])
     if len(parts) > 1:
         return parts
     return [max(names, key=lambda n: z.getinfo(n).file_size)] if names else []  # main body, not cover sheets

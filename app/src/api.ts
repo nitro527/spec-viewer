@@ -4,6 +4,7 @@ export interface SpecInfo {
   number: string; title: string | null; versions: number; latest: string | null;
   first: string | null; releases: number[]; crs: number;
 }
+export interface CatalogSpec { number: string; type: "TS" | "TR"; title: string; withdrawn: boolean }
 export interface VersionInfo { id: number; version: string; release: number }
 export type HistoryEntry = [version: string, change: "added" | "modified" | "moved", movedFrom?: string];
 
@@ -123,6 +124,7 @@ export const api = {
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
   stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),
   jobs: () => get<Job[]>("/api/jobs"),
+  catalog: (series: string) => get<CatalogSpec[]>(`/api/catalog/${s(series)}`),
   notes: (spec: string) => get<Note[]>(`/api/specs/${s(spec)}/notes`),
   saveNote: async (spec: string, key: string, body: { bookmark?: boolean; text?: string; version?: string }) => {
     const r = await fetch(`/api/specs/${s(spec)}/notes/${s(key)}`, {

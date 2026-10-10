@@ -27,3 +27,15 @@ def test_split_spec_parts_extracted_in_order(tmp_path):
     assert download._cached_parts(zp, tmp_path) == got
     got[2].unlink()  # an older run kept only one part: extract again
     assert download._cached_parts(zp, tmp_path) is None
+
+
+def test_numbered_parts_in_natural_order(tmp_path):
+    names = ["38133-k10_10_sA0606-sA0611.docx", "38133-k10_0_cover.docx", "38133-k10_2_s8-s8.docx",
+             "38133-k10_1_s0-s7.docx", "38133-k10_21_sB01-sXX.docx"]
+    zp = tmp_path / "38133-k10.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        for n in names:
+            z.writestr(n, b"x")
+    with zipfile.ZipFile(zp) as z:
+        assert download._word_parts(z) == ["38133-k10_0_cover.docx", "38133-k10_1_s0-s7.docx", "38133-k10_2_s8-s8.docx",
+                                           "38133-k10_10_sA0606-sA0611.docx", "38133-k10_21_sB01-sXX.docx"]

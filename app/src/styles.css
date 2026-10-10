@@ -339,3 +339,22 @@ input.num { width: 56px; margin: 0 4px; }
 .ff-num { font-weight: 600; }
 .ff-via { grid-column: 2; display: flex; gap: 6px; flex-wrap: wrap; color: var(--muted); }
 .ff-term { background: var(--ins); color: var(--ins-text); border-radius: 4px; padding: 0 5px; }
+.home { max-width: 1100px; }
+.catalog { margin: 8px 0 12px; }
+.catalog > .row { margin-bottom: 8px; }
+.catalog-search { flex: 1; max-width: 320px; padding: 4px 8px; }
+.catalog-group { margin: 6px 0; }
+.catalog-group summary { cursor: pointer; list-style: none; }
+.catalog-group summary::before { content: "▸ "; color: var(--muted); }
+.catalog-group[open] summary::before { content: "▾ "; }
+.catalog-group h4 { display: inline; font-size: 13px; margin: 0; }
+.catalog-group > h4 { display: block; margin-bottom: 4px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 4px; }
+.chip { display: inline-flex; align-items: baseline; gap: 6px; max-width: 320px; padding: 4px 9px; border-radius: 14px; text-align: left; }
+.chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chip.on .chip-title { color: #fff; opacity: 0.85; }
+.chip.withdrawn { opacity: 0.55; text-decoration: line-through; }
+.chip-title { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chip-have { color: var(--ins-text); font-size: 11px; }
+.chip.on .chip-have { color: #fff; }
+.picked { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
