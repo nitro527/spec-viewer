@@ -69,7 +69,26 @@ def norm_text(text: str) -> str:
     return _WS.sub(" ", text).strip()
 
 
+def _normalize(el) -> None:
+    """Drop presentation-only attributes that vary between versions without any text change.
+
+    pandoc emits table widths and odd/even row classes depending on Word layout
+    details; keeping them would flag unchanged tables as modified.
+    """
+    for node in el.iter():
+        if not isinstance(node.tag, str):
+            continue
+        if "style" in node.attrib and not (node.tag == "img" and "eq-img" in (node.get("class") or "")):
+            del node.attrib["style"]
+        if node.tag == "tr":
+            node.attrib.pop("class", None)
+        if node.tag in ("td", "th"):
+            for a in ("width", "align", "valign"):
+                node.attrib.pop(a, None)
+
+
 def _serialize(el) -> str:
+    _normalize(el)
     s = etree.tostring(el, encoding="unicode", method="html", with_tail=False)
     return _WS.sub(" ", s).strip()
 
