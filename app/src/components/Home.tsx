@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { api, type Job, type SpecInfo } from "../api";
 import { LlmPanel } from "./LlmPanel";
 
-const RELEASES = [15, 16, 17, 18, 19, 20];
+const RELEASES = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];  // LTE from Rel-8, NR from Rel-15
 
 export function Home({ prefill, active, onOpen }: { prefill?: string; active: boolean; onOpen: (spec: string) => void }) {
   const [specs, setSpecs] = useState<SpecInfo[] | null>(null);
@@ -32,8 +32,8 @@ export function Home({ prefill, active, onOpen }: { prefill?: string; active: bo
   }, [running]);
 
   const start = async () => {
-    const list = input.split(/[\s,;]+/).map((s) => s.trim()).filter((s) => /^\d{2}\.\d{3}$/.test(s));
-    if (!list.length) return setError("스펙 번호를 38.211 형식으로 입력하세요");
+    const list = input.split(/[\s,;]+/).map((s) => s.trim()).filter((s) => /^\d{2}\.\d{3}(-\d{1,2})?$/.test(s));
+    if (!list.length) return setError("스펙 번호를 38.211 (또는 38.101-1) 형식으로 입력하세요");
     setError(null);
     try {
       const job = await api.fetchSpecs(list, rels.length ? rels : null, latestOnly);
@@ -64,7 +64,7 @@ export function Home({ prefill, active, onOpen }: { prefill?: string; active: bo
         <h2>스펙 다운로드</h2>
         <p className="muted small">3GPP archive 에서 선택한 스펙의 모든 버전을 받아 변환하고 버전 이력을 계산합니다.</p>
         <div className="dl-form">
-          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="38.211, 38.212, 38.213, 38.214" />
+          <input value={input} onChange={(e) => setInput(e.target.value)} placeholder="38.211, 38.212, 36.211, 38.101-1" />
           <div className="rels">
             {RELEASES.map((r) => (
               <label key={r}>

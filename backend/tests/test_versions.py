@@ -18,3 +18,9 @@ def test_archive_name():
 
 def test_ordering():
     assert Version.parse("16.10.0") > Version.parse("16.9.0") > Version.parse("15.12.0")
+
+
+def test_archive_name_with_part_number():
+    assert parse_archive_name("38101-1-k10.zip") == ("38.101-1", Version(20, 1, 0))
+    assert parse_archive_name("36211-890.zip") == ("36.211", Version(8, 9, 0))
+    assert parse_archive_name("38101-121.zip") == ("38.101", Version(1, 2, 1))

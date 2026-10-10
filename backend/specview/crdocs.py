@@ -77,7 +77,7 @@ def meeting_folder(tdoc: str, meeting: str) -> str | None:
     if prefix not in _TSG:
         return None
     path, folder, _ = _TSG[prefix]
-    m = re.search(r"#\s*(\d+)\s*(-?e)?", meeting, re.I)
+    m = re.search(r"(\d+)\s*(-?e)?\s*$", meeting.strip(), re.I)  # "RAN#87-e", "RAN_46" (older Change histories)
     if not m:
         return None
     return f"{FTP}/{path}/{folder}{m.group(1)}{'e' if m.group(2) else ''}"
@@ -163,11 +163,11 @@ def fetch_pack(tdoc: str, meeting: str, cache_dir: Path, session: requests.Sessi
 
 
 def find_cr_doc(pack: Path, spec: str, cr: str, out_dir: Path) -> Path | None:
-    """Extract the .docx for ``spec`` CR ``cr`` from a CR pack (or a single-CR Tdoc)."""
+    """Extract the .docx for ``spec`` CR ``cr`` from a CR pack (or a single-CR Tdoc); older packs hold .doc files."""
     digits = spec_digits(spec)
     want = re.compile(rf"{digits}[_-]?CR0*{int(cr)}\D", re.I) if cr.isdigit() else None
     with zipfile.ZipFile(pack) as z:
-        docs = [n for n in z.namelist() if n.lower().endswith(".docx") and "cover" not in n.lower()]
+        docs = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc")) and "cover" not in n.lower()]
         pick = next((n for n in docs if want and want.search(n)), None)
         if pick is None and len(docs) == 1:
             pick = docs[0]
@@ -175,5 +175,11 @@ def find_cr_doc(pack: Path, spec: str, cr: str, out_dir: Path) -> Path | None:
             return None
         out = Path(out_dir) / Path(pick).name
         out.parent.mkdir(parents=True, exist_ok=True)
+        if out.suffix.lower() == ".doc" and out.with_suffix(".docx").exists():
+            return out.with_suffix(".docx")
         out.write_bytes(z.read(pick))
-        return out
+    if out.suffix.lower() == ".doc":
+        from .download import _convert_doc
+
+        return _convert_doc(out)
+    return out

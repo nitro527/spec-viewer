@@ -112,3 +112,17 @@ def test_crs_attach_to_next_library_version(library):
     finally:
         with library.db:
             library.db.execute("DELETE FROM cr WHERE cr='0130'")
+
+
+def test_merge_split_parts():
+    from specview.parse_docx import Block, Clause, ParsedSpec, merge_parts
+
+    b = lambda t: Block("p", "", f"<p>{t}</p>", t)  # noqa: E731
+    cover = ParsedSpec("LTE; Physical channels", [Clause("front", "", "Front matter", 0, [b("3GPP TS 36.211")])], {})
+    p1 = ParsedSpec(None, [Clause("foreword", "", "Foreword", 1, [b("fw")]), Clause("1", "1", "Scope", 1, [b("s")])], {})
+    p2 = ParsedSpec(None, [Clause("front", "", "Front matter", 0, [b("cont")]), Clause("6", "6", "Downlink", 1),
+                           Clause("1", "1", "Scope", 1)], {})
+    m = merge_parts([cover, p1, p2])
+    assert m.title == "LTE; Physical channels"
+    assert [c.key for c in m.clauses] == ["front", "foreword", "1", "6", "1~2"]
+    assert [x.text for x in m.clauses[2].blocks] == ["s", "cont"]  # text before p2's first heading continues §1

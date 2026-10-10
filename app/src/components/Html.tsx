@@ -4,8 +4,8 @@ import { memo, useLayoutEffect, useRef } from "react";
 
 const XREF = new RegExp(
   String.raw`\b([Cc]lauses?|[Ss]ubclauses?|[Aa]nnex)\s+((?:[A-Z]\.)?\d+(?:\.\d+)*|[A-Z])` +
-    String.raw`(?:\s+(?:of|in)\s+(?:\[\d+,\s*)?(?:3GPP\s+)?(?:TS|TR)\s+(\d{2}\.\d{3}))?` +
-    String.raw`|\b(?:3GPP\s+)?(TS|TR)\s+(\d{2}\.\d{3})\b`,
+    String.raw`(?:\s+(?:of|in)\s+(?:\[\d+,\s*)?(?:3GPP\s+)?(?:TS|TR)\s+(\d{2}\.\d{3}(?:-\d{1,2})?))?` +
+    String.raw`|\b(?:3GPP\s+)?(TS|TR)\s+(\d{2}\.\d{3}(?:-\d{1,2})?)\b`,
   "g",
 );
 

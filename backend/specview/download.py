@@ -82,18 +82,39 @@ def select(versions: Iterable[RemoteVersion], releases: set[int] | None = None,
     return vs
 
 
-def _extract_docx(zip_path: Path, out_dir: Path) -> Path:
+# Large specs (e.g. TS 36.211 since Rel-14) ship as several documents: 36211-ef0_cover.docx, _s00-s05, _s06-s08 ...
+_PART = re.compile(r"_(cover|s\d+-s\w+)\.docx?$", re.I)
+
+
+def _word_parts(z: zipfile.ZipFile) -> list[str]:
+    names = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc"))]
+    parts = sorted(n for n in names if _PART.search(n))  # "_cover" sorts before "_s00"
+    if len(parts) > 1:
+        return parts
+    return [max(names, key=lambda n: z.getinfo(n).file_size)] if names else []  # main body, not cover sheets
+
+
+def _extract_docx(zip_path: Path, out_dir: Path) -> list[Path]:
     with zipfile.ZipFile(zip_path) as z:
-        names = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc"))]
+        names = _word_parts(z)
         if not names:
             raise RuntimeError(f"no Word document in {zip_path.name}")
-        name = max(names, key=lambda n: z.getinfo(n).file_size)  # main body, not cover sheets
-        target = out_dir / Path(name).name
-        with z.open(name) as src, open(target, "wb") as dst:
-            shutil.copyfileobj(src, dst)
-    if target.suffix.lower() == ".doc":
-        target = _convert_doc(target)
-    return target
+        targets = []
+        for name in names:
+            target = out_dir / Path(name).name
+            with z.open(name) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            targets.append(target)
+    return [_convert_doc(t) if t.suffix.lower() == ".doc" else t for t in targets]
+
+
+def _cached_parts(zip_path: Path, out_dir: Path) -> list[Path] | None:
+    """The extracted documents of an earlier run, if all of them are there (older runs kept only the largest part)."""
+    if not zip_path.exists():
+        return None
+    with zipfile.ZipFile(zip_path) as z:
+        want = [out_dir / Path(n).with_suffix(".docx").name for n in _word_parts(z)]
+    return want if want and all(p.exists() for p in want) else None
 
 
 # Word (COM) as a fallback on Windows PCs without LibreOffice. 16 = wdFormatXMLDocument (.docx).
@@ -142,15 +163,14 @@ def _raise_legacy(src: Path):
 
 
 def fetch(remote: RemoteVersion, cache_dir: Path, session: requests.Session | None = None,
-          progress: Callable[[int, int], None] | None = None) -> Path:
-    """Download (cached) and return the path of the extracted .docx."""
+          progress: Callable[[int, int], None] | None = None) -> list[Path]:
+    """Download (cached) and return the extracted .docx files of one version (usually one, in order if split)."""
     s = session or new_session()
     d = Path(cache_dir) / remote.spec / str(remote.version)
     d.mkdir(parents=True, exist_ok=True)
-    docs = list(d.glob("*.docx"))
-    if docs:
-        return docs[0]
     zip_path = d / remote.filename
+    if cached := _cached_parts(zip_path, d):
+        return cached
     if not zip_path.exists():
         with s.get(remote.url, stream=True, timeout=120) as r:
             r.raise_for_status()

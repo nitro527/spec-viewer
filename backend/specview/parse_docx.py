@@ -286,7 +286,15 @@ def guess_title(clauses: list[Clause]) -> str | None:
     return None
 
 
-def parse_docx(docx: Path) -> ParsedSpec:
+def parse_docx(docx: Path | list[Path]) -> ParsedSpec:
+    """One spec from a .docx, or from the parts a large spec is split into (cover, s00-s05, s06-s08 ...)."""
+    if isinstance(docx, (list, tuple)):
+        parts = [_parse_one(Path(p)) for p in docx]
+        return merge_parts(parts) if len(parts) > 1 else parts[0]
+    return _parse_one(Path(docx))
+
+
+def _parse_one(docx: Path) -> ParsedSpec:
     with tempfile.TemporaryDirectory() as tmp:
         media = Path(tmp) / "media"
         doc_html = _run_pandoc(Path(docx), media)
@@ -296,3 +304,22 @@ def parse_docx(docx: Path) -> ParsedSpec:
         doc_html = "".join(_serialize(el) for el in root)
     clauses = html_to_clauses(doc_html)
     return ParsedSpec(guess_title(clauses), clauses, assets)
+
+
+def merge_parts(parts: list[ParsedSpec]) -> ParsedSpec:
+    """Concatenate split documents in order; text before a part's first heading continues the previous clause."""
+    clauses: list[Clause] = []
+    seen: dict[str, int] = {}
+    assets: dict[str, Asset] = {}
+    for part in parts:
+        assets.update(part.assets)
+        for i, c in enumerate(part.clauses):
+            if i == 0 and c.key == "front" and clauses:
+                clauses[-1].blocks.extend(c.blocks)
+                continue
+            base = c.key.split("~")[0]
+            n = seen.get(base, 0)
+            seen[base] = n + 1
+            clauses.append(Clause(f"{base}~{n + 1}" if n else base, c.number, c.title, c.level, list(c.blocks)))
+    title = next((p.title for p in parts if p.title), None)
+    return ParsedSpec(title, clauses, assets)
