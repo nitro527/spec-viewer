@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit",
     "electron": "electron .",
     "electron:dev": "cross-env SPECVIEW_UI_URL=http://localhost:5173 electron .",
-    "dist": "npm run build && electron-builder"
+    "dist": "npm run build && electron-builder --win --publish never"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.0",
@@ -62,5 +62,6 @@
     "directories": {
       "output": "release"
     }
-  }
+  },
+  "author": "spec-viewer"
 }
