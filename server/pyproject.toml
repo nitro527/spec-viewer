@@ -1,0 +1,24 @@
+[project]
+name = "specview-annotation-server"
+version = "0.1.0"
+description = "Builds and serves specview annotation packs (CR mapping, UE features, LLM change intent)"
+requires-python = ">=3.10"
+dependencies = [
+  "specview",          # ../backend (pip install -e ../backend)
+  "fastapi>=0.100",
+  "uvicorn>=0.22",
+  "anthropic>=0.70",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+specview-annotate = "annotation_server.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["annotation_server*"]

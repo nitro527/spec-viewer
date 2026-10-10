@@ -1,0 +1,229 @@
+"""Local HTTP API consumed by the viewer UI (served on 127.0.0.1 only)."""
+from __future__ import annotations
+
+import os
+import threading
+import uuid
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from . import download
+from .parse_docx import parse_docx
+from .store import Library
+from .versions import Version
+
+
+def default_home() -> Path:
+    return Path(os.environ.get("SPECVIEW_HOME", Path.home() / ".specview"))
+
+
+class FetchRequest(BaseModel):
+    specs: list[str]
+    releases: list[int] | None = None
+    latest_per_release: bool = False
+    with_crs: bool = True
+    crs_only: bool = False
+
+
+def create_app(home: Path | None = None, static_dir: Path | None = None) -> FastAPI:
+    home = Path(home or default_home())
+    lib = Library(home / "library.sqlite")
+    lock = threading.Lock()
+    jobs: dict[str, dict] = {}
+    app = FastAPI(title="specview")
+
+    def _get(fn, *a):
+        try:
+            with lock:
+                return fn(*a)
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+
+    @app.get("/api/specs")
+    def specs():
+        return _get(lib.specs)
+
+    @app.get("/api/specs/{spec}/versions")
+    def versions(spec: str):
+        return _get(lib.versions, spec)
+
+    @app.get("/api/specs/{spec}/{version}/toc")
+    def toc(spec: str, version: str):
+        return _get(lib.toc, spec, version)
+
+    @app.get("/api/specs/{spec}/{version}/clauses")
+    def clauses(spec: str, version: str, start: int = 0, count: int = 20):
+        return _get(lib.clauses, spec, version, start, min(count, 200))
+
+    @app.get("/api/specs/{spec}/{version}/search")
+    def search(spec: str, version: str, q: str):
+        return _get(lib.search, spec, version, q)
+
+    @app.get("/api/specs/{spec}/crs")
+    def crs(spec: str, version: str | None = None):
+        return _get(lib.crs, spec, version)
+
+    @app.get("/api/specs/{spec}/stats")
+    def stats(spec: str):
+        return _get(lib.stats, spec)
+
+    @app.get("/api/specs/{spec}/{version}/clause/{key}/features")
+    def clause_features(spec: str, version: str, key: str):
+        return _get(lib.clause_features, spec, version, key)
+
+    @app.get("/api/features")
+    def features_status():
+        return _get(lib.features_status)
+
+    def _run_features(job_id: str):
+        job = jobs[job_id]
+        try:
+            job["message"] = "38.822: 최신 버전 확인"
+            rv = download.select(download.list_remote("38.822"))[-1]
+            job["message"] = f"38.822 v{rv.version}: 다운로드"
+            path = download.fetch(rv, home / "cache")
+            job["message"] = f"38.822 v{rv.version}: 변환"
+            parsed = parse_docx(path)
+            with lock:
+                n = lib.import_features(parsed, str(rv.version))
+            job["state"], job["message"], job["done"], job["total"] = "done", f"{n} features", 1, 1
+        except Exception as e:
+            job["state"], job["message"] = "error", str(e)
+
+    @app.post("/api/fetch-features")
+    def fetch_features():
+        job_id = uuid.uuid4().hex[:8]
+        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 1, "message": "starting",
+                        "specs": ["38.822"]}
+        threading.Thread(target=_run_features, args=(job_id,), daemon=True).start()
+        return jobs[job_id]
+
+    @app.get("/api/specs/{spec}/notes")
+    def notes(spec: str):
+        return _get(lib.notes, spec)
+
+    @app.put("/api/specs/{spec}/notes/{key}")
+    def save_note(spec: str, key: str, body: dict):
+        with lock:
+            return lib.save_note(spec, key, body.get("bookmark"), body.get("text"), body.get("version"))
+
+    @app.get("/api/settings")
+    def get_settings():
+        return {"annotation_url": lib.get_setting("annotation_url", os.environ.get("SPECVIEW_ANNOTATION_URL", ""))}
+
+    @app.put("/api/settings")
+    def put_settings(body: dict):
+        if "annotation_url" in body:
+            with lock:
+                lib.set_setting("annotation_url", str(body["annotation_url"]).rstrip("/"))
+        return get_settings()
+
+    @app.post("/api/annotations/sync/{spec}")
+    def sync_annotations(spec: str):
+        base = get_settings()["annotation_url"]
+        if not base:
+            raise HTTPException(400, "annotation server URL is not set")
+        s = download.new_session()
+        try:
+            index = s.get(f"{base}/v1/packs", timeout=30).json()
+            have = {v["version"] for v in lib.versions(spec)}
+            n = 0
+            for item in index:
+                if item["spec"] == spec and item["version"] in have:
+                    pack = s.get(base + item["url"], timeout=120).json()
+                    with lock:
+                        lib.import_pack(pack)
+                    n += 1
+        except Exception as e:
+            raise HTTPException(502, f"annotation server: {e}")
+        return {"packs": n}
+
+    @app.get("/api/specs/{spec}/{version}/clause/{key}/annotations")
+    def clause_annotations(spec: str, version: str, key: str):
+        return _get(lib.clause_annotations, spec, version, key)
+
+    @app.get("/api/specs/{spec}/compare")
+    def compare(spec: str, old: str, new: str, changed_only: bool = True):
+        return _get(lib.compare, spec, old, new, changed_only)
+
+    @app.get("/api/asset/{h}")
+    def asset(h: str):
+        a = _get(lib.asset, h)
+        if not a:
+            raise HTTPException(404)
+        return Response(a[1], media_type=a[0], headers={"Cache-Control": "max-age=31536000, immutable"})
+
+    # ---- downloads (background jobs) ----
+
+    @app.get("/api/remote/{spec}")
+    def remote(spec: str):
+        try:
+            return [{"version": str(r.version), "release": r.version.release, "url": r.url}
+                    for r in download.list_remote(spec)]
+        except Exception as e:  # network / policy errors surface to the UI
+            raise HTTPException(502, f"cannot reach 3GPP archive: {e}")
+
+    def _run_fetch(job_id: str, req: FetchRequest):
+        job = jobs[job_id]
+        try:
+            for spec in req.specs:
+                if req.crs_only:
+                    def prog(i, n, c):
+                        job["done"], job["total"] = i, n
+                        job["message"] = f"{spec}: CR{c['cr']} ({c['tdoc']})"
+                    lib.fetch_cr_details(spec, cache_dir=home / "cache", progress=prog, refetch_missing=True, lock=lock)
+                    continue
+                job["message"] = f"{spec}: listing versions"
+                remote_versions = download.select(download.list_remote(spec),
+                                                  set(req.releases) if req.releases else None,
+                                                  req.latest_per_release)
+                job["total"] += len(remote_versions)
+                for rv in remote_versions:
+                    job["message"] = f"{spec} v{rv.version}: downloading"
+                    path = download.fetch(rv, home / "cache")
+                    job["message"] = f"{spec} v{rv.version}: converting"
+                    parsed = parse_docx(path)
+                    with lock:
+                        lib.add_version(spec, rv.version, parsed, source=rv.url, recompute=False)
+                    job["done"] += 1
+                job["message"] = f"{spec}: computing history"
+                with lock:
+                    lib.recompute_history(spec)
+                if req.with_crs:
+                    def prog(i, n, c):
+                        job["message"] = f"{spec}: CR 표지 {i}/{n} ({c['tdoc']})"
+                    lib.fetch_cr_details(spec, cache_dir=home / "cache", progress=prog, lock=lock)
+            job["state"], job["message"] = "done", "finished"
+        except Exception as e:
+            job["state"], job["message"] = "error", str(e)
+
+    @app.post("/api/fetch")
+    def fetch(req: FetchRequest):
+        job_id = uuid.uuid4().hex[:8]
+        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 0, "message": "starting",
+                        "specs": req.specs}
+        threading.Thread(target=_run_fetch, args=(job_id, req), daemon=True).start()
+        return jobs[job_id]
+
+    @app.get("/api/jobs")
+    def list_jobs():
+        return list(jobs.values())
+
+    @app.get("/api/version-of/{code}")
+    def version_of(code: str):
+        return {"version": str(Version.from_code(code))}
+
+    if static_dir and Path(static_dir).is_dir():
+        static_dir = Path(static_dir)
+        app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
+
+        @app.get("/{path:path}")
+        def spa(path: str):
+            f = static_dir / path
+            return FileResponse(f if path and f.is_file() else static_dir / "index.html")
+
+    return app

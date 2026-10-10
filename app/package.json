@@ -1,0 +1,67 @@
+{
+  "name": "spec-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "description": "3GPP specification version-history viewer",
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "electron": "electron .",
+    "electron:dev": "cross-env SPECVIEW_UI_URL=http://localhost:5173 electron .",
+    "dist": "npm run build && electron-builder --win --publish never"
+  },
+  "dependencies": {
+    "@tanstack/react-virtual": "^3.13.0",
+    "katex": "^0.16.22",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/katex": "^0.16.7",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.0",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.3",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "io.github.nitro527.specviewer",
+    "productName": "Spec Viewer",
+    "files": [
+      "electron/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist",
+        "to": "ui"
+      },
+      {
+        "from": "../backend/dist/specview",
+        "to": "backend"
+      },
+      {
+        "from": "vendor/pandoc",
+        "to": "pandoc"
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "directories": {
+      "output": "release"
+    }
+  },
+  "author": "spec-viewer"
+}

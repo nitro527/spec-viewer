@@ -1,0 +1,57 @@
+name: build-windows
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Backend tests
+        working-directory: backend
+        run: |
+          pip install -e ".[dev]" pyinstaller
+          python -m pytest -q
+
+      - name: Backend executable (PyInstaller)
+        working-directory: backend
+        run: |
+          pyinstaller -y -n specview --onedir --collect-submodules specview --collect-submodules uvicorn --paths . --distpath dist packaging/launcher.py
+          dist/specview/specview.exe --help
+
+      - name: Bundle pandoc
+        shell: pwsh
+        run: |
+          $v = "3.5"
+          Invoke-WebRequest "https://github.com/jgm/pandoc/releases/download/$v/pandoc-$v-windows-x86_64.zip" -OutFile pandoc.zip
+          Expand-Archive pandoc.zip -DestinationPath pandoc-tmp
+          New-Item -ItemType Directory -Force app/vendor/pandoc | Out-Null
+          Copy-Item "pandoc-tmp/pandoc-$v/pandoc.exe" app/vendor/pandoc/
+          app/vendor/pandoc/pandoc.exe --version
+
+      - name: Installer (electron-builder)
+        working-directory: app
+        run: |
+          npm ci
+          npm run dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpecViewer-windows-installer
+          path: app/release/*.exe
+          if-no-files-found: error
