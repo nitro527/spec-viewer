@@ -84,6 +84,13 @@ CREATE TABLE IF NOT EXISTS cr (
   date TEXT, meeting TEXT, tdoc TEXT, cr TEXT, rev TEXT, cat TEXT, subject TEXT,
   UNIQUE(spec, new_version, tdoc, cr, rev)
 );
+CREATE TABLE IF NOT EXISTS cr_detail (
+  spec TEXT NOT NULL, cr TEXT NOT NULL, rev TEXT NOT NULL, tdoc TEXT NOT NULL,
+  status TEXT NOT NULL,            -- ok | missing | error
+  cover TEXT,                      -- JSON of crdocs.CRCover
+  error TEXT,
+  PRIMARY KEY (spec, cr, rev, tdoc)
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS blob_fts USING fts5(hash UNINDEXED, text, tokenize = 'unicode61');
 """
 
@@ -245,11 +252,18 @@ class Library:
         return out
 
     def crs(self, spec: str, version: str | None = None) -> list[dict]:
-        q, args = "SELECT * FROM cr WHERE spec=?", [spec]
+        q = ("SELECT c.*, d.status AS detail_status, d.cover FROM cr c LEFT JOIN cr_detail d "
+             "ON d.spec=c.spec AND d.cr=c.cr AND d.rev=c.rev AND d.tdoc=c.tdoc WHERE c.spec=?")
+        args = [spec]
         if version:
-            q += " AND new_version=?"
+            q += " AND c.new_version=?"
             args.append(version)
-        rows = [dict(r) for r in self.db.execute(q, args)]
+        rows = []
+        for r in self.db.execute(q, args):
+            d = dict(r)
+            cover = json.loads(d.pop("cover") or "null")
+            d["detail"] = cover
+            rows.append(d)
         rows.sort(key=lambda r: Version.parse(r["new_version"]).sort_key)
         return rows
 
@@ -280,6 +294,41 @@ class Library:
                                 "level": r["level"], "introduced": r["introduced"], "changes": changes})
         return {"spec": spec, "latest": vers[-1]["version"] if vers else None,
                 "versions": per_version, "clauses": clauses}
+
+    def fetch_cr_details(self, spec: str, versions: set[str] | None = None, cache_dir: Path | None = None,
+                         progress=None, refetch_missing: bool = False, lock=None) -> dict:
+        """Download CR packs named in the Change history and store parsed cover pages."""
+        import contextlib
+
+        from . import crdocs
+
+        guard = lock or contextlib.nullcontext()
+        cache_dir = Path(cache_dir or self.path.parent / "cache")
+        with guard:
+            rows = self.crs(spec)
+        todo = [c for c in rows if c["cr"] and c["cr"].strip("-") and c["tdoc"]
+                and (not versions or c["new_version"] in versions)
+                and (c["detail_status"] is None or (refetch_missing and c["detail_status"] != "ok"))]
+        session = crdocs.new_session()
+        stats = {"ok": 0, "missing": 0, "error": 0, "total": len(todo)}
+        for i, c in enumerate(todo):
+            status, cover, err = "missing", None, None
+            try:
+                pack = crdocs.fetch_pack(c["tdoc"], c["meeting"], cache_dir, session)
+                if pack:
+                    doc = crdocs.find_cr_doc(pack, spec, c["cr"], cache_dir / "tdocs" / c["tdoc"])
+                    if doc:
+                        cover = crdocs.parse_cover(doc).to_dict()
+                        status = "ok"
+            except Exception as e:  # keep going: one broken Tdoc must not stop the batch
+                status, err = "error", str(e)
+            stats[status] += 1
+            with guard, self.db:
+                self.db.execute("INSERT OR REPLACE INTO cr_detail VALUES (?,?,?,?,?,?,?)",
+                                (spec, c["cr"], c["rev"], c["tdoc"], status, json.dumps(cover) if cover else None, err))
+            if progress:
+                progress(i + 1, len(todo), c)
+        return stats
 
     def asset(self, h: str) -> tuple[str, bytes] | None:
         r = self.db.execute("SELECT mime, data FROM asset WHERE hash=?", (h,)).fetchone()

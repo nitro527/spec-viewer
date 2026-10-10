@@ -50,6 +50,19 @@ def cmd_fetch(args):
             lib.add_version(spec, rv.version, parse_docx(path), source=rv.url, recompute=False)
         print(f"{spec}: computing history")
         lib.recompute_history(spec)
+        if args.with_crs:
+            print(f"{spec}: fetching CR cover pages")
+            print(f"{spec}: {lib.fetch_cr_details(spec, cache_dir=Path(args.home) / 'cache')}")
+
+
+def cmd_fetch_crs(args):
+    lib = _lib(args)
+    for spec in args.specs:
+        def progress(i, n, c):
+            print(f"  [{i}/{n}] v{c['new_version']} CR{c['cr']} {c['tdoc']}")
+        st = lib.fetch_cr_details(spec, set(args.version) if args.version else None,
+                                  Path(args.home) / "cache", progress, args.retry)
+        print(f"{spec}: {st}")
 
 
 def cmd_list(args):
@@ -81,7 +94,14 @@ def main(argv=None):
     p.add_argument("--release", type=int, action="append", help="limit to release(s), repeatable")
     p.add_argument("--latest-per-release", action="store_true")
     p.add_argument("--include-drafts", action="store_true", help="also fetch pre-approval 0.x-2.x drafts")
+    p.add_argument("--with-crs", action="store_true", help="also fetch CR cover pages")
     p.set_defaults(func=cmd_fetch)
+
+    p = sub.add_parser("fetch-crs", help="download CR cover pages (reason, summary, clauses affected)")
+    p.add_argument("specs", nargs="+")
+    p.add_argument("--version", action="append", help="only CRs of these new versions, repeatable")
+    p.add_argument("--retry", action="store_true", help="retry CRs previously not found")
+    p.set_defaults(func=cmd_fetch_crs)
 
     p = sub.add_parser("list", help="list specs in the library")
     p.set_defaults(func=cmd_list)

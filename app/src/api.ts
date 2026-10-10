@@ -20,9 +20,22 @@ export interface Clause extends TocEntry {
   blocks: Block[];
 }
 
+export interface CRDetail {
+  title: string; source_wg: string; wi_code: string; category: string; release: string;
+  reason: string; summary: string; consequences: string; clauses_raw: string; clauses: string[];
+  wg_tdoc: string; current_version: string;
+}
+
 export interface CR {
   spec: string; new_version: string; date: string; meeting: string; tdoc: string;
   cr: string; rev: string; cat: string; subject: string;
+  detail_status: "ok" | "missing" | "error" | null; detail: CRDetail | null;
+}
+
+/** Does a CR (by its "Clauses affected") touch this clause? Parent/child clauses count. */
+export function crTouches(cr: CR, clause: string): boolean {
+  if (!cr.detail || !clause) return false;
+  return cr.detail.clauses.some((c) => c === clause || clause.startsWith(c + ".") || c.startsWith(clause + "."));
 }
 
 export interface DiffBlock {
@@ -63,6 +76,14 @@ export const api = {
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
   stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),
   jobs: () => get<Job[]>("/api/jobs"),
+  fetchCrs: async (spec: string): Promise<Job> => {
+    const r = await fetch("/api/fetch", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specs: [spec], crs_only: true }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
   fetchSpecs: async (specs: string[], releases: number[] | null, latestPerRelease: boolean): Promise<Job> => {
     const r = await fetch("/api/fetch", {
       method: "POST",

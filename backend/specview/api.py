@@ -25,6 +25,8 @@ class FetchRequest(BaseModel):
     specs: list[str]
     releases: list[int] | None = None
     latest_per_release: bool = False
+    with_crs: bool = True
+    crs_only: bool = False
 
 
 def create_app(home: Path | None = None, static_dir: Path | None = None) -> FastAPI:
@@ -94,6 +96,12 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         job = jobs[job_id]
         try:
             for spec in req.specs:
+                if req.crs_only:
+                    def prog(i, n, c):
+                        job["done"], job["total"] = i, n
+                        job["message"] = f"{spec}: CR{c['cr']} ({c['tdoc']})"
+                    lib.fetch_cr_details(spec, cache_dir=home / "cache", progress=prog, refetch_missing=True, lock=lock)
+                    continue
                 job["message"] = f"{spec}: listing versions"
                 remote_versions = download.select(download.list_remote(spec),
                                                   set(req.releases) if req.releases else None,
@@ -110,6 +118,10 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 job["message"] = f"{spec}: computing history"
                 with lock:
                     lib.recompute_history(spec)
+                if req.with_crs:
+                    def prog(i, n, c):
+                        job["message"] = f"{spec}: CR 표지 {i}/{n} ({c['tdoc']})"
+                    lib.fetch_cr_details(spec, cache_dir=home / "cache", progress=prog, lock=lock)
             job["state"], job["message"] = "done", "finished"
         except Exception as e:
             job["state"], job["message"] = "error", str(e)

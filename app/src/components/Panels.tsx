@@ -1,6 +1,6 @@
 // Side panels: table of contents (left) and change information (right).
 import { useEffect, useMemo, useRef, useState } from "react";
-import { cmpVersion, tdocUrl, type CR, type TocEntry } from "../api";
+import { cmpVersion, crTouches, tdocUrl, type CR, type TocEntry } from "../api";
 import type { VersionColor } from "../colors";
 import type { Selection } from "./HistoryView";
 
@@ -86,22 +86,53 @@ export function ChangeRuler({ toc, baseline, onJump }: { toc: TocEntry[]; baseli
   );
 }
 
-function CRList({ crs }: { crs: CR[] }) {
-  if (!crs.length) return <p className="muted small">Change history 에 CR 기록 없음</p>;
+function CRItem({ cr, hit }: { cr: CR; hit?: boolean }) {
+  const d = cr.detail;
   return (
-    <ul className="cr-list">
-      {crs.map((cr, i) => (
-        <li key={i}>
-          <div className="cr-head">
-            {cr.cr ? <b>CR{cr.cr}{cr.rev ? ` r${cr.rev}` : ""}</b> : <b>—</b>}
-            {cr.cat && <span className={`cat cat-${cr.cat}`} title={CAT[cr.cat] ?? ""}>{cr.cat}</span>}
-            {cr.tdoc && <a href={tdocUrl(cr.tdoc)} target="_blank" rel="noreferrer">{cr.tdoc}</a>}
-            <span className="muted">{cr.meeting} {cr.date}</span>
-          </div>
-          <div>{cr.subject}</div>
-        </li>
-      ))}
-    </ul>
+    <li className={hit ? "hit" : ""}>
+      <div className="cr-head">
+        {cr.cr ? <b>CR{cr.cr}{cr.rev && cr.rev !== "-" ? ` r${cr.rev}` : ""}</b> : <b>—</b>}
+        {cr.cat && <span className={`cat cat-${cr.cat}`} title={CAT[cr.cat] ?? ""}>{cr.cat}</span>}
+        {cr.tdoc && <a href={tdocUrl(cr.tdoc)} target="_blank" rel="noreferrer">{cr.tdoc}</a>}
+        {d?.wg_tdoc && <a href={tdocUrl(d.wg_tdoc)} target="_blank" rel="noreferrer" className="muted">{d.wg_tdoc}</a>}
+        <span className="muted">{cr.meeting} {cr.date}</span>
+      </div>
+      <div>{cr.subject}</div>
+      {d && (
+        <div className="cr-detail">
+          {d.wi_code && <span className="wi" title="Work item code">{d.wi_code}</span>}
+          {d.source_wg && <span className="muted small"> · {d.source_wg}</span>}
+          {d.clauses.length > 0 && <div className="small"><span className="muted">Clauses affected:</span> {d.clauses_raw}</div>}
+          <details>
+            <summary className="small">변경 이유 / 요약</summary>
+            {d.reason && <p><b>Reason for change</b><br />{d.reason}</p>}
+            {d.summary && <p><b>Summary of change</b><br />{d.summary}</p>}
+            {d.consequences && <p className="muted"><b>Consequences if not approved</b><br />{d.consequences}</p>}
+          </details>
+        </div>
+      )}
+    </li>
+  );
+}
+
+function CRList({ crs, clause }: { crs: CR[]; clause?: string }) {
+  if (!crs.length) return <p className="muted small">Change history 에 CR 기록 없음</p>;
+  const haveDetail = crs.some((c) => c.detail);
+  if (!clause || !haveDetail) return <ul className="cr-list">{crs.map((cr, i) => <CRItem key={i} cr={cr} />)}</ul>;
+  const hits = crs.filter((c) => crTouches(c, clause));
+  const rest = crs.filter((c) => !crTouches(c, clause));
+  return (
+    <>
+      {hits.length > 0
+        ? <ul className="cr-list">{hits.map((cr, i) => <CRItem key={i} cr={cr} hit />)}</ul>
+        : <p className="muted small">이 절을 “Clauses affected”에 적은 CR이 없습니다.</p>}
+      {rest.length > 0 && (
+        <details className="cr-rest">
+          <summary className="muted small">이 버전의 다른 CR ({rest.length})</summary>
+          <ul className="cr-list">{rest.map((cr, i) => <CRItem key={i} cr={cr} />)}</ul>
+        </details>
+      )}
+    </>
   );
 }
 
@@ -110,15 +141,17 @@ const CAT: Record<string, string> = {
   C: "Functional modification of feature", D: "Editorial modification",
 };
 
-export function InfoPanel({ selection, version, baseline, crsByVersion, colors, onClose }: {
+export function InfoPanel({ selection, version, baseline, crsByVersion, colors, onClose, onFetchCrs, fetching }: {
   selection: Selection | null; version: string; baseline: string; crsByVersion: Map<string, CR[]>;
-  colors: Map<string, VersionColor>; onClose: () => void;
+  colors: Map<string, VersionColor>; onClose: () => void; onFetchCrs?: () => void; fetching?: string | null;
 }) {
+  const hasDetail = [...crsByVersion.values()].some((l) => l.some((c) => c.detail_status));
   const block = selection && selection.block !== null ? selection.clause.blocks[selection.block] : null;
   const history = block ? block.history : selection?.clause.history ?? [];
   const introduced = block ? block.introduced : selection?.clause.introduced;
   return (
     <aside className="info">
+      {fetching && <p className="small job">{fetching}</p>}
       <div className="info-head">
         <b>{selection ? `§${selection.clause.number || selection.clause.title}` : `v${version}`}</b>
         {selection && <button className="link" onClick={onClose}>✕</button>}
@@ -137,19 +170,24 @@ export function InfoPanel({ selection, version, baseline, crsByVersion, colors, 
                 <b>v{v}</b> {t === "moved" ? `에서 §${from} 로부터 이동` : "에서 변경"}
                 <details open={newer(v, baseline)}>
                   <summary className="muted small">이 버전에 반영된 CR ({crsByVersion.get(v)?.length ?? 0})</summary>
-                  <CRList crs={crsByVersion.get(v) ?? []} />
+                  <CRList crs={crsByVersion.get(v) ?? []} clause={selection.clause.number} />
                 </details>
               </li>
             ))}
           </ol>
-          <p className="muted small note">
-            CR → 문단 단위의 정확한 매핑(CR 표지의 “Clauses affected”)과 Tdoc·Chairman’s notes 의 의도 요약은 annotation 서버 단계에서 추가됩니다.
-          </p>
+          {!hasDetail && onFetchCrs && (
+            <p className="small note">CR 표지(변경 이유·Clauses affected)를 아직 받지 않았습니다.{" "}
+              <button className="link" onClick={onFetchCrs}>CR 표지 받기</button></p>
+          )}
         </>
       ) : (
         <>
           <p className="muted small">v{version} 에 반영된 CR</p>
           <CRList crs={crsByVersion.get(version) ?? []} />
+          {!hasDetail && onFetchCrs && (
+            <p className="small note">CR 표지(변경 이유·Clauses affected)를 받으면 절별로 어떤 CR이 수정했는지 표시됩니다.{" "}
+              <button className="link" onClick={onFetchCrs}>CR 표지 받기</button></p>
+          )}
           <p className="muted small note">본문의 문단이나 절 제목을 클릭하면 해당 부분의 버전 이력이 표시됩니다.</p>
         </>
       )}

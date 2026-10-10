@@ -42,6 +42,7 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
   const [tocChangedOnly, setTocChangedOnly] = useState(false);
   const [infoOpen, setInfoOpen] = useState(true);
   const [cmp, setCmp] = useState<[string, string] | null>(null);
+  const [crJob, setCrJob] = useState<string | null>(null);
   const view = useRef<HistoryViewHandle>(null);
   const pendingJump = useRef<string | undefined>(tab.jumpTo);
 
@@ -114,6 +115,17 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
     const e = toc.find((t) => t.number === clause || t.key === clause);
     if (e) jump(e.ord);
   }, [spec, toc, jump, onOpenSpec]);
+
+  const fetchCrs = useCallback(async () => {
+    const job = await api.fetchCrs(spec);
+    setCrJob("CR 표지 받는 중…");
+    const t = setInterval(async () => {
+      const j = (await api.jobs()).find((x) => x.id === job.id);
+      if (!j) return;
+      setCrJob(j.state === "running" ? `CR 표지 받는 중 ${j.done}/${j.total || "?"}` : j.state === "error" ? `실패: ${j.message}` : null);
+      if (j.state !== "running") { clearInterval(t); api.crs(spec).then(setCrs); }
+    }, 1000);
+  }, [spec]);
 
   const onFind = useCallback((h: SearchHit) => jump(h.ord, h.block), [jump]);
 
@@ -189,7 +201,7 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
 
         {infoOpen && (mode === "history" || mode === "clean") && (
           <InfoPanel selection={selection} version={version} baseline={baseline} crsByVersion={crsByVersion}
-                     colors={colors} onClose={() => setSelection(null)} />
+                     colors={colors} onClose={() => setSelection(null)} onFetchCrs={fetchCrs} fetching={crJob} />
         )}
       </div>
 

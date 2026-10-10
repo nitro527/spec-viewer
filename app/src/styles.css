@@ -238,3 +238,11 @@ del { background: var(--del); color: var(--del-text); border-radius: 2px; }
 .move-out .link { color: #6a4fc2; }
 .moved-body { opacity: .6; font-family: var(--doc-font); font-size: 14px; }
 @media (prefers-color-scheme: dark) { .move-tag, .move-out .link { color: #b9a6ff; } }
+
+/* CR detail */
+.cr-list li.hit { background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 4px; padding-left: 6px; padding-right: 6px; }
+.cr-detail { margin-top: 3px; font-size: 12px; }
+.cr-detail details p { margin: 4px 0; white-space: pre-wrap; }
+.cr-detail summary { cursor: pointer; color: var(--accent); }
+.wi { font-size: 10.5px; padding: 0 5px; border-radius: 3px; background: var(--border); font-family: Consolas, monospace; }
+.cr-rest { margin-top: 6px; }
