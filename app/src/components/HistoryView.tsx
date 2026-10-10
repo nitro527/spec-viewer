@@ -163,12 +163,12 @@ function ClauseView({ clause, cite, baseline, highlight, selectedBlock, flashBlo
   );
 }
 
-function Deleted({ html, version }: { html: string; version: string }) {
+function Deleted({ html, version, moved_to }: { html: string; version: string; moved_to?: string }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="deleted" data-bv={version}>
       <button className="link" onClick={(e) => { e.stopPropagation(); setOpen(!open); }}>
-        {open ? "▾" : "▸"} {version} 에서 삭제된 내용
+        {open ? "▾" : "▸"} {moved_to ? `${version} 에서 §${moved_to} 로 이동된 내용` : `${version} 에서 삭제된 내용`}
       </button>
       {open && <Html html={html} className="deleted-body" />}
     </div>

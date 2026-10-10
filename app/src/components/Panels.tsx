@@ -131,10 +131,10 @@ export function InfoPanel({ selection, version, baseline, crsByVersion, colors, 
               <span className="chip" style={{ background: colors.get(introduced ?? "")?.solid }} />
               <b>v{introduced}</b> {block ? "에서 처음 등장" : "에서 절 생성"}
             </li>
-            {history.filter(([, t]) => t === "modified").map(([v]) => (
-              <li key={v} className={newer(v, baseline) ? "" : "dim"}>
+            {history.filter(([, t]) => t !== "added").map(([v, t, from]) => (
+              <li key={`${v}-${t}`} className={newer(v, baseline) ? "" : "dim"}>
                 <span className="chip" style={{ background: colors.get(v)?.solid }} />
-                <b>v{v}</b> 에서 변경
+                <b>v{v}</b> {t === "moved" ? `에서 §${from} 로부터 이동` : "에서 변경"}
                 <details open={newer(v, baseline)}>
                   <summary className="muted small">이 버전에 반영된 CR ({crsByVersion.get(v)?.length ?? 0})</summary>
                   <CRList crs={crsByVersion.get(v) ?? []} />

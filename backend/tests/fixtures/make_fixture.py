@@ -79,8 +79,9 @@ def build(version: str) -> Document:
     _heading(doc, "4.3.1", "Frames and subframes", 3)
     doc.add_paragraph("Downlink, uplink, and sidelink transmissions are organized into frames.")
     _eq(doc, ["T", "f", "=(Δfmax Nf/100)·Tc=10 ms"])
-    if version >= "16.1.0":
-        doc.add_paragraph("For operation with shared spectrum channel access, the frame structure is unchanged.", style="NO")
+    moved_note = "For operation with shared spectrum channel access, the frame structure is unchanged."
+    if "16.1.0" <= version < "16.2.0":
+        doc.add_paragraph(moved_note, style="NO")
 
     _heading(doc, "7", "Downlink", 1)
     _heading(doc, "7.4", "Physical signals", 2)
@@ -95,6 +96,8 @@ def build(version: str) -> Document:
     p._p.append(parse_xml(_omml(["c", "init", "=(2^17)mod 2^31"])))
     if version < "16.1.0":
         doc.add_paragraph("- legacy bullet removed in a later version.", style="B1")
+    if version >= "16.2.0":
+        doc.add_paragraph(moved_note, style="NO")  # moved here from 4.3.1
     if version >= "16.2.0":
         _heading(doc, "7.4.1.1.3", "Mapping for positioning", 5)
         doc.add_paragraph("A new clause added in a late version for positioning, see TS 38.214 clause 5.1.6.5.")

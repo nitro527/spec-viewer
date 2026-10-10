@@ -2,7 +2,7 @@
 
 export interface SpecInfo { number: string; title: string | null; versions: number; latest: string | null }
 export interface VersionInfo { id: number; version: string; release: number }
-export type HistoryEntry = [version: string, change: "added" | "modified"];
+export type HistoryEntry = [version: string, change: "added" | "modified" | "moved", movedFrom?: string];
 
 export interface TocEntry {
   ord: number; key: string; number: string; title: string; level: number;
@@ -16,7 +16,7 @@ export interface Block {
 
 export interface Clause extends TocEntry {
   history: HistoryEntry[];
-  deleted: { after: number; html: string; version: string }[];
+  deleted: { after: number; html: string; version: string; moved_to?: string }[];
   blocks: Block[];
 }
 
@@ -25,7 +25,11 @@ export interface CR {
   cr: string; rev: string; cat: string; subject: string;
 }
 
-export interface DiffBlock { op: "equal" | "replace" | "insert" | "delete"; kind: string; style: string; old: string | null; new: string | null; diff: string }
+export interface DiffBlock {
+  op: "equal" | "replace" | "insert" | "delete" | "move-in" | "move-out";
+  kind: string; style: string; old: string | null; new: string | null; diff: string;
+  moved_from?: string; moved_to?: string;
+}
 export interface DiffClause { key: string; number: string; title: string; old_title: string | null; level: number; status: "added" | "modified" | "removed"; blocks: DiffBlock[] }
 export interface CompareResult { spec: string; old: string; new: string; clauses: DiffClause[]; removed: DiffClause[]; crs: CR[] }
 

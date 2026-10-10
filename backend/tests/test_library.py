@@ -11,7 +11,7 @@ def test_versions_and_toc(library):
     assert [v["version"] for v in library.versions("99.211")] == ["15.0.0", "16.0.0", "16.1.0", "16.2.0"]
     toc = {t["key"]: t for t in library.toc("99.211", "16.2.0")}
     assert toc["7.4.1.1.3"]["status"] == "added"
-    assert toc["4.3.1"]["last_changed"] == "16.1.0"
+    assert toc["4.3.1"]["last_changed"] == "16.2.0"  # note added in 16.1.0, moved out in 16.2.0
     assert toc["1"]["last_changed"] is None
 
 
@@ -28,7 +28,7 @@ def test_deletion_recorded_in_version_it_happened(library):
 
 
 def test_equation_survives(library):
-    c = _clause(library, "16.2.0", "4.3.1")
+    c = _clause(library, "16.1.0", "4.3.1")
     assert any("math inline" in b["html"] for b in c["blocks"])
 
 
@@ -41,7 +41,8 @@ def test_compare(library):
     cmp = library.compare("99.211", "16.0.0", "16.2.0")
     keys = {c["key"]: c["status"] for c in cmp["clauses"]}
     assert keys["7.4.1.1.3"] == "added"
-    assert keys["4.3.1"] == "modified"
+    assert "4.3.1" not in keys  # the note was added and then moved away again: net unchanged
+    assert keys["7.4.1.1.1"] == "modified"
     assert "4.2" not in keys
     assert [c["cr"] for c in cmp["crs"]] == ["0123", "0140"]
 
@@ -62,4 +63,19 @@ def test_stats(library):
     by_v = {v["version"]: v for v in st["versions"]}
     assert by_v["16.2.0"]["added"] == 1 and by_v["16.1.0"]["crs"] == {"F": 1}
     seq = next(c for c in st["clauses"] if c["key"] == "7.4.1.1.1")
-    assert seq["changes"] == ["16.0.0", "16.1.0"]
+    assert seq["changes"] == ["16.0.0", "16.1.0", "16.2.0"]
+
+
+def test_moved_paragraph_keeps_origin(library):
+    c = _clause(library, "16.2.0", "7.4.1.1.1")
+    moved = next(b for b in c["blocks"] if "shared spectrum" in b["html"])
+    assert moved["introduced"] == "16.1.0"
+    assert moved["history"][-1] == ["16.2.0", "moved", "4.3.1"]
+    src = _clause(library, "16.2.0", "4.3.1")
+    assert src["deleted"][0]["moved_to"] == "7.4.1.1.1"
+
+
+def test_compare_marks_moves(library):
+    cmp = library.compare("99.211", "16.1.0", "16.2.0")
+    ops = {(c["key"], b["op"]) for c in cmp["clauses"] for b in c["blocks"]}
+    assert ("4.3.1", "move-out") in ops and ("7.4.1.1.1", "move-in") in ops

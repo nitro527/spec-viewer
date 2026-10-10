@@ -88,6 +88,36 @@ CREATE VIRTUAL TABLE IF NOT EXISTS blob_fts USING fts5(hash UNINDEXED, text, tok
 """
 
 
+def _mark_moves(clauses: list[dict]) -> None:
+    """Pair deletions and insertions of (nearly) the same paragraph in different places as a move."""
+    from .diff import similarity, strip_tags
+
+    dels = [(c, b) for c in clauses for b in c["blocks"] if b["op"] == "delete"]
+    ins = [(c, b) for c in clauses for b in c["blocks"] if b["op"] == "insert"]
+    text = {id(b): " ".join(strip_tags(b["old"] or b["new"] or "").split()) for _, b in dels + ins}
+    used: set[int] = set()
+    for ic, ib in ins:
+        t = text[id(ib)]
+        if len(t) < 40:
+            continue
+        best, best_s = None, 0.8
+        for dc, db in dels:
+            if id(db) in used or dc is ic:
+                continue
+            sc = 1.0 if text[id(db)] == t else similarity(text[id(db)], t)
+            if sc >= best_s:
+                best, best_s = (dc, db), sc
+                if sc == 1.0:
+                    break
+        if best is None:
+            continue
+        dc, db = best
+        used.add(id(db))
+        db["op"], db["moved_to"] = "move-out", ic["number"] or ic["title"]
+        ib["op"], ib["moved_from"] = "move-in", dc["number"] or dc["title"]
+        ib["diff"] = render_diff(db["old"], ib["new"])
+
+
 class Library:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -327,5 +357,6 @@ class Library:
                     "blocks": [{"op": "delete", "kind": x["kind"], "style": x["style"], "old": x["html"], "new": None,
                                 "diff": f"<del>{x['html']}</del>"} for x in bl]}
                    for k, (c, bl) in a.items() if k not in seen]
+        _mark_moves(out + removed)
         return {"spec": spec, "old": old, "new": new, "clauses": out, "removed": removed,
                 "crs": [r for r in self.crs(spec) if Version.parse(old) < Version.parse(r["new_version"]) <= Version.parse(new)]}

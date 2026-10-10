@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
-from .diff import Token, align, opcodes, render_annotated, tokenize
+from .diff import Token, align, opcodes, render_annotated, similarity, tokenize
 from .parse_docx import norm_text
 
 
@@ -39,7 +39,7 @@ class _BlockState:
     origins: list[int]
     introduced: int
     changed: int | None
-    history: list[tuple[int, str]]
+    history: list[tuple]  # (version index, change[, moved-from clause])
 
 
 @dataclass
@@ -98,6 +98,38 @@ def _evolve(prev: _BlockState, b: InBlock, vi: int) -> _BlockState:
     return _BlockState(b, toks, origins, prev.introduced, vi, prev.history + [(vi, "modified")])
 
 
+_MOVE_MIN_CHARS = 40  # short blocks ("where", "-") match by accident
+_MOVE_SIMILARITY = 0.8
+
+
+def _resolve_moves(added: list, gone: list[dict], vi: int) -> None:
+    """Turn delete-here + insert-there pairs into moves that keep the text's origin versions."""
+    by_hash: dict[str, list[dict]] = {}
+    for g in gone:
+        by_hash.setdefault(g["state"].src.raw_hash, []).append(g)
+    for cs, idx, b, number in added:
+        if len(b.text) < _MOVE_MIN_CHARS:
+            continue
+        cand = next((g for g in by_hash.get(b.raw_hash, []) if not g.get("used")), None)
+        if cand is None:
+            best = 0.0
+            for g in gone:
+                if g.get("used") or len(g["state"].src.text) < _MOVE_MIN_CHARS:
+                    continue
+                sc = similarity(g["state"].src.text, b.text)
+                if sc >= _MOVE_SIMILARITY and sc > best:
+                    cand, best = g, sc
+        if cand is None:
+            continue
+        cand["used"] = True
+        src = cand["state"]
+        moved = src if src.src.raw_hash == b.raw_hash else _evolve(src, b, vi)
+        cs.blocks[idx] = _BlockState(b, moved.tokens, moved.origins, src.introduced, vi,
+                                     src.history + [(vi, "moved", cand["number"])])
+        if cand["entry"] is not None:
+            cand["entry"]["moved_to"] = number
+
+
 def _match_renumbered(new: Sequence[InClause], state: dict[str, _ClauseState]) -> dict[str, str]:
     """Map new clause keys that disappeared/appeared to an old key with the same title."""
     new_keys = {c.key for c in new}
@@ -121,8 +153,11 @@ def compute(versions: Sequence[str], clauses_of: Iterable[Sequence[InClause]]) -
     for vi, clauses in enumerate(clauses_of):
         renum = _match_renumbered(clauses, state) if vi else {}
         new_state: dict[str, _ClauseState] = {}
-        out_clauses: list[OutClause] = []
+        pending: list[tuple[InClause, _ClauseState, str, list[dict]]] = []
         used_old: set[str] = set()
+        # Candidates for move detection within this version.
+        added: list[tuple[_ClauseState, int, InBlock, str]] = []  # (clause state, block index, block, clause number)
+        gone: list[dict] = []  # {"state", "number", "entry"} for blocks deleted anywhere in this version
 
         for c in clauses:
             old_key = c.key if c.key in state else renum.get(c.key)
@@ -132,16 +167,22 @@ def compute(versions: Sequence[str], clauses_of: Iterable[Sequence[InClause]]) -
                 blocks = [_fresh(b, vi) for b in c.blocks]
                 cs = _ClauseState(c.title, blocks, vi, vi if vi else None, [(vi, "added")] if vi else [])
                 status = "added" if vi else "base"
+                if vi:
+                    added.extend((cs, i, b, c.number) for i, b in enumerate(c.blocks))
             else:
                 used_old.add(old_key)
                 pairs = align(prev.blocks, c.blocks, key=lambda x: x.src.raw_hash if isinstance(x, _BlockState) else x.raw_hash,
                               text=lambda x: x.src.text if isinstance(x, _BlockState) else x.text)
                 blocks, changed = [], False
+                cs = _ClauseState(c.title, blocks, prev.introduced, None, [])
                 for oi, ni in pairs:
                     if ni is None:
-                        deleted.append({"after": len(blocks) - 1, "html": prev.blocks[oi].src.html, "version": labels[vi]})
+                        entry = {"after": len(blocks) - 1, "html": prev.blocks[oi].src.html, "version": labels[vi]}
+                        deleted.append(entry)
+                        gone.append({"state": prev.blocks[oi], "number": c.number, "entry": entry})
                         changed = True
                     elif oi is None:
+                        added.append((cs, len(blocks), c.blocks[ni], c.number))
                         blocks.append(_fresh(c.blocks[ni], vi))
                         changed = True
                     elif prev.blocks[oi].src.raw_hash == c.blocks[ni].raw_hash:
@@ -151,22 +192,28 @@ def compute(versions: Sequence[str], clauses_of: Iterable[Sequence[InClause]]) -
                         changed = True
                 if norm_text(prev.title) != norm_text(c.title):
                     changed = True
-                hist = prev.history + ([(vi, "modified")] if changed else [])
-                cs = _ClauseState(c.title, blocks, prev.introduced, vi if changed else prev.last_changed, hist)
+                cs.history = prev.history + ([(vi, "modified")] if changed else [])
+                cs.last_changed = vi if changed else prev.last_changed
                 status = "modified" if changed else "unchanged"
             new_state[c.key] = cs
-            out_clauses.append(OutClause(
-                key=c.key, number=c.number, title=c.title, level=c.level, status=status,
-                introduced=labels[cs.introduced], last_changed=lbl(cs.last_changed),
-                history=[(labels[i], t) for i, t in cs.history],
-                blocks=[OutBlock(b.src.kind, b.src.style, b.src.raw_hash,
-                                 render_annotated(b.tokens, b.origins, labels),
-                                 labels[b.introduced], lbl(b.changed),
-                                 [(labels[i], t) for i, t in b.history]) for b in cs.blocks],
-                deleted=deleted,
-            ))
+            pending.append((c, cs, status, deleted))
 
         removed = [{"key": k, "title": s.title} for k, s in state.items() if k not in used_old and k not in new_state]
+        for k in (r["key"] for r in removed):
+            gone.extend({"state": b, "number": k, "entry": None} for b in state[k].blocks)
+        if vi and added and gone:
+            _resolve_moves(added, gone, vi)
+
+        out_clauses = [OutClause(
+            key=c.key, number=c.number, title=c.title, level=c.level, status=status,
+            introduced=labels[cs.introduced], last_changed=lbl(cs.last_changed),
+            history=[(labels[i], t) for i, t in cs.history],
+            blocks=[OutBlock(b.src.kind, b.src.style, b.src.raw_hash,
+                             render_annotated(b.tokens, b.origins, labels),
+                             labels[b.introduced], lbl(b.changed),
+                             [(labels[h[0]], *h[1:]) for h in b.history]) for b in cs.blocks],
+            deleted=deleted,
+        ) for c, cs, status, deleted in pending]
         results.append(VersionResult(vi, labels[vi], out_clauses, removed))
         state = new_state
     return results

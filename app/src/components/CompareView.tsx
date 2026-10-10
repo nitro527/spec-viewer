@@ -1,6 +1,6 @@
 // Code-review style comparison of two arbitrary versions (inline or side by side).
 import { useEffect, useMemo, useState } from "react";
-import { api, cmpVersion, tdocUrl, type CompareResult, type DiffClause, type VersionInfo } from "../api";
+import { api, cmpVersion, tdocUrl, type CompareResult, type DiffBlock, type DiffClause, type VersionInfo } from "../api";
 import { Html } from "./Html";
 
 interface Props {
@@ -87,13 +87,20 @@ function DiffClauseView({ c, sideBySide }: { c: DiffClause; sideBySide: boolean 
       </Tag>
       {c.blocks.map((b, i) => visible[i] && (
         <div key={i} className={`diff-blk op-${b.op} kind-${b.kind} ${b.style && !sideBySide ? `st-${b.style}` : ""}`}>
-          {sideBySide ? (
-            <>
-              <Html html={b.op === "insert" ? "" : b.diff} className={`side old ${b.style ? `st-${b.style}` : ""}`} />
-              <Html html={b.op === "delete" ? "" : b.diff} className={`side new ${b.style ? `st-${b.style}` : ""}`} />
-            </>
+          {b.op === "move-out" ? (
+            <MovedOut b={b} />
           ) : (
-            <Html html={b.diff} />
+            <>
+              {b.op === "move-in" && <div className="move-tag">↘ §{b.moved_from} 에서 이동{b.diff.includes("<ins>") || b.diff.includes("<del>") ? " (수정 포함)" : ""}</div>}
+              {sideBySide ? (
+                <>
+                  <Html html={b.op === "insert" || b.op === "move-in" ? "" : b.diff} className={`side old ${b.style ? `st-${b.style}` : ""}`} />
+                  <Html html={b.op === "delete" ? "" : b.diff} className={`side new ${b.style ? `st-${b.style}` : ""}`} />
+                </>
+              ) : (
+                <Html html={b.diff} />
+              )}
+            </>
           )}
         </div>
       ))}
@@ -101,6 +108,16 @@ function DiffClauseView({ c, sideBySide }: { c: DiffClause; sideBySide: boolean 
         <button className="link more" onClick={() => setShowAll(true)}>… 변경 없는 문단 {hidden}개 펼치기</button>
       )}
     </section>
+  );
+}
+
+function MovedOut({ b }: { b: DiffBlock }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="move-out">
+      <button className="link" onClick={() => setOpen(!open)}>{open ? "▾" : "▸"} §{b.moved_to} 로 이동된 문단</button>
+      {open && <Html html={b.old ?? ""} className="moved-body" />}
+    </div>
   );
 }
 
