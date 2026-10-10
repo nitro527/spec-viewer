@@ -1,0 +1,24 @@
+[project]
+name = "specview"
+version = "0.1.0"
+description = "3GPP specification version-history viewer: ingestion, history engine and local API"
+requires-python = ">=3.10"
+dependencies = [
+  "lxml>=4.9",
+  "requests>=2.28",
+  "fastapi>=0.100",
+  "uvicorn>=0.22",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "python-docx>=1.0", "httpx"]
+
+[project.scripts]
+specview = "specview.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["specview*"]
