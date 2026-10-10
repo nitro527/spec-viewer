@@ -1,11 +1,11 @@
-// Library home: specs already converted, and the 3GPP downloader.
+// Main screen: the 3GPP downloader, downloaded specs and settings (viewing happens in viewer tabs).
 import { useEffect, useState } from "react";
 import { api, type Job, type SpecInfo } from "../api";
 import { LlmPanel } from "./LlmPanel";
 
 const RELEASES = [15, 16, 17, 18, 19, 20];
 
-export function Home({ prefill, onOpen }: { prefill?: string; onOpen: (spec: string) => void }) {
+export function Home({ prefill, active, onOpen }: { prefill?: string; active: boolean; onOpen: (spec: string) => void }) {
   const [specs, setSpecs] = useState<SpecInfo[] | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [input, setInput] = useState(prefill ?? "");
@@ -17,6 +17,8 @@ export function Home({ prefill, onOpen }: { prefill?: string; onOpen: (spec: str
   const [annSaved, setAnnSaved] = useState(false);
   const refresh = () => api.specs().then(setSpecs, (e) => setError(String(e)));
   useEffect(() => { refresh(); api.settings().then((s) => setAnnUrl(s.annotation_url)).catch(() => {}); }, []);
+  useEffect(() => { if (prefill) setInput(prefill); }, [prefill]);  // e.g. a reference to a spec not downloaded
+  useEffect(() => { if (active) refresh(); }, [active]);
 
   const running = jobs.some((j) => j.state === "running");
   const downloading = jobs.some((j) => j.state === "running" && j.kind !== "intent");
@@ -44,7 +46,7 @@ export function Home({ prefill, onOpen }: { prefill?: string; onOpen: (spec: str
   return (
     <div className="home">
       <section>
-        <h2>라이브러리</h2>
+        <h2>받은 스펙 <span className="muted small">(누르면 뷰어 탭에서 열림 · 새 뷰어 탭은 위의 +)</span></h2>
         {specs === null && <p className="muted">불러오는 중…</p>}
         {specs?.length === 0 && <p className="muted">아직 받은 스펙이 없습니다. 아래에서 다운로드하세요.</p>}
         <div className="spec-grid">

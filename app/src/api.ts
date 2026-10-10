@@ -1,6 +1,9 @@
 // Typed client for the local specview backend.
 
-export interface SpecInfo { number: string; title: string | null; versions: number; latest: string | null }
+export interface SpecInfo {
+  number: string; title: string | null; versions: number; latest: string | null;
+  first: string | null; releases: number[]; crs: number;
+}
 export interface VersionInfo { id: number; version: string; release: number }
 export type HistoryEntry = [version: string, change: "added" | "modified" | "moved", movedFrom?: string];
 

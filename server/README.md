@@ -25,7 +25,7 @@ specview-annotate ... --llm claude
 specview-annotate --out packs serve --port 8800
 ```
 
-뷰어: Library 탭 → "Annotation 서버"에 `http://<host>:8800` 저장 → 문단 선택 후 "서버에서 동기화".
+뷰어: 메인 탭 → "Annotation 서버"에 `http://<host>:8800` 저장 → 문단 선택 후 "서버에서 동기화".
 
 ## pack 형식 (`specview-annotations/1`)
 

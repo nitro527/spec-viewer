@@ -18,7 +18,6 @@ export interface TabState {
   version?: string;
   label?: string;
   jumpTo?: string; // clause number to open at
-  prefill?: string; // Home tab: spec to suggest for download
 }
 
 interface Props {

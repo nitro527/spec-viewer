@@ -10,11 +10,12 @@
   절마다 "이 절을 수정한 CR"을 표시 (38.211 Rel-16 기준 diff 결과와 96~98% 일치)
 - **TR 38.822 UE feature 연결**: CR 의 work item → 38.822 의 해당 WI 섹션 feature, 본문 용어와 겹치는 것부터
 - **Statistics**: 버전별 변경 절 수·CR 수, 가장 자주 바뀐 절
-- **AI 변경 의도 요약(선택)**: Library 탭에서 LLM API(Gemini 또는 사내 OpenAI 호환 서버: vLLM·Ollama 등)를 설정하면
+- **AI 변경 의도 요약(선택)**: 메인 탭에서 LLM API(Gemini 또는 사내 OpenAI 호환 서버: vLLM·Ollama 등)를 설정하면
   바뀐 문단마다 "무엇이·왜·구현 영향"을 CR 표지 근거로 요약 (버전 단위 또는 절 하나씩, 이미 요약한 문단은 재요청 안 함)
 - **Annotation 서버(선택)**: 서버에서 만든 변경 의도 요약(LLM) pack 을 받아 표시 — `server/` 참고
 - 절 단위 스트리밍 스크롤, 전체 검색(Ctrl+F, SQLite FTS5), 변경 위치 눈금자, 목차 필터/접기
-- 탭 + 스펙 간 참조 링크(`clause 5.2.1 of TS 38.213` 클릭 → 새 탭), Ctrl+P 명령 팔레트
+- 메인 탭(다운로드·설정)과 뷰어 탭 분리: 새 뷰어 탭(+, Ctrl+T)에 받은 스펙이 카드로 한눈에 보임
+- 스펙 간 참조 링크(`clause 5.2.1 of TS 38.213` 클릭 → 새 뷰어 탭, 안 받은 스펙이면 메인 탭에 다운로드 제안), Ctrl+P 명령 팔레트
 - 북마크·메모(버전이 바뀌어도 절에 유지), 인용 복사, 비교 결과 HTML 보고서 내보내기
 - 3GPP archive 에서 스펙 전 버전 자동 다운로드 (여러 스펙 동시 선택, 릴리즈 필터)
 - 구형 Equation Editor/MathType 수식(WMF)을 내장 변환기로 SVG 렌더링
@@ -44,7 +45,7 @@ docs/      설계 문서, Windows 패키징 (docs/PACKAGING.md)
 cd backend
 pip install -e ".[dev]"
 
-# 2) 스펙 받기 (CLI 로도 가능, 앱의 Library 탭에서도 가능)
+# 2) 스펙 받기 (CLI 로도 가능, 앱의 메인 탭에서도 가능)
 specview fetch 38.211 --with-crs          # 모든 버전 + CR 표지 (--release 16, --latest-per-release 로 줄이기)
 specview fetch-features                   # TR 38.822 UE feature list
 #   이미 받은 파일이 있다면:  specview import 38211-g10.docx 38211-h50.docx ...

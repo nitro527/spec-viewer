@@ -60,7 +60,7 @@ export function AnnotationPanel({ spec, version, clauseKey, rawHash }: {
     <p className="muted small">
       {llmReady
         ? <button className="link" onClick={summarize} disabled={!!jobId}>AI 로 이 절 요약</button>
-        : <span title="Library 탭 → AI 변경 의도 요약에서 LLM API 를 설정하세요">AI 요약: Library 탭에서 LLM 설정 필요</span>}
+        : <span title="메인 탭 → AI 변경 의도 요약에서 LLM API 를 설정하세요">AI 요약: 메인 탭에서 LLM 설정 필요</span>}
       {" · "}<button className="link" onClick={sync}>서버에서 동기화</button>
       {msg && <span> · {msg}</span>}
     </p>

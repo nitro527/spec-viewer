@@ -1,4 +1,4 @@
-// LLM API settings and change-intent generation (Library page). Uses the user's own key; optional.
+// LLM API settings and change-intent generation (main screen). Uses the user's own key; optional.
 import { useEffect, useState } from "react";
 import { api, type Job, type LlmForm, type LlmSettings, type SpecInfo, type VersionInfo } from "../api";
 

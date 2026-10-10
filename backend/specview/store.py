@@ -232,10 +232,15 @@ class Library:
     # ------------------------------------------------------------ queries
 
     def specs(self) -> list[dict]:
-        return [dict(r) for r in self.db.execute(
-            "SELECT s.number, s.title, COUNT(v.id) AS versions, "
-            "(SELECT version FROM version WHERE spec = s.number ORDER BY sort_key DESC LIMIT 1) AS latest "
-            "FROM spec s LEFT JOIN version v ON v.spec = s.number GROUP BY s.number ORDER BY s.number")]
+        out = []
+        for r in self.db.execute("SELECT number, title FROM spec ORDER BY number"):
+            vs = self.db.execute("SELECT version, release FROM version WHERE spec=? ORDER BY sort_key",
+                                 (r["number"],)).fetchall()
+            out.append({"number": r["number"], "title": r["title"], "versions": len(vs),
+                        "latest": vs[-1]["version"] if vs else None, "first": vs[0]["version"] if vs else None,
+                        "releases": sorted({v["release"] for v in vs}),
+                        "crs": self.db.execute("SELECT COUNT(*) FROM cr WHERE spec=?", (r["number"],)).fetchone()[0]})
+        return out
 
     def versions(self, spec: str) -> list[dict]:
         return [dict(r) for r in self.db.execute(
