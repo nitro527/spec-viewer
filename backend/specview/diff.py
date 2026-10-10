@@ -41,12 +41,47 @@ def _key(t: Token) -> str:
     return " " if t.kind == "ws" else t.text
 
 
+_CHUNK_END = ("</tr", "</p", "</li", "</h", "<br")
+_BIG = 4000  # tokens left after trimming above which a word-level diff gets slow (it is close to quadratic)
+
+
+def _chunks(keys: list[str], lo: int, hi: int) -> list[tuple[int, int]]:
+    """Split keys[lo:hi] after row / paragraph ends: a huge table becomes a few hundred comparable rows."""
+    out, start = [], lo
+    for i in range(lo, hi):
+        if keys[i].startswith(_CHUNK_END):
+            out.append((start, i + 1))
+            start = i + 1
+    if start < hi:
+        out.append((start, hi))
+    return out
+
+
+def _diff(ka: list[str], kb: list[str], a0: int, a1: int, b0: int, b1: int) -> list[tuple]:
+    """Opcodes for ka[a0:a1] vs kb[b0:b1] in absolute positions; rows first when the span is big."""
+    if (a1 - a0) + (b1 - b0) <= _BIG:
+        sm = SequenceMatcher(None, ka[a0:a1], kb[b0:b1], autojunk=(a1 - a0) + (b1 - b0) > 3000)
+        return [(t, i1 + a0, i2 + a0, j1 + b0, j2 + b0) for t, i1, i2, j1, j2 in sm.get_opcodes()]
+    ca, cb = _chunks(ka, a0, a1), _chunks(kb, b0, b1)
+    sm = SequenceMatcher(None, ["".join(ka[i:j]) for i, j in ca], ["".join(kb[i:j]) for i, j in cb], autojunk=False)
+    out = []
+    for t, i1, i2, j1, j2 in sm.get_opcodes():
+        sa = (ca[i1][0], ca[i2 - 1][1]) if i2 > i1 else (ca[i1][0] if i1 < len(ca) else a1,) * 2
+        sb = (cb[j1][0], cb[j2 - 1][1]) if j2 > j1 else (cb[j1][0] if j1 < len(cb) else b1,) * 2
+        if t == "replace" and (sa[1] - sa[0]) + (sb[1] - sb[0]) <= _BIG:
+            out += _diff(ka, kb, sa[0], sa[1], sb[0], sb[1])  # the changed rows, word by word
+        else:
+            out.append((t, sa[0], sa[1], sb[0], sb[1]))
+    return out
+
+
 def opcodes(a: Sequence[Token], b: Sequence[Token]):
     """difflib opcodes over token keys.
 
-    Edits are usually local, so the common prefix/suffix is trimmed first; long
-    remainders (big tables full of repeated tags) use difflib's popularity
-    heuristic, otherwise matching is quadratic.
+    Edits are usually local, so the common prefix/suffix is trimmed first. What is left is compared
+    word by word when small; a big remainder (conformance-spec tables run to tens of thousands of
+    tokens) is compared row by row first and only the changed rows word by word, since a word-level
+    diff over the whole of it is close to quadratic.
     """
     ka, kb = [_key(t) for t in a], [_key(t) for t in b]
     lo, hi_a, hi_b = 0, len(ka), len(kb)
@@ -55,9 +90,8 @@ def opcodes(a: Sequence[Token], b: Sequence[Token]):
     while hi_a > lo and hi_b > lo and ka[hi_a - 1] == kb[hi_b - 1]:
         hi_a -= 1
         hi_b -= 1
-    mid = SequenceMatcher(None, ka[lo:hi_a], kb[lo:hi_b], autojunk=(hi_a - lo) + (hi_b - lo) > 3000)
     out = [("equal", 0, lo, 0, lo)] if lo else []
-    out += [(tag, i1 + lo, i2 + lo, j1 + lo, j2 + lo) for tag, i1, i2, j1, j2 in mid.get_opcodes()]
+    out += _diff(ka, kb, lo, hi_a, lo, hi_b)
     if hi_a < len(ka):
         out.append(("equal", hi_a, len(ka), hi_b, len(kb)))
     return out

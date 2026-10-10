@@ -38,3 +38,31 @@ def test_multiline_math_groups():
     span = root.xpath("//span")[0]
     assert span.get("class") == "math display"
     assert span.text == r"\begin{gathered}a = 1 \\ b = 2\end{gathered}"
+
+
+def test_big_table_diff_is_row_wise_and_exact():
+    import random
+    import time
+
+    from specview.diff import opcodes, tokenize
+
+    rnd = random.Random(1)
+    rows = [f"<tr><td>row {i} value {rnd.randint(0, 9)}</td><td>{' '.join('w%d' % rnd.randint(0, 50) for _ in range(30))}</td></tr>"
+            for i in range(1500)]
+    old = "<table>" + "".join(rows) + "</table>"
+    rows[100] = rows[100].replace("value", "VALUE")
+    rows[900:902] = ["<tr><td>inserted row</td></tr>"]
+    new = "<table>" + "".join(rows) + "</table>"
+    a, b = tokenize(old), tokenize(new)
+    t = time.time()
+    ops = opcodes(a, b)
+    assert time.time() - t < 5  # was quadratic: minutes on conformance-spec tables
+    # opcodes tile both sequences and "equal" really is equal
+    assert ops[0][1] == 0 and ops[0][3] == 0 and ops[-1][2] == len(a) and ops[-1][4] == len(b)
+    for (_, _, i2, _, j2), (_, i1n, _, j1n, _) in zip(ops, ops[1:]):
+        assert (i2, j2) == (i1n, j1n)
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == "equal":
+            assert [x.text for x in a[i1:i2]] == [x.text for x in b[j1:j2]]
+    changed = [x.text for tag, i1, i2, j1, j2 in ops if tag != "equal" for x in b[j1:j2]]
+    assert "VALUE" in changed and "inserted" in changed and "w1" not in changed[:5]
