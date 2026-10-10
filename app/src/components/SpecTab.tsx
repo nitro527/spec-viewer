@@ -161,7 +161,7 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
             ))}
           </div>
         )}
-        <div className="spacer" />
+        {mode !== "history" && <div className="spacer" />}
         <button onClick={() => setFindOpen(true)} title="검색 (Ctrl+F)">🔍</button>
         <button onClick={() => setInfoOpen(!infoOpen)} title="변경 정보 패널">{infoOpen ? "⇥" : "⇤"}</button>
       </header>
@@ -200,7 +200,7 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
         </main>
 
         {infoOpen && (mode === "history" || mode === "clean") && (
-          <InfoPanel selection={selection} version={version} baseline={baseline} crsByVersion={crsByVersion}
+          <InfoPanel spec={spec} selection={selection} version={version} baseline={baseline} crsByVersion={crsByVersion}
                      colors={colors} onClose={() => setSelection(null)} onFetchCrs={fetchCrs} fetching={crJob} />
         )}
       </div>

@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cmpVersion, crTouches, tdocUrl, type CR, type TocEntry } from "../api";
 import type { VersionColor } from "../colors";
+import { FeaturePanel } from "./FeaturePanel";
 import type { Selection } from "./HistoryView";
 
 const newer = (v: string | null | undefined, baseline: string) => !!v && cmpVersion(v, baseline) > 0;
@@ -141,8 +142,8 @@ const CAT: Record<string, string> = {
   C: "Functional modification of feature", D: "Editorial modification",
 };
 
-export function InfoPanel({ selection, version, baseline, crsByVersion, colors, onClose, onFetchCrs, fetching }: {
-  selection: Selection | null; version: string; baseline: string; crsByVersion: Map<string, CR[]>;
+export function InfoPanel({ spec, selection, version, baseline, crsByVersion, colors, onClose, onFetchCrs, fetching }: {
+  spec: string; selection: Selection | null; version: string; baseline: string; crsByVersion: Map<string, CR[]>;
   colors: Map<string, VersionColor>; onClose: () => void; onFetchCrs?: () => void; fetching?: string | null;
 }) {
   const hasDetail = [...crsByVersion.values()].some((l) => l.some((c) => c.detail_status));
@@ -179,6 +180,7 @@ export function InfoPanel({ selection, version, baseline, crsByVersion, colors, 
             <p className="small note">CR 표지(변경 이유·Clauses affected)를 아직 받지 않았습니다.{" "}
               <button className="link" onClick={onFetchCrs}>CR 표지 받기</button></p>
           )}
+          <FeaturePanel spec={spec} version={version} clauseKey={selection.clause.key} />
         </>
       ) : (
         <>

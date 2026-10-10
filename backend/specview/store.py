@@ -6,6 +6,7 @@ cost little more than one: most clauses do not change between versions.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Iterator
@@ -91,6 +92,12 @@ CREATE TABLE IF NOT EXISTS cr_detail (
   error TEXT,
   PRIMARY KEY (spec, cr, rev, tdoc)
 );
+CREATE TABLE IF NOT EXISTS ue_feature (
+  source TEXT NOT NULL,            -- 38.822 version the list was read from
+  section TEXT NOT NULL, section_title TEXT, layer TEXT, release TEXT,
+  idx TEXT NOT NULL, grp TEXT, components TEXT, prerequisite TEXT,
+  field_name TEXT, parent_ie TEXT, mandatory TEXT, note TEXT, terms TEXT
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS blob_fts USING fts5(hash UNINDEXED, text, tokenize = 'unicode61');
 """
 
@@ -123,6 +130,12 @@ def _mark_moves(clauses: list[dict]) -> None:
         db["op"], db["moved_to"] = "move-out", ic["number"] or ic["title"]
         ib["op"], ib["moved_from"] = "move-in", dc["number"] or dc["title"]
         ib["diff"] = render_diff(db["old"], ib["new"])
+
+
+def _feature_out(f: dict) -> dict:
+    return {"section": f["section"], "section_title": f["section_title"], "release": f["release"], "layer": f["layer"],
+            "index": f["idx"], "group": f["grp"], "components": f["components"], "prerequisite": f["prerequisite"],
+            "field_name": f["field_name"], "mandatory": f["mandatory"], "note": f["note"]}
 
 
 class Library:
@@ -329,6 +342,90 @@ class Library:
             if progress:
                 progress(i + 1, len(todo), c)
         return stats
+
+    # ------------------------------------------------------------ 38.822 features
+
+    def import_features(self, parsed: ParsedSpec, version: str) -> int:
+        from .features import parse_feature_list
+
+        feats = parse_feature_list(parsed.clauses)
+        with self.db:
+            self.db.execute("DELETE FROM ue_feature")
+            self.db.executemany(
+                "INSERT INTO ue_feature VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [(version, f.section, f.section_title, f.layer, f.release, f.index, f.group, f.components,
+                  f.prerequisite, f.field_name, f.parent_ie, f.mandatory, f.note, json.dumps(f.terms)) for f in feats])
+        self._feature_cache = None
+        return len(feats)
+
+    def _features(self) -> list[dict]:
+        if getattr(self, "_feature_cache", None) is None:
+            self._feature_cache = [dict(r) for r in self.db.execute("SELECT * FROM ue_feature")]
+        return self._feature_cache
+
+    def features_status(self) -> dict:
+        r = self.db.execute("SELECT COUNT(*) AS n, MAX(source) AS source FROM ue_feature").fetchone()
+        return {"count": r["n"], "source": r["source"]}
+
+    def clause_features(self, spec: str, version: str, key: str) -> dict:
+        """38.822 features related to a clause: via work items of CRs that changed it, and via parameters."""
+        from .features import acronyms, match_sections, norm_term, params_in, wi_codes
+
+        feats = self._features()
+        if not feats:
+            return {"available": False, "work_items": [], "parameters": []}
+        vid = self.version_id(spec, version)
+        row = self.db.execute("SELECT number FROM clause_ver WHERE version_id=? AND key=?", (vid, key)).fetchone()
+        number = row["number"] if row else key
+        cur = Version.parse(version)
+
+        def touches(c: str) -> bool:
+            return c == number or number.startswith(c + ".") or c.startswith(number + ".")
+
+        sections = sorted({(f["section"], f["section_title"], f["layer"], f["release"]) for f in feats})
+        by_section: dict[str, list[dict]] = {}
+        for f in feats:
+            by_section.setdefault(f["section"], []).append(f)
+        wis: dict[str, dict] = {}
+        for cr in self.crs(spec):
+            d = cr["detail"]
+            if not d or Version.parse(cr["new_version"]) > cur or not any(touches(c) for c in d["clauses"]):
+                continue
+            for code in wi_codes(d["wi_code"]):
+                w = wis.setdefault(code, {"wi_code": code, "crs": [], "sections": [], "releases": set()})
+                w["crs"].append({"cr": cr["cr"], "version": cr["new_version"], "subject": cr["subject"]})
+                if d.get("release"):
+                    w["releases"].add(d["release"].replace(" ", ""))
+        text = " ".join(r["text"] for r in self.db.execute(
+            "SELECT x.text FROM block_ver b JOIN blob x ON x.hash=b.raw_hash WHERE b.version_id=? AND b.clause_key=?",
+            (vid, key)))
+        title = row_title = self.db.execute("SELECT title FROM clause_ver WHERE version_id=? AND key=?",
+                                            (vid, key)).fetchone()
+        terms = acronyms(text + " " + (row_title["title"] if title else ""))
+
+        def scored(f: dict) -> dict:
+            shared = sorted(terms & acronyms(f"{f['grp']} {f['components']}"))
+            return {**_feature_out(f), "shared": shared}
+
+        for w in wis.values():
+            # The CR's release picks the right generation (NR_pos -> Rel-16 "NR positioning", not NR_pos_enh2).
+            rel_secs = [x for x in sections if x[3] in w["releases"]]
+            matched = match_sections(w["wi_code"], rel_secs) or match_sections(w["wi_code"], sections)
+            w["releases"] = sorted(w["releases"])
+            for sec in matched:
+                fl = sorted((scored(f) for f in by_section.get(sec[0], [])), key=lambda f: -len(f["shared"]))
+                w["sections"].append({"section": sec[0], "title": sec[1], "layer": sec[2], "release": sec[3],
+                                      "relevant": sum(1 for f in fl if f["shared"]), "features": fl})
+        # parameter mentions: only specific field names (short/generic terms give noise)
+        mentioned = params_in(text)
+        params = []
+        for f in feats:
+            fields = {norm_term(x) for x in re.split(r"[\s,;/]+", f["field_name"] or "") if len(x) >= 10}
+            hit = sorted(fields & mentioned)
+            if hit:
+                params.append({**_feature_out(f), "matched": hit})
+        return {"available": True, "work_items": sorted(wis.values(), key=lambda w: w["wi_code"]),
+                "parameters": params[:50]}
 
     def asset(self, h: str) -> tuple[str, bytes] | None:
         r = self.db.execute("SELECT mime, data FROM asset WHERE hash=?", (h,)).fetchone()

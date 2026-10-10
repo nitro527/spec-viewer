@@ -65,6 +65,17 @@ def cmd_fetch_crs(args):
         print(f"{spec}: {st}")
 
 
+def cmd_fetch_features(args):
+    from . import download
+    from .parse_docx import parse_docx
+
+    lib = _lib(args)
+    rv = download.select(download.list_remote("38.822"))[-1]
+    print(f"38.822 v{rv.version}: download + convert")
+    n = lib.import_features(parse_docx(download.fetch(rv, Path(args.home) / "cache")), str(rv.version))
+    print(f"{n} UE features imported")
+
+
 def cmd_list(args):
     for s in _lib(args).specs():
         print(f"{s['number']:<10} {s['versions']:>3} versions  latest {s['latest']}  {s['title'] or ''}")
@@ -102,6 +113,9 @@ def main(argv=None):
     p.add_argument("--version", action="append", help="only CRs of these new versions, repeatable")
     p.add_argument("--retry", action="store_true", help="retry CRs previously not found")
     p.set_defaults(func=cmd_fetch_crs)
+
+    p = sub.add_parser("fetch-features", help="download the TR 38.822 UE feature list")
+    p.set_defaults(func=cmd_fetch_features)
 
     p = sub.add_parser("list", help="list specs in the library")
     p.set_defaults(func=cmd_list)

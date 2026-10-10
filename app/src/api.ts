@@ -53,6 +53,15 @@ export interface VersionStats {
 export interface ClauseStats { ord: number; key: string; number: string; title: string; level: number; introduced: string; changes: string[] }
 export interface Stats { spec: string; latest: string | null; versions: VersionStats[]; clauses: ClauseStats[] }
 
+export interface UEFeature {
+  section: string; section_title: string; release: string; layer: string; index: string; group: string;
+  components: string; prerequisite: string; field_name: string; mandatory: string; note: string;
+  shared?: string[]; matched?: string[];
+}
+export interface FeatureSection { section: string; title: string; layer: string; release: string; relevant: number; features: UEFeature[] }
+export interface WorkItemFeatures { wi_code: string; releases: string[]; crs: { cr: string; version: string; subject: string }[]; sections: FeatureSection[] }
+export interface ClauseFeatures { available: boolean; work_items: WorkItemFeatures[]; parameters: UEFeature[] }
+
 export interface SearchHit { ord: number; key: string; number: string; title: string; block: number | null; snippet: string }
 export interface Job { id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[] }
 
@@ -76,6 +85,13 @@ export const api = {
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
   stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),
   jobs: () => get<Job[]>("/api/jobs"),
+  clauseFeatures: (spec: string, v: string, key: string) =>
+    get<ClauseFeatures>(`/api/specs/${s(spec)}/${s(v)}/clause/${s(key)}/features`),
+  fetchFeatures: async (): Promise<Job> => {
+    const r = await fetch("/api/fetch-features", { method: "POST" });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
   fetchCrs: async (spec: string): Promise<Job> => {
     const r = await fetch("/api/fetch", {
       method: "POST", headers: { "Content-Type": "application/json" },

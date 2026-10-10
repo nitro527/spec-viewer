@@ -71,6 +71,37 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     def stats(spec: str):
         return _get(lib.stats, spec)
 
+    @app.get("/api/specs/{spec}/{version}/clause/{key}/features")
+    def clause_features(spec: str, version: str, key: str):
+        return _get(lib.clause_features, spec, version, key)
+
+    @app.get("/api/features")
+    def features_status():
+        return _get(lib.features_status)
+
+    def _run_features(job_id: str):
+        job = jobs[job_id]
+        try:
+            job["message"] = "38.822: 최신 버전 확인"
+            rv = download.select(download.list_remote("38.822"))[-1]
+            job["message"] = f"38.822 v{rv.version}: 다운로드"
+            path = download.fetch(rv, home / "cache")
+            job["message"] = f"38.822 v{rv.version}: 변환"
+            parsed = parse_docx(path)
+            with lock:
+                n = lib.import_features(parsed, str(rv.version))
+            job["state"], job["message"], job["done"], job["total"] = "done", f"{n} features", 1, 1
+        except Exception as e:
+            job["state"], job["message"] = "error", str(e)
+
+    @app.post("/api/fetch-features")
+    def fetch_features():
+        job_id = uuid.uuid4().hex[:8]
+        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 1, "message": "starting",
+                        "specs": ["38.822"]}
+        threading.Thread(target=_run_features, args=(job_id,), daemon=True).start()
+        return jobs[job_id]
+
     @app.get("/api/specs/{spec}/compare")
     def compare(spec: str, old: str, new: str, changed_only: bool = True):
         return _get(lib.compare, spec, old, new, changed_only)
