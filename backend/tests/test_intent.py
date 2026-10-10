@@ -112,6 +112,7 @@ def test_llm_settings_and_intent_job(library, monkeypatch, tmp_path):
     assert c.put("/api/llm", json={"provider": "gemini", "clear_key": True}).json()["has_key"] is False
 
 
+@needs_pandoc
 def test_server_sync_keeps_local_summaries(library, tmp_path):
     import sqlite3
 
