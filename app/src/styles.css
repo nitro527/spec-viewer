@@ -319,3 +319,23 @@ input.num { width: 56px; margin: 0 4px; }
 .picker-title { font-size: 13px; line-height: 1.35; min-height: 2.7em; }
 .picker-rels { display: flex; gap: 4px; flex-wrap: wrap; }
 .rel-badge { color: #fff; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 9px; }
+.picker-mode { margin: 0; }
+.ff { max-width: 900px; }
+.ff-search { width: 100%; max-width: 560px; padding: 6px 10px; font-size: 14px; }
+.ff-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.ff-results { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+.ff-row { display: grid; grid-template-columns: 70px 1fr; column-gap: 10px; text-align: left; background: none; border-color: transparent; padding: 6px 8px; }
+.ff-row:hover { background: var(--panel); border-color: var(--border); }
+.ff-row .small { grid-column: 2; }
+.ff-idx { font-family: ui-monospace, monospace; font-weight: 700; color: var(--accent); }
+.ff-head { margin: 8px 0 14px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; }
+.ff-head h3 { margin: 0 0 4px; font-size: 16px; }
+.ff-comp { white-space: pre-wrap; margin: 6px 0 0; }
+.ff-spec { margin: 14px 0; }
+.ff-spec h4 { margin: 0 0 6px; font-size: 14px; }
+.ff-clause { display: grid; grid-template-columns: 90px 1fr; column-gap: 10px; width: 100%; text-align: left; background: none; border-color: transparent; padding: 5px 8px; }
+.ff-clause:hover:not(:disabled) { background: var(--panel); border-color: var(--border); }
+.ff-clause.gone { opacity: 0.55; cursor: default; }
+.ff-num { font-weight: 600; }
+.ff-via { grid-column: 2; display: flex; gap: 6px; flex-wrap: wrap; color: var(--muted); }
+.ff-term { background: var(--ins); color: var(--ins-text); border-radius: 4px; padding: 0 5px; }

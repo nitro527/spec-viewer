@@ -95,6 +95,14 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     def features_status():
         return _get(lib.features_status)
 
+    @app.get("/api/features/search")
+    def search_features(q: str):
+        return _get(lib.search_features, q)
+
+    @app.get("/api/features/{section}/{index}/links")
+    def feature_links(section: str, index: str):
+        return _get(lib.feature_links, section, index)
+
     def _run_features(job_id: str):
         job = jobs[job_id]
         try:

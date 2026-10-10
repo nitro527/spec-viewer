@@ -1,13 +1,17 @@
-// New viewer tab: every downloaded spec at a glance; pick one to open it in this tab.
+// New viewer tab: every downloaded spec at a glance (pick one to open it in this tab), or find the clauses
+// of all specs tied to a TR 38.822 UE feature.
 import { useEffect, useMemo, useState } from "react";
 import { api, type SpecInfo } from "../api";
 import { releaseColor } from "../colors";
+import { FeatureFinder } from "./FeatureFinder";
 
-export function SpecPicker({ active, onOpen, onGoHome }: {
-  active: boolean; onOpen: (spec: string) => void; onGoHome: () => void;
+export function SpecPicker({ active, onOpen, onOpenClause, onGoHome }: {
+  active: boolean; onOpen: (spec: string) => void; onOpenClause: (spec: string, clause?: string) => void;
+  onGoHome: () => void;
 }) {
   const [specs, setSpecs] = useState<SpecInfo[] | null>(null);
   const [q, setQ] = useState("");
+  const [mode, setMode] = useState<"specs" | "features">("specs");
 
   useEffect(() => { if (active) api.specs().then(setSpecs, () => setSpecs([])); }, [active]);
 
@@ -24,10 +28,22 @@ export function SpecPicker({ active, onOpen, onGoHome }: {
       <button className="primary" onClick={onGoHome}>메인 화면으로</button>
     </div>
   );
+  const tabs = (
+    <div className="seg picker-mode">
+      <button className={mode === "specs" ? "on" : ""} onClick={() => setMode("specs")}>스펙 ({specs.length})</button>
+      <button className={mode === "features" ? "on" : ""} onClick={() => setMode("features")}>Feature 로 찾기 (38.822)</button>
+    </div>
+  );
+  if (mode === "features") return (
+    <div className="picker">
+      <div className="picker-head">{tabs}</div>
+      <FeatureFinder onOpen={onOpenClause} />
+    </div>
+  );
   return (
     <div className="picker">
       <div className="picker-head">
-        <h2>스펙 열기 <span className="muted small">{specs.length}개</span></h2>
+        {tabs}
         {specs.length > 6 && (
           <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="번호나 제목으로 찾기 (예: 38.21, PDSCH)"
                  onKeyDown={(e) => e.key === "Enter" && shown.length === 1 && onOpen(shown[0].number)} />

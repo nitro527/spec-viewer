@@ -9,6 +9,8 @@
 - **CR 연결**: Change history 표 + CR 표지(Reason / Summary / **Clauses affected** / WI code)를 받아
   절마다 "이 절을 수정한 CR"을 표시 (38.211 Rel-16 기준 diff 결과와 96~98% 일치)
 - **TR 38.822 UE feature 연결**: CR 의 work item → 38.822 의 해당 WI 섹션 feature, 본문 용어와 겹치는 것부터
+- **Feature 로 찾기**: 새 뷰어 탭 → "Feature 로 찾기"에서 38.822 feature 를 고르면 받은 모든 스펙의 관련 절을
+  스펙별로 모아 보여 줌 (근거: 그 WI 의 CR 이 고친 절 / 본문에 RRC 필드 이름이 나오는 절, 겹치는 용어 순)
 - **Statistics**: 버전별 변경 절 수·CR 수, 가장 자주 바뀐 절
 - **AI 변경 의도 요약(선택)**: 메인 탭에서 LLM API(Gemini 또는 사내 OpenAI 호환 서버: vLLM·Ollama 등)를 설정하면
   바뀐 문단마다 "무엇이·왜·구현 영향"을 CR 표지 근거로 요약 (버전 단위 또는 절 하나씩, 이미 요약한 문단은 재요청 안 함)

@@ -62,6 +62,9 @@ export interface UEFeature {
   components: string; prerequisite: string; field_name: string; mandatory: string; note: string;
   shared?: string[]; matched?: string[];
 }
+export type FeatureVia = { kind: "cr"; cr: string; version: string; wi_code: string; subject: string } | { kind: "param"; name: string };
+export interface FeatureClause { key: string | null; number: string; title: string; via: FeatureVia[]; shared: string[] }
+export interface FeatureLinks { feature: UEFeature; specs: { spec: string; title: string | null; version: string; clauses: FeatureClause[] }[] }
 export interface FeatureSection { section: string; title: string; layer: string; release: string; relevant: number; features: UEFeature[] }
 export interface WorkItemFeatures { wi_code: string; releases: string[]; crs: { cr: string; version: string; subject: string }[]; sections: FeatureSection[] }
 export interface ClauseFeatures { available: boolean; work_items: WorkItemFeatures[]; parameters: UEFeature[] }
@@ -144,6 +147,9 @@ export const api = {
   testLlm: (form: LlmForm) => send<{ model: string; reply: string; seconds: number }>("POST", "/api/llm/test", form),
   llmModels: (form: LlmForm) => send<{ models: string[] }>("POST", "/api/llm/models", form),
   makeIntents: (req: IntentRequest) => send<Job>("POST", "/api/intent", req),
+  featuresStatus: () => get<{ count: number; source: string | null }>("/api/features"),
+  searchFeatures: (q: string) => get<UEFeature[]>(`/api/features/search?q=${s(q)}`),
+  featureLinks: (section: string, index: string) => get<FeatureLinks>(`/api/features/${s(section)}/${s(index)}/links`),
   clauseFeatures: (spec: string, v: string, key: string) =>
     get<ClauseFeatures>(`/api/specs/${s(spec)}/${s(v)}/clause/${s(key)}/features`),
   fetchFeatures: async (): Promise<Job> => {

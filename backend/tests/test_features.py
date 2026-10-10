@@ -1,5 +1,6 @@
 from specview.features import acronyms, match_sections, norm_term, parse_feature_list, wi_codes
 from specview.parse_docx import html_to_clauses
+from tests.conftest import needs_pandoc
 
 SECTIONS = [
     ("4.1", "Layer-1 UE features", "Layer-1", "Rel-15"),
@@ -42,3 +43,29 @@ def test_parse_feature_table_with_rowspan():
     ]
     assert feats[1].field_name == "seperateRACH-IAB-Support-r16"
     assert feats[1].mandatory == "Optional"
+
+
+@needs_pandoc
+def test_feature_links_across_specs(library, tmp_path):
+    import json
+    import sqlite3
+
+    from specview.store import Library
+
+    dst = sqlite3.connect(tmp_path / "l.sqlite")  # own copy: this test adds features and a CR
+    library.db.backup(dst)
+    dst.close()
+    lib = Library(tmp_path / "l.sqlite")
+    with lib.db:
+        lib.db.execute("INSERT INTO ue_feature VALUES ('19.1.0','5.1.2','NR-unlicensed','Layer-1','Rel-16','10-1',"
+                       "'Shared spectrum channel access','NR-U frame structure','','','','Optional','','[]')")
+        lib.db.execute("INSERT INTO cr VALUES ('99.211','16.1.0','2020-03','RAN#87','RP-9','0999','','B','NR-U frames')")
+        cover = {"wi_code": "NR_unlic-Core", "release": "Rel-16", "clauses": ["4.3.1"], "clauses_raw": "4.3.1"}
+        lib.db.execute("INSERT INTO cr_detail VALUES ('99.211','0999','','RP-9','ok',?,NULL)", (json.dumps(cover),))
+    assert lib.search_features("10-1")[0]["index"] == "10-1"
+    assert [f["index"] for f in lib.search_features("unlicensed")] == ["10-1"]
+    links = lib.feature_links("5.1.2", "10-1")
+    sp = links["specs"][0]
+    assert sp["spec"] == "99.211" and sp["version"] == "16.2.0"
+    c = next(c for c in sp["clauses"] if c["number"] == "4.3.1")
+    assert c["key"] and c["via"][0]["kind"] == "cr" and c["via"][0]["cr"] == "0999"

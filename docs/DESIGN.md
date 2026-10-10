@@ -61,6 +61,7 @@ blob_fts                          -- FTS5 전문 검색 인덱스
 | CR → 이유 | 표지 "Reason for change" / "Summary of change" / WI code | ✅ |
 | 건너뛴 버전 | 라이브러리에 없는 버전의 CR 은 그 다음 받은 버전에 귀속 (`lib_version`) | ✅ |
 | CR → 38.822 | WI code ↔ 38.822 섹션 제목(레이어별·릴리즈별 매칭), 본문 약어(PRACH…)로 정렬 | ✅ (`features.py`) |
+| 38.822 feature → 스펙 절 | 위 매칭을 거꾸로: feature 의 WI 에 속한 CR 의 Clauses affected + RRC 필드 이름 언급, 스펙 전체 | ✅ (`Library.feature_links`) |
 | 절 내 여러 CR 중복 시 구분 | CR 본문(수정 표시) ↔ diff 매칭, 애매하면 LLM | annotation 서버 |
 
 검증: 38.211 Rel-16 11개 버전에서 CR 이 "Clauses affected"로 적은 절의 98%가 실제 diff 에서 변경으로 잡혔고,

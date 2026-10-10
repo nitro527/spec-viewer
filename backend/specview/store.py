@@ -447,6 +447,92 @@ class Library:
         return {"available": True, "work_items": sorted(wis.values(), key=lambda w: w["wi_code"]),
                 "parameters": params[:50]}
 
+    def search_features(self, q: str, limit: int = 80) -> list[dict]:
+        """38.822 features by index (23-1), group name, field name, work item or component text."""
+        t = q.strip().lower()
+        if not t:
+            return []
+        out = []
+        for f in self._features():
+            idx, grp = f["idx"].lower(), (f["grp"] or "").lower()
+            score = (100 if idx == t else 80 if idx.startswith(t) else 60 if t in grp
+                     else 50 if t in (f["field_name"] or "").lower() else 40 if t in (f["section_title"] or "").lower()
+                     else 20 if t in (f["components"] or "").lower() else 0)
+            if score:
+                out.append((-score, f["release"], f["section"], f["idx"], f))
+        out.sort(key=lambda x: x[:4])
+        return [_feature_out(x[4]) for x in out[:limit]]
+
+    def feature_links(self, section: str, index: str) -> dict:
+        """Clauses of every downloaded spec related to one 38.822 feature.
+
+        * ``cr``    - a CR of that spec belongs to the feature's work item and lists the clause as affected
+        * ``param`` - the clause text names the feature's RRC field
+        Clauses are given in each spec's latest version, related ones (shared terms) first.
+        """
+        from .features import acronyms, match_sections, norm_term, wi_codes
+
+        feats = self._features()
+        f = next((x for x in feats if x["section"] == section and x["idx"] == index), None)
+        if f is None:
+            raise KeyError(f"38.822 feature {section}:{index} not found")
+        sections = sorted({(x["section"], x["section_title"], x["layer"], x["release"]) for x in feats})
+        mine = (f["section"], f["section_title"], f["layer"], f["release"])
+        fields = {norm_term(x) for x in re.split(r"[\s,;/]+", f["field_name"] or "") if len(x) >= 10}
+        f_terms = acronyms(f"{f['grp']} {f['components']}")
+        cache: dict[tuple[str, str], bool] = {}
+
+        def in_feature_wi(code: str, release: str) -> bool:
+            if (code, release) not in cache:
+                rel_secs = [x for x in sections if x[3] == release]
+                cache[(code, release)] = mine in (match_sections(code, rel_secs) or match_sections(code, sections))
+            return cache[(code, release)]
+
+        out = []
+        for sp in self.specs():
+            if not sp["latest"]:
+                continue
+            spec, latest = sp["number"], sp["latest"]
+            vid = self.version_id(spec, latest)
+            toc = {r["number"] or r["key"]: dict(r) for r in self.db.execute(
+                "SELECT ord, key, number, title FROM clause_ver WHERE version_id=?", (vid,))}
+            text: dict[str, list[str]] = {}
+            for r in self.db.execute("SELECT b.clause_key, x.text FROM block_ver b JOIN blob x ON x.hash=b.raw_hash "
+                                     "WHERE b.version_id=? ORDER BY b.clause_key, b.ord", (vid,)):
+                text.setdefault(r["clause_key"], []).append(r["text"])
+            hits: dict[str, dict] = {}
+
+            def add(number: str, via: dict) -> None:
+                c = toc.get(number)
+                h = hits.setdefault(number, {"key": c["key"] if c else None, "number": number,
+                                             "title": c["title"] if c else "(최신 버전에 없는 절)",
+                                             "ord": c["ord"] if c else 10 ** 9, "via": []})
+                if via not in h["via"]:
+                    h["via"].append(via)
+
+            for cr in self.crs(spec):
+                d = cr["detail"]
+                if not d:
+                    continue
+                codes = [c for c in wi_codes(d["wi_code"]) if in_feature_wi(c, (d.get("release") or "").replace(" ", ""))]
+                for number in d["clauses"] if codes else []:
+                    add(number, {"kind": "cr", "cr": cr["cr"], "version": cr["new_version"], "wi_code": codes[0],
+                                 "subject": cr["subject"]})
+            if fields:
+                for c in toc.values():
+                    body = " ".join(text.get(c["key"], [])).lower()
+                    for name in sorted(fields):
+                        if name in body:
+                            add(c["number"] or c["key"], {"kind": "param", "name": name})
+            for h in hits.values():
+                body = " ".join(text.get(h["key"], [])) + " " + h["title"] if h["key"] else ""
+                h["shared"] = sorted(f_terms & acronyms(body))
+            clauses = sorted(hits.values(), key=lambda h: (-len(h["shared"]) - 5 * any(v["kind"] == "param" for v in h["via"]),
+                                                            h["ord"]))
+            if clauses:
+                out.append({"spec": spec, "title": sp["title"], "version": latest, "clauses": clauses})
+        return {"feature": _feature_out(f), "specs": out}
+
     # ------------------------------------------------------------ settings / annotation packs
 
     def get_setting(self, key: str, default: str | None = None) -> str | None:

@@ -91,7 +91,7 @@ export function App() {
                      onUpdate={(p) => update(t.id, p)} onOpenSpec={openSpec} />
           ) : (
             <SpecPicker active={t.id === activeId} onOpen={(spec) => update(t.id, { spec, label: spec })}
-                        onGoHome={() => goHome()} />
+                        onOpenClause={openSpec} onGoHome={() => goHome()} />
           )}
         </div>
       ))}

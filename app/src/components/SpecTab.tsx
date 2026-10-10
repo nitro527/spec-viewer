@@ -72,14 +72,15 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
   // Jump requested by a cross-reference from another tab.
   useEffect(() => {
     if (tab.jumpTo) pendingJump.current = tab.jumpTo;
+    if (tab.jumpTo) onUpdate({ jumpTo: undefined });  // consumed; the same clause can be requested again
   }, [tab.jumpTo]);
-  useEffect(() => {
+  useEffect(() => {  // runs once the TOC is there, or right away when the tab is already open
     const target = pendingJump.current;
     if (!target || !toc.length) return;
     const e = toc.find((t) => t.number === target || t.key === target);
     if (e) setTimeout(() => view.current?.scrollToOrd(e.ord), 50);
     pendingJump.current = undefined;
-  }, [toc]);
+  }, [toc, tab.jumpTo]);
 
   useEffect(() => {
     if (active && findSignal) setFindOpen(true);
