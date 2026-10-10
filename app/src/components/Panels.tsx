@@ -1,6 +1,6 @@
 // Side panels: table of contents (left) and change information (right).
 import { useEffect, useMemo, useRef, useState } from "react";
-import { cmpVersion, crTouches, tdocUrl, type CR, type TocEntry } from "../api";
+import { cmpVersion, crTouches, tdocUrl, type CR, type Note, type TocEntry } from "../api";
 import type { VersionColor } from "../colors";
 import { AnnotationPanel } from "./AnnotationPanel";
 import { FeaturePanel } from "./FeaturePanel";
@@ -8,9 +8,9 @@ import type { Selection } from "./HistoryView";
 
 const newer = (v: string | null | undefined, baseline: string) => !!v && cmpVersion(v, baseline) > 0;
 
-export function Toc({ toc, active, baseline, highlight, changedOnly, onJump }: {
+export function Toc({ toc, active, baseline, highlight, changedOnly, bookmarks, bookmarkedOnly, onJump }: {
   toc: TocEntry[]; active: number; baseline: string; highlight: boolean; changedOnly: boolean;
-  onJump: (ord: number) => void;
+  bookmarks: Set<string>; bookmarkedOnly: boolean; onJump: (ord: number) => void;
 }) {
   const activeRef = useRef<HTMLButtonElement>(null);
   const [query, setQuery] = useState("");
@@ -56,6 +56,7 @@ export function Toc({ toc, active, baseline, highlight, changedOnly, onJump }: {
         {visible.map((t) => {
           const changed = highlight && newer(t.last_changed, baseline);
           if (changedOnly && !changed) return null;
+          if (bookmarkedOnly && !bookmarks.has(t.key)) return null;
           return (
             <div key={t.ord} className={`toc-row ${t.ord === active ? "active" : ""}`}
                  style={{ paddingLeft: (Math.max(t.level, 1) - 1) * 12 }}>
@@ -66,6 +67,7 @@ export function Toc({ toc, active, baseline, highlight, changedOnly, onJump }: {
                       onClick={() => onJump(t.ord)} title={`${t.number} ${t.title}`}>
                 {changed && <span className="dot" data-bv={t.last_changed!} />}
                 <span className="num">{t.number}</span> {t.title}
+                {bookmarks.has(t.key) && <span className="toc-star">★</span>}
               </button>
             </div>
           );
@@ -138,14 +140,29 @@ function CRList({ crs, clause }: { crs: CR[]; clause?: string }) {
   );
 }
 
+function NoteEditor({ initial, meta, onSave }: { initial: string; meta?: Note; onSave: (text: string) => void }) {
+  const [text, setText] = useState(initial);
+  const dirty = text !== initial;
+  return (
+    <section className="note-editor">
+      <h4>내 메모 <span className="muted small">버전이 바뀌어도 이 절에 유지</span></h4>
+      <textarea value={text} rows={3} placeholder="구현 메모, 확인할 점…" onChange={(e) => setText(e.target.value)}
+                onBlur={() => dirty && onSave(text)} />
+      <div className="tiny muted">{dirty ? "포커스를 옮기면 저장" : meta ? `저장됨 · ${meta.updated.replace("T", " ")}${meta.version ? ` (v${meta.version} 보던 중)` : ""}` : ""}</div>
+    </section>
+  );
+}
+
 const CAT: Record<string, string> = {
   F: "Correction", A: "Mirror of a correction in an earlier release", B: "Addition of feature",
   C: "Functional modification of feature", D: "Editorial modification",
 };
 
-export function InfoPanel({ spec, selection, version, baseline, crsByVersion, colors, onClose, onFetchCrs, fetching }: {
+export function InfoPanel({ spec, selection, version, baseline, crsByVersion, colors, onClose, onFetchCrs, fetching,
+  note, onSaveNote }: {
   spec: string; selection: Selection | null; version: string; baseline: string; crsByVersion: Map<string, CR[]>;
   colors: Map<string, VersionColor>; onClose: () => void; onFetchCrs?: () => void; fetching?: string | null;
+  note?: Note; onSaveNote: (key: string, text: string) => void;
 }) {
   const hasDetail = [...crsByVersion.values()].some((l) => l.some((c) => c.detail_status));
   const block = selection && selection.block !== null ? selection.clause.blocks[selection.block] : null;
@@ -181,6 +198,8 @@ export function InfoPanel({ spec, selection, version, baseline, crsByVersion, co
             <p className="small note">CR 표지(변경 이유·Clauses affected)를 아직 받지 않았습니다.{" "}
               <button className="link" onClick={onFetchCrs}>CR 표지 받기</button></p>
           )}
+          <NoteEditor key={selection.clause.key} initial={note?.text ?? ""} meta={note}
+                      onSave={(t) => onSaveNote(selection.clause.key, t)} />
           <AnnotationPanel spec={spec} version={version} clauseKey={selection.clause.key} rawHash={block?.raw_hash} />
           <FeaturePanel spec={spec} version={version} clauseKey={selection.clause.key} />
         </>

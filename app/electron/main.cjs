@@ -42,13 +42,23 @@ async function createWindow() {
   if (devUrl) return win.loadURL(devUrl);
 
   const port = await freePort();
-  const python = process.env.SPECVIEW_PYTHON || (process.platform === "win32" ? "python" : "python3");
-  const backendDir = path.join(__dirname, "..", "..", "backend");
-  const staticDir = path.join(__dirname, "..", "dist");
-  backend = spawn(python, ["-m", "specview.cli", "serve", "--port", String(port), "--static", staticDir], {
-    cwd: backendDir,
-    stdio: "inherit",
-  });
+  const args = ["serve", "--port", String(port)];
+  let cmd, cwd;
+  const env = { ...process.env };
+  if (app.isPackaged) {
+    // Installed build: PyInstaller backend, bundled pandoc and the built UI live in resources/.
+    const res = process.resourcesPath;
+    cmd = path.join(res, "backend", process.platform === "win32" ? "specview.exe" : "specview");
+    cwd = path.join(res, "backend");
+    args.push("--static", path.join(res, "ui"));
+    env.PATH = `${path.join(res, "pandoc")}${path.delimiter}${env.PATH || ""}`;
+  } else {
+    cmd = process.env.SPECVIEW_PYTHON || (process.platform === "win32" ? "python" : "python3");
+    cwd = path.join(__dirname, "..", "..", "backend");
+    args.unshift("-m", "specview");
+    args.push("--static", path.join(__dirname, "..", "dist"));
+  }
+  backend = spawn(cmd, args, { cwd, env, stdio: "inherit" });
   await waitFor(`http://127.0.0.1:${port}/api/specs`);
   await win.loadURL(`http://127.0.0.1:${port}/`);
 }

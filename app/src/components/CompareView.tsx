@@ -1,6 +1,7 @@
 // Code-review style comparison of two arbitrary versions (inline or side by side).
 import { useEffect, useMemo, useState } from "react";
 import { api, cmpVersion, tdocUrl, type CompareResult, type DiffBlock, type DiffClause, type VersionInfo } from "../api";
+import { compareReport, download } from "../export";
 import { Html } from "./Html";
 
 interface Props {
@@ -42,6 +43,10 @@ export function CompareView({ spec, versions, oldV, newV, onChange, onXref }: Pr
           <button className={sideBySide ? "on" : ""} onClick={() => setSideBySide(true)}>Side by side</button>
         </div>
         {data && <span className="muted">{data.clauses.length} changed · {data.removed.length} removed · {data.crs.length} CRs</span>}
+        {data && (
+          <button onClick={async () => download(`TS${spec}_v${oldV}_to_v${newV}.html`, await compareReport(data))}
+                  title="비교 결과를 하나의 HTML 파일로 저장 (메일·보고서용)">⤓ 보고서 내보내기</button>
+        )}
       </div>
       {cmpVersion(oldV, newV) >= 0 && <p className="empty">왼쪽 버전이 오른쪽보다 이전이어야 합니다.</p>}
       {error && <p className="empty error">{error}</p>}

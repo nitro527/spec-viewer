@@ -271,3 +271,22 @@ del { background: var(--del); color: var(--del-text); border-radius: 2px; }
 .intent { font-size: 12.5px; padding: 6px 0; border-bottom: 1px dashed var(--border); }
 .intent p { margin: 3px 0; }
 .intent blockquote { margin: 4px 0; padding-left: 8px; border-left: 3px solid var(--border); }
+
+/* bookmarks & notes */
+.star { border: none; background: none; padding: 0 2px; font-size: 14px; color: var(--muted); opacity: .35; }
+.clause-title:hover .star, .star.on { opacity: 1; }
+.star.on { color: #e0a800; }
+.toc-star { color: #e0a800; margin-left: 4px; font-size: 11px; }
+.toc-filter { display: flex; flex-direction: column; gap: 2px; }
+.note-editor { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 8px; }
+.note-editor h4 { margin: 0 0 6px; font-size: 13px; }
+.note-editor textarea { width: 100%; font: inherit; font-size: 12.5px; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px; resize: vertical; }
+
+/* command palette */
+.palette-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / .25); z-index: 30; display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; }
+.palette { width: min(640px, 92vw); background: var(--bg); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 40px rgb(0 0 0 / .3); overflow: hidden; }
+.palette input { width: 100%; border: none; border-bottom: 1px solid var(--border); border-radius: 0; padding: 10px 12px; font-size: 15px; outline: none; }
+.palette ul { list-style: none; margin: 0; padding: 4px 0; max-height: 50vh; overflow-y: auto; }
+.palette li { display: flex; justify-content: space-between; gap: 12px; padding: 5px 12px; cursor: pointer; }
+.palette li span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.palette li.on { background: var(--panel); }

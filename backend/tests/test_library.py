@@ -92,3 +92,23 @@ def test_annotation_pack_roundtrip(library):
     assert ann[0]["intent"]["summary"] == "moved" and ann[0]["version"] == "16.2.0"
     library.set_setting("annotation_url", "http://x")
     assert library.get_setting("annotation_url") == "http://x"
+
+
+def test_notes_and_bookmarks(library):
+    library.save_note("99.211", "4.3.1", bookmark=True, version="16.1.0")
+    library.save_note("99.211", "4.3.1", text="NR-U note moved later", version="16.2.0")
+    n = library.notes("99.211")[0]
+    assert (n["clause_key"], n["bookmark"], n["text"]) == ("4.3.1", 1, "NR-U note moved later")
+    assert library.save_note("99.211", "4.3.1", bookmark=False, text="") is None
+    assert library.notes("99.211") == []
+
+
+def test_crs_attach_to_next_library_version(library):
+    with library.db:
+        library.db.execute("INSERT INTO cr VALUES ('99.211','16.1.5','2020-05','RAN#88','RP-1','0130','','F','Skipped version CR')")
+    try:
+        assert [c["cr"] for c in library.crs("99.211", "16.2.0")] == ["0130", "0140"]
+        assert library.crs("99.211")[-2]["lib_version"] == "16.2.0"
+    finally:
+        with library.db:
+            library.db.execute("DELETE FROM cr WHERE cr='0130'")

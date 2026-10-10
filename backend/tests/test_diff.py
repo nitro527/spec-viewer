@@ -24,3 +24,17 @@ def test_align_pairs_similar_blocks():
     pairs = align(old, new, key=lambda s: s, text=lambda s: s)
     assert (0, 0) in pairs
     assert (None, 1) in pairs and (1, None) in pairs
+
+
+def test_multiline_math_groups():
+    from lxml import html
+
+    from specview.parse_docx import _fix_multiline_math, _top_groups
+
+    assert _top_groups("{a = 1}{b_{x} = 2}") == ["a = 1", "b_{x} = 2"]
+    assert _top_groups("{a}+{b}") is None and _top_groups("x_{a}") is None and _top_groups("{a}") is None
+    root = html.fragment_fromstring('<p><span class="math inline">{a = 1}{b = 2}</span></p>', create_parent="div")
+    _fix_multiline_math(root)
+    span = root.xpath("//span")[0]
+    assert span.get("class") == "math display"
+    assert span.text == r"\begin{gathered}a = 1 \\ b = 2\end{gathered}"

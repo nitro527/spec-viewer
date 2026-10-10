@@ -22,12 +22,14 @@ interface Props {
   onSelect: (s: Selection) => void;
   onVisible: (ord: number) => void;
   onXref: (clause: string | undefined, spec: string | undefined) => void;
+  bookmarks: Set<string>;
+  onBookmark: (key: string) => void;
 }
 
 const isNewer = (v: string | null | undefined, baseline: string) => !!v && cmpVersion(v, baseline) > 0;
 
 export const HistoryView = forwardRef<HistoryViewHandle, Props>(function HistoryView(
-  { spec, version, citeLabel, baseline, toc, highlight, selected, onSelect, onVisible, onXref }, ref,
+  { spec, version, citeLabel, baseline, toc, highlight, selected, onSelect, onVisible, onXref, bookmarks, onBookmark }, ref,
 ) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [cache, setCache] = useState<Map<number, Clause>>(new Map());
@@ -96,7 +98,7 @@ export const HistoryView = forwardRef<HistoryViewHandle, Props>(function History
             <div key={it.key} data-index={it.index} ref={virt.measureElement} className="clause-wrap"
                  style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${it.start}px)` }}>
               {c ? (
-                <ClauseView clause={c} cite={`${citeLabel} ${c.number ? `§${c.number}` : c.title} (v${version})`} baseline={baseline} highlight={highlight}
+                <ClauseView clause={c} starred={bookmarks.has(c.key)} onBookmark={onBookmark} cite={`${citeLabel} ${c.number ? `§${c.number}` : c.title} (v${version})`} baseline={baseline} highlight={highlight}
                             selectedBlock={selected?.clause.key === c.key ? selected.block : undefined}
                             flashBlock={flash?.ord === c.ord ? flash.block ?? -1 : undefined}
                             onSelect={onSelect} />
@@ -111,11 +113,17 @@ export const HistoryView = forwardRef<HistoryViewHandle, Props>(function History
   );
 });
 
-function Heading({ entry, badge, cite }: { entry: TocEntry; badge?: React.ReactNode; cite?: string }) {
+function Heading({ entry, badge, cite, starred, onBookmark }: {
+  entry: TocEntry; badge?: React.ReactNode; cite?: string; starred?: boolean; onBookmark?: (key: string) => void;
+}) {
   const [copied, setCopied] = useState(false);
   const Tag = (`h${Math.min(Math.max(entry.level, 1), 6)}`) as "h1";
   return (
     <Tag className="clause-title" id={`c-${entry.key}`}>
+      {onBookmark && (
+        <button className={`star ${starred ? "on" : ""}`} title={starred ? "북마크 해제" : "북마크"}
+                onClick={(e) => { e.stopPropagation(); onBookmark(entry.key); }}>{starred ? "★" : "☆"}</button>
+      )}
       {entry.number && <span className="num">{entry.number}</span>}
       <span>{entry.title}</span>
       {badge}
@@ -129,8 +137,8 @@ function Heading({ entry, badge, cite }: { entry: TocEntry; badge?: React.ReactN
   );
 }
 
-function ClauseView({ clause, cite, baseline, highlight, selectedBlock, flashBlock, onSelect }: {
-  clause: Clause; cite: string; baseline: string; highlight: boolean; selectedBlock?: number | null; flashBlock?: number;
+function ClauseView({ clause, cite, starred, onBookmark, baseline, highlight, selectedBlock, flashBlock, onSelect }: {
+  clause: Clause; cite: string; starred: boolean; onBookmark: (key: string) => void; baseline: string; highlight: boolean; selectedBlock?: number | null; flashBlock?: number;
   onSelect: (s: Selection) => void;
 }) {
   const added = highlight && clause.status !== "base" && isNewer(clause.introduced, baseline);
@@ -147,7 +155,7 @@ function ClauseView({ clause, cite, baseline, highlight, selectedBlock, flashBlo
   return (
     <section className={`clause ${added ? "clause-added" : ""} ${flashBlock === -1 ? "flash" : ""}`}
              data-bv={added ? clause.introduced : undefined}>
-      <div onClick={() => onSelect({ clause, block: null })}><Heading entry={clause} badge={badge} cite={cite} /></div>
+      <div onClick={() => onSelect({ clause, block: null })}><Heading entry={clause} badge={badge} cite={cite} starred={starred} onBookmark={onBookmark} /></div>
       {deletedAfter(-1).map((d, k) => <Deleted key={`d-${k}`} {...d} />)}
       {clause.blocks.map((b, i) => (
         <div key={i}>

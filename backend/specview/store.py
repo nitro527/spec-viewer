@@ -103,6 +103,11 @@ CREATE TABLE IF NOT EXISTS annotation (
   PRIMARY KEY (spec, version, raw_hash)
 );
 CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS note (          -- user bookmarks/notes, keyed by clause so they survive versions
+  spec TEXT NOT NULL, clause_key TEXT NOT NULL, bookmark INTEGER NOT NULL DEFAULT 0, text TEXT NOT NULL DEFAULT '',
+  version TEXT, updated TEXT NOT NULL,
+  PRIMARY KEY (spec, clause_key)
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS blob_fts USING fts5(hash UNINDEXED, text, tokenize = 'unicode61');
 """
 
@@ -273,9 +278,6 @@ class Library:
         q = ("SELECT c.*, d.status AS detail_status, d.cover FROM cr c LEFT JOIN cr_detail d "
              "ON d.spec=c.spec AND d.cr=c.cr AND d.rev=c.rev AND d.tdoc=c.tdoc WHERE c.spec=?")
         args = [spec]
-        if version:
-            q += " AND c.new_version=?"
-            args.append(version)
         rows = []
         for r in self.db.execute(q, args):
             d = dict(r)
@@ -283,6 +285,13 @@ class Library:
             d["detail"] = cover
             rows.append(d)
         rows.sort(key=lambda r: Version.parse(r["new_version"]).sort_key)
+        lib_versions = [Version.parse(v["version"]) for v in self.versions(spec)]
+        for r in rows:
+            # Library version in which this CR's change first appears (versions may be skipped).
+            v = Version.parse(r["new_version"])
+            r["lib_version"] = next((str(x) for x in lib_versions if x >= v), None)
+        if version:
+            rows = [r for r in rows if r["lib_version"] == version]
         return rows
 
     def stats(self, spec: str) -> dict:
@@ -296,7 +305,7 @@ class Library:
             removed = self.db.execute("SELECT COUNT(*) FROM removed_clause WHERE version_id=?", (v["id"],)).fetchone()[0]
             cats: dict[str, int] = {}
             for c in crs:
-                if c["new_version"] == v["version"]:
+                if c["lib_version"] == v["version"]:
                     cats[c["cat"] or "-"] = cats.get(c["cat"] or "-", 0) + 1
             per_version.append({"version": v["version"], "release": v["release"],
                                 "added": counts.get("added", 0) if v is not vers[0] else 0,
@@ -441,6 +450,25 @@ class Library:
     def set_setting(self, key: str, value: str) -> None:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO setting VALUES (?,?)", (key, value))
+
+    def notes(self, spec: str) -> list[dict]:
+        return [dict(r) for r in self.db.execute(
+            "SELECT clause_key, bookmark, text, version, updated FROM note WHERE spec=? ORDER BY updated DESC", (spec,))]
+
+    def save_note(self, spec: str, key: str, bookmark: bool | None = None, text: str | None = None,
+                  version: str | None = None) -> dict | None:
+        import datetime as dt
+
+        cur = self.db.execute("SELECT bookmark, text FROM note WHERE spec=? AND clause_key=?", (spec, key)).fetchone()
+        bm = int(bookmark) if bookmark is not None else (cur["bookmark"] if cur else 0)
+        tx = text if text is not None else (cur["text"] if cur else "")
+        with self.db:
+            if not bm and not tx.strip():
+                self.db.execute("DELETE FROM note WHERE spec=? AND clause_key=?", (spec, key))
+                return None
+            now = dt.datetime.now().isoformat(timespec="seconds")
+            self.db.execute("INSERT OR REPLACE INTO note VALUES (?,?,?,?,?,?)", (spec, key, bm, tx, version, now))
+        return {"clause_key": key, "bookmark": bm, "text": tx, "version": version, "updated": now}
 
     def import_pack(self, pack: dict) -> int:
         if not str(pack.get("format", "")).startswith("specview-annotations/"):

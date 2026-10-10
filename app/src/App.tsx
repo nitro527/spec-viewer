@@ -11,6 +11,7 @@ export function App() {
   const [tabs, setTabs] = useState<TabState[]>(() => [newTab()]);
   const [activeId, setActiveId] = useState(tabs[0].id);
   const [findSignal, setFindSignal] = useState(0);
+  const [paletteSignal, setPaletteSignal] = useState(0);
 
   const update = useCallback((id: string, patch: Partial<TabState>) =>
     setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t))), []);
@@ -45,6 +46,7 @@ export function App() {
     const h = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === "f") { e.preventDefault(); setFindSignal((n) => n + 1); }
+      if (mod && e.key.toLowerCase() === "p") { e.preventDefault(); setPaletteSignal((n) => n + 1); }
       if (mod && e.key.toLowerCase() === "t") { e.preventDefault(); open(newTab()); }
       if (mod && e.key.toLowerCase() === "w") { e.preventDefault(); close(activeId); }
     };
@@ -68,6 +70,7 @@ export function App() {
         <div key={t.id} className="tabpane" style={{ display: t.id === activeId ? "flex" : "none" }}>
           {t.spec ? (
             <SpecTab tab={t} active={t.id === activeId} findSignal={t.id === activeId ? findSignal : 0}
+                     paletteSignal={t.id === activeId ? paletteSignal : 0}
                      onUpdate={(p) => update(t.id, p)} onOpenSpec={openSpec} />
           ) : (
             <Home prefill={t.prefill} onOpen={(spec) => update(t.id, { spec, label: spec })} />

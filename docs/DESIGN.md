@@ -56,10 +56,15 @@ blob_fts                          -- FTS5 전문 검색 인덱스
 
 | 단계 | 소스 | 상태 |
 |---|---|---|
-| 버전 → CR 목록 | 스펙 끝 Change history 표 (Date/Meeting/TDoc/CR/Rev/Cat/Subject/New version) | ✅ MVP |
-| CR → 절 | CR 표지의 "Clauses affected" | 다음 단계 (Tdoc zip 다운로드 필요) |
-| CR → 이유 | CR 표지 "Reason for change" / "Summary of change" / WI code | 다음 단계 |
+| 버전 → CR 목록 | 스펙 끝 Change history 표 (Date/Meeting/TDoc/CR/Rev/Cat/Subject/New version) | ✅ |
+| CR → 절 | TSG Tdoc zip(`.../TSG_RAN/TSGR_87e/Docs/RP-200186.zip`) 안의 CR docx 표지 "Clauses affected" | ✅ (`crdocs.py`) |
+| CR → 이유 | 표지 "Reason for change" / "Summary of change" / WI code | ✅ |
+| 건너뛴 버전 | 라이브러리에 없는 버전의 CR 은 그 다음 받은 버전에 귀속 (`lib_version`) | ✅ |
+| CR → 38.822 | WI code ↔ 38.822 섹션 제목(레이어별·릴리즈별 매칭), 본문 약어(PRACH…)로 정렬 | ✅ (`features.py`) |
 | 절 내 여러 CR 중복 시 구분 | CR 본문(수정 표시) ↔ diff 매칭, 애매하면 LLM | annotation 서버 |
+
+검증: 38.211 Rel-16 11개 버전에서 CR 이 "Clauses affected"로 적은 절의 98%가 실제 diff 에서 변경으로 잡혔고,
+diff 로 잡힌 변경 절의 96%가 CR 로 설명됨.
 
 ## 로컬 API (`specview serve`, 127.0.0.1)
 
@@ -85,10 +90,11 @@ GET  /api/jobs
 
 ## 로드맵
 
-1. **MVP (현재)**: 변환, History/Compare 뷰어, Change history CR 표시, 다운로드, 탭, 검색, 참조 링크.
-2. **CR 상세**: Tdoc(CR) 자동 다운로드 → 표지 파싱 → 절 단위 CR 매핑, Reason/Summary 표시, WI code.
-3. **38.822 feature 연결**: WI code·feature group 으로 1차 매핑, 정밀 매핑은 서버.
-4. **Annotation 서버 (LLM)**: 오프라인 배치로 생성한 결과를 버전별 JSON pack 으로 배포, 클라이언트는 받아서 오버레이.
+1. ✅ 변환, History/Compare/Clean/Statistics, Change history CR, 다운로드, 탭, 검색, 참조 링크, 이동 감지.
+2. ✅ CR 표지 → 절 단위 CR 매핑, Reason/Summary, WI code.
+3. ✅ 38.822 feature 연결 (WI 기반 + 파라미터 이름).
+4. 🔶 **Annotation 서버 (LLM)** — 골격 완료 (`server/`): pack 생성(CR·feature·Claude 의도 요약), 배포 API,
+   클라이언트 동기화/표시. Chairman's notes 연결은 stub (`chairnotes.py`).
    - Chairman's notes / Tdoc agreements ↔ 스펙 변경 연결, 변경 의도 요약, 38.822 feature 매핑.
    - 클라이언트는 서버 없이도 완전히 동작해야 함(pack 은 선택).
    - pack 형식(초안):
@@ -98,5 +104,10 @@ GET  /api/jobs
                   "intent": "…", "features": ["38.822:23-1"], "agreements": [{"meeting": "RAN1#108-e", "url": "…"}]}]}
      ```
      `raw_hash` 로 붙이므로 로컬 변환 결과와 독립적으로 매칭된다.
-5. **사용성**: 북마크/메모(버전 넘어 유지), 인용 복사(`TS 38.211 §7.4.1.1.2 (v17.3.0)`), 절 단독 타임라인,
-   명령 팔레트(Ctrl+P "38.213 10.1"), 보고서용 diff 내보내기, Windows 설치 패키지(Python·pandoc 동봉).
+5. ✅ 사용성: 북마크/메모, 인용 복사, Ctrl+P 팔레트, HTML 보고서 내보내기, Windows 패키징 설정(docs/PACKAGING.md).
+
+### 다음 후보
+- CR 본문의 track changes(w:ins/w:del)를 읽어 문단 단위로 정확한 CR 지정 (현재는 절 단위)
+- Chairman's notes agreement ↔ 변경 연결 (서버)
+- 수식 내부 diff (LaTeX 토큰 단위), 표 셀 단위 diff
+- 38.212/38.213/38.214 등 여러 스펙 동시 다운로드 성능(병렬 변환)

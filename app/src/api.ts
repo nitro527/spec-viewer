@@ -30,6 +30,7 @@ export interface CR {
   spec: string; new_version: string; date: string; meeting: string; tdoc: string;
   cr: string; rev: string; cat: string; subject: string;
   detail_status: "ok" | "missing" | "error" | null; detail: CRDetail | null;
+  lib_version: string | null; // first downloaded version that contains this CR
 }
 
 /** Does a CR (by its "Clauses affected") touch this clause? Parent/child clauses count. */
@@ -69,6 +70,8 @@ export interface Annotation {
   agreements: { meeting?: string; text: string; source?: string }[]; intent: Intent | null;
 }
 
+export interface Note { clause_key: string; bookmark: number; text: string; version: string | null; updated: string }
+
 export interface SearchHit { ord: number; key: string; number: string; title: string; block: number | null; snippet: string }
 export interface Job { id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[] }
 
@@ -92,6 +95,13 @@ export const api = {
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
   stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),
   jobs: () => get<Job[]>("/api/jobs"),
+  notes: (spec: string) => get<Note[]>(`/api/specs/${s(spec)}/notes`),
+  saveNote: async (spec: string, key: string, body: { bookmark?: boolean; text?: string; version?: string }) => {
+    const r = await fetch(`/api/specs/${s(spec)}/notes/${s(key)}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    return r.json() as Promise<Note | null>;
+  },
   annotations: (spec: string, v: string, key: string) =>
     get<Annotation[]>(`/api/specs/${s(spec)}/${s(v)}/clause/${s(key)}/annotations`),
   settings: () => get<{ annotation_url: string }>("/api/settings"),

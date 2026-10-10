@@ -1,7 +1,8 @@
 // One open specification: toolbar, TOC, reading/compare view, info panel and timeline.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type CR, type SearchHit, type TocEntry, type VersionInfo } from "../api";
+import { api, type CR, type Note, type SearchHit, type TocEntry, type VersionInfo } from "../api";
 import { highlightCss, highlighted, versionColors } from "../colors";
+import { CommandPalette } from "./CommandPalette";
 import { CompareView, VersionSelect } from "./CompareView";
 import { FindBar } from "./FindBar";
 import { HistoryView, type HistoryViewHandle, type Selection } from "./HistoryView";
@@ -24,11 +25,12 @@ interface Props {
   tab: TabState;
   active: boolean;
   findSignal: number;
+  paletteSignal: number;
   onUpdate: (patch: Partial<TabState>) => void;
   onOpenSpec: (spec: string, clause?: string) => void;
 }
 
-export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props) {
+export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOpenSpec }: Props) {
   const spec = tab.spec!;
   const [versions, setVersions] = useState<VersionInfo[]>([]);
   const [version, setVersion] = useState<string | undefined>(tab.version);
@@ -43,6 +45,9 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
   const [infoOpen, setInfoOpen] = useState(true);
   const [cmp, setCmp] = useState<[string, string] | null>(null);
   const [crJob, setCrJob] = useState<string | null>(null);
+  const [notes, setNotes] = useState<Map<string, Note>>(new Map());
+  const [bookmarkedOnly, setBookmarkedOnly] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const view = useRef<HistoryViewHandle>(null);
   const pendingJump = useRef<string | undefined>(tab.jumpTo);
 
@@ -54,6 +59,7 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
       setBaseline(vs[0].version);
     });
     api.crs(spec).then(setCrs);
+    api.notes(spec).then((ns) => setNotes(new Map(ns.map((n) => [n.clause_key, n]))));
   }, [spec]);
 
   useEffect(() => {
@@ -79,6 +85,9 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
   useEffect(() => {
     if (active && findSignal) setFindOpen(true);
   }, [findSignal, active]);
+  useEffect(() => {
+    if (active && paletteSignal) setPaletteOpen(true);
+  }, [paletteSignal, active]);
 
   // Alt+←/→ steps through versions.
   useEffect(() => {
@@ -99,7 +108,11 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
   const css = useMemo(() => highlightCss(colors, shown, `#tab-${tab.id}`), [colors, shown, tab.id]);
   const crsByVersion = useMemo(() => {
     const m = new Map<string, CR[]>();
-    for (const c of crs) m.set(c.new_version, [...(m.get(c.new_version) ?? []), c]);
+    // Group by the first downloaded version containing the CR, so skipped versions are not lost.
+    for (const c of crs) {
+      const v = c.lib_version ?? c.new_version;
+      m.set(v, [...(m.get(v) ?? []), c]);
+    }
     return m;
   }, [crs]);
 
@@ -126,6 +139,18 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
       if (j.state !== "running") { clearInterval(t); api.crs(spec).then(setCrs); }
     }, 1000);
   }, [spec]);
+
+  const bookmarks = useMemo(() => new Set([...notes.values()].filter((n) => n.bookmark).map((n) => n.clause_key)), [notes]);
+  const updateNote = useCallback(async (key: string, body: { bookmark?: boolean; text?: string }) => {
+    const saved = await api.saveNote(spec, key, { ...body, version });
+    setNotes((m) => {
+      const next = new Map(m);
+      if (saved) next.set(key, saved); else next.delete(key);
+      return next;
+    });
+  }, [spec, version]);
+  const toggleBookmark = useCallback((key: string) => updateNote(key, { bookmark: !bookmarks.has(key) }),
+    [updateNote, bookmarks]);
 
   const onFind = useCallback((h: SearchHit) => jump(h.ord, h.block), [jump]);
 
@@ -168,12 +193,13 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
 
       <div className="body">
         <aside className="left">
-          <label className="small toc-filter">
-            <input type="checkbox" checked={tocChangedOnly} onChange={(e) => setTocChangedOnly(e.target.checked)} />
-            변경된 절만
-          </label>
+          <div className="small toc-filter">
+            <label><input type="checkbox" checked={tocChangedOnly} onChange={(e) => setTocChangedOnly(e.target.checked)} /> 변경된 절만</label>
+            <label><input type="checkbox" checked={bookmarkedOnly} onChange={(e) => setBookmarkedOnly(e.target.checked)} /> ★ 북마크만 ({bookmarks.size})</label>
+          </div>
           <Toc toc={toc} active={visible} baseline={baseline} highlight={mode === "history"}
-               changedOnly={tocChangedOnly && mode === "history"} onJump={(o) => jump(o)} />
+               changedOnly={tocChangedOnly && mode === "history"} bookmarks={bookmarks} bookmarkedOnly={bookmarkedOnly}
+               onJump={(o) => jump(o)} />
         </aside>
 
         <main className="center">
@@ -193,7 +219,7 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
             <div className="doc-wrap">
               <HistoryView ref={view} spec={spec} version={version} citeLabel={`TS ${spec}`} baseline={baseline} toc={toc}
                            highlight={mode === "history"} selected={selection} onSelect={setSelection}
-                           onVisible={setVisible} onXref={onXref} />
+                           onVisible={setVisible} onXref={onXref} bookmarks={bookmarks} onBookmark={toggleBookmark} />
               {mode === "history" && <ChangeRuler toc={toc} baseline={baseline} onJump={(o) => jump(o)} />}
             </div>
           )}
@@ -201,10 +227,16 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
 
         {infoOpen && (mode === "history" || mode === "clean") && (
           <InfoPanel spec={spec} selection={selection} version={version} baseline={baseline} crsByVersion={crsByVersion}
-                     colors={colors} onClose={() => setSelection(null)} onFetchCrs={fetchCrs} fetching={crJob} />
+                     colors={colors} onClose={() => setSelection(null)} onFetchCrs={fetchCrs} fetching={crJob}
+                     note={selection ? notes.get(selection.clause.key) : undefined}
+                     onSaveNote={(key, text) => updateNote(key, { text })} />
         )}
       </div>
 
+      {paletteOpen && (
+        <CommandPalette spec={spec} toc={toc} versions={versions} onJump={(o) => jump(o)} onVersion={setVersion}
+                        onMode={setMode} onOpenSpec={onOpenSpec} onClose={() => setPaletteOpen(false)} />
+      )}
       <Timeline versions={versions} version={version} baseline={baseline} colors={colors}
                 onVersion={setVersion} onBaseline={setBaseline} />
     </div>

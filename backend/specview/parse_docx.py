@@ -189,6 +189,41 @@ def _rewrite_images(root, media_dir: Path) -> dict[str, Asset]:
     return assets
 
 
+def _top_groups(latex: str) -> list[str] | None:
+    """``"{a}{b}{c}"`` -> ``["a", "b", "c"]`` when the whole string is >= 2 top-level brace groups."""
+    t = latex.strip()
+    groups, depth, start, i = [], 0, None, 0
+    while i < len(t):
+        ch = t[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i + 1
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return None
+            if depth == 0:
+                groups.append(t[start:i])
+        elif depth == 0 and not ch.isspace():
+            return None
+        i += 1
+    return groups if depth == 0 and len(groups) >= 2 else None
+
+
+def _fix_multiline_math(root) -> None:
+    """pandoc renders a Word equation array (several lines in one oMathPara) as ``{l1}{l2}{l3}``,
+    which typesets as one run-on line; turn it into a centred multi-line block."""
+    for span in root.xpath('//span[contains(concat(" ", @class, " "), " math ")]'):
+        groups = _top_groups(span.text or "")
+        if groups:
+            span.text = "\\begin{gathered}" + " \\\\ ".join(g.strip() for g in groups) + "\\end{gathered}"
+            span.set("class", "math display")
+
+
 def _blocks_from(el) -> list[Block]:
     tag = el.tag if isinstance(el.tag, str) else ""
     if tag == "div" and el.get("data-custom-style"):
@@ -257,6 +292,7 @@ def parse_docx(docx: Path) -> ParsedSpec:
         doc_html = _run_pandoc(Path(docx), media)
         root = html.fragment_fromstring(doc_html, create_parent="div")
         assets = _rewrite_images(root, media)
+        _fix_multiline_math(root)
         doc_html = "".join(_serialize(el) for el in root)
     clauses = html_to_clauses(doc_html)
     return ParsedSpec(guess_title(clauses), clauses, assets)

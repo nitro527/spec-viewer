@@ -102,6 +102,15 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         threading.Thread(target=_run_features, args=(job_id,), daemon=True).start()
         return jobs[job_id]
 
+    @app.get("/api/specs/{spec}/notes")
+    def notes(spec: str):
+        return _get(lib.notes, spec)
+
+    @app.put("/api/specs/{spec}/notes/{key}")
+    def save_note(spec: str, key: str, body: dict):
+        with lock:
+            return lib.save_note(spec, key, body.get("bookmark"), body.get("text"), body.get("version"))
+
     @app.get("/api/settings")
     def get_settings():
         return {"annotation_url": lib.get_setting("annotation_url", os.environ.get("SPECVIEW_ANNOTATION_URL", ""))}
