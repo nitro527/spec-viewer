@@ -77,3 +77,12 @@ def test_tdoc_list_and_summaries():
     text, score = minutes.excerpt(paras, {"sequence", "group", "hopping"}, set())
     assert "no explicit agreement" in text and "PT-RS" not in text and score > 0
     assert minutes.excerpt(["PT-RS density per RB"], {"sequence", "group", "hopping"}, set()) == ("", 0)
+
+
+def test_document_viewer_only_serves_meeting_documents(tmp_path):
+    import pytest
+
+    for folder, tdoc in [("https://evil.example/TSGR1_95", None), ("https://www.3gpp.org/ftp/tsg_ran/WG1_RL1/TSGR1_95", "../x"),
+                         ("https://www.3gpp.org/ftp/tsg_ran/WG1_RL1/TSGR1_95/../../x", None)]:
+        with pytest.raises(ValueError):
+            minutes.document_html(folder, tdoc, tmp_path)

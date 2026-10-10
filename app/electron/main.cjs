@@ -32,10 +32,16 @@ async function waitFor(url, timeoutMs = 20000) {
 async function createWindow() {
   const win = new BrowserWindow({ width: 1500, height: 950, title: "Spec Viewer", autoHideMenuBar: true });
   // External links (3GPP portal, Tdoc pages) open in the system browser.
-  win.webContents.setWindowOpenHandler(({ url }) => {
+  // Our own pages (meeting document viewer) open in a new app window, from any window; everything else in the browser.
+  const openHandler = (wc) => ({ url }) => {
+    if (url.startsWith(new URL(wc.getURL()).origin + "/")) {
+      return { action: "allow", overrideBrowserWindowOptions: { width: 1100, height: 900, autoHideMenuBar: true } };
+    }
     shell.openExternal(url);
     return { action: "deny" };
-  });
+  };
+  win.webContents.setWindowOpenHandler(openHandler(win.webContents));
+  app.on("browser-window-created", (_e, child) => child.webContents.setWindowOpenHandler(openHandler(child.webContents)));
 
   // Dev: Vite serves the UI and proxies /api to a backend started by hand (specview serve).
   const devUrl = process.env.SPECVIEW_UI_URL;

@@ -2,6 +2,7 @@
 // (both optional; the viewer works without them).
 import { useEffect, useState } from "react";
 import { api, tdocUrl, type Annotation } from "../api";
+import { findKey, openMeetingDoc } from "./DocWindow";
 
 const VIA = { tdoc: "이 CR 의 Tdoc 이 나오는 결정", clause: "이 절에 대한 TP/CR", terms: "바뀐 내용과 용어가 겹침" } as const;
 
@@ -90,7 +91,8 @@ export function AnnotationPanel({ spec, version, clauseKey, rawHash }: {
               {!!a.draft_crs?.length && (
                 <p className="small">세부 CR{" "}
                   {a.draft_crs.map((d) => (
-                    <a key={d.tdoc} href={tdocUrl(d.tdoc)} target="_blank" rel="noreferrer" title={`${d.title} (CR${d.parent_cr} 에 포함, ${d.meeting})`}>
+                    <a key={d.tdoc} href={tdocUrl(d.tdoc)} target="_blank" rel="noreferrer" title={`${d.title} (CR${d.parent_cr} 에 포함, ${d.meeting}) — 클릭하면 새 창에서 봅니다`}
+                       onClick={(e) => { if (d.folder) { e.preventDefault(); openMeetingDoc(d.folder, d.tdoc); } }}>
                       {d.tdoc}</a>
                   )).reduce<React.ReactNode[]>((acc, x, i) => (i ? [...acc, ", ", x] : [x]), [])}
                 </p>
@@ -104,7 +106,9 @@ export function AnnotationPanel({ spec, version, clauseKey, rawHash }: {
               <summary><b>{f.meeting}</b> · <a href={tdocUrl(f.tdoc)} target="_blank" rel="noreferrer">{f.tdoc}</a> {f.title}
                 <span className="muted tiny"> ({f.source})</span></summary>
               <blockquote>{f.excerpt}</blockquote>
-              <a href={f.url} target="_blank" rel="noreferrer" className="tiny">원문 받기</a>
+              <button className="link tiny" onClick={() => openMeetingDoc(f.url.split("/Docs/")[0], f.tdoc, findKey(f.excerpt))}>
+                문서 보기 (새 창)</button>
+              {" · "}<a href={f.url} target="_blank" rel="noreferrer" className="tiny">원문 받기</a>
             </details>
           ))}
           {a.agreements.length > 0 && <p className="small"><b>회의 합의</b> <span className="muted tiny">WG 회의록에서 찾은 근거</span></p>}
@@ -115,7 +119,9 @@ export function AnnotationPanel({ spec, version, clauseKey, rawHash }: {
                 {g.via && <span className="muted tiny"> ({VIA[g.via]})</span>}
               </summary>
               <blockquote>{g.text}</blockquote>
-              {g.source && <a href={g.source} target="_blank" rel="noreferrer" className="tiny">회의록 받기</a>}
+              {g.folder && <button className="link tiny" onClick={() => openMeetingDoc(g.folder!, undefined, findKey(g.text))}>
+                회의록에서 보기 (새 창)</button>}
+              {g.source && <>{g.folder && " · "}<a href={g.source} target="_blank" rel="noreferrer" className="tiny">회의록 받기</a></>}
             </details>
           ))}
         </div>

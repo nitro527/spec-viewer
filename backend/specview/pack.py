@@ -231,7 +231,8 @@ def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None 
             if resolve_drafts and hit:
                 ctx["draft_covers"] = draft_crs(hit, ch["clause"], lib.path.parent / "cache")
                 ch["draft_crs"] = [{"tdoc": d["wg_tdoc"], "title": d["title"], "parent_cr": d["parent_cr"],
-                                    "meeting": d.get("meeting_folder", "").rsplit("/", 1)[-1]} for d in ctx["draft_covers"]]
+                                    "meeting": d.get("meeting_folder", "").rsplit("/", 1)[-1],
+                                    "folder": d.get("meeting_folder", "")} for d in ctx["draft_covers"]]
             if finder and hit:
                 ch["agreements"] = finder.find(ctx, spec, hit, ctx.get("draft_covers", []))
                 ctx["agreements"] = ch["agreements"]

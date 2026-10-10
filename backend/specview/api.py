@@ -323,6 +323,18 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     # ---- downloads (background jobs) ----
 
+    @app.get("/api/meeting-doc")
+    def meeting_doc(folder: str, tdoc: str | None = None):
+        """A WG meeting report (no tdoc) or meeting Tdoc rendered for the document viewer window."""
+        from . import minutes
+
+        try:
+            return minutes.document_html(folder, tdoc, home / "cache")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+
     @app.get("/api/catalog/{series}")
     def spec_catalog(series: str, refresh: bool = False):
         """Specs of a series with titles for the download picker. Fetched once, then kept on disk until the

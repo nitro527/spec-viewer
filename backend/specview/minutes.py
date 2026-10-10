@@ -316,8 +316,7 @@ def fetch_tdoc_text(folder: str, tdoc: str, cache_dir: Path, session=None) -> li
                         doc = _convert_doc(doc)
                     except LegacyDocError:
                         return None
-                paras = [t for _, t in _paragraphs(doc) if t]
-                doc.unlink(missing_ok=True)
+                paras = [t for _, t in _paragraphs(doc) if t]  # the .docx stays for the document viewer
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps(paras or [], ensure_ascii=False), encoding="utf-8")
     return paras
@@ -436,3 +435,60 @@ def summaries_for(change: dict, agreements: list[dict], reports: dict[str, dict]
         if len(out) >= max_items:
             break
     return out
+
+
+# ---------------------------------------------------------------- document viewer
+
+_FOLDER_URL = re.compile(r"^https://www\.3gpp\.org/ftp/tsg_ran/WG[1-4]_[A-Za-z0-9]+/TSGR[1-4]_[0-9A-Za-z_]+$")
+_TDOC_ID = re.compile(r"^R[1-4]-\d{6,7}$")
+
+
+def _doc_file(folder: str, tdoc: str | None, cache_dir: Path) -> Path | None:
+    work = Path(cache_dir) / "minutes" / folder_name(folder)
+    if tdoc is None:  # the meeting report
+        if not any(work.glob("*.docx")):
+            fetch_report(folder, cache_dir)
+        docs = [d for d in work.glob("*.docx") if not _TDOC_ID.match(d.stem.split("_")[0])]
+        return max(docs, key=lambda d: d.stat().st_size) if docs else None
+    docs = sorted(work.glob(f"{tdoc}*.docx"))
+    if not docs:
+        (work / f"{tdoc}.json").unlink(missing_ok=True)  # cached text from before the .docx was kept
+        fetch_tdoc_text(folder, tdoc, cache_dir)
+        docs = sorted(work.glob(f"{tdoc}*.docx"))
+    return docs[0] if docs else None
+
+
+def document_html(folder: str, tdoc: str | None, cache_dir: Path) -> dict:
+    """A meeting report or Tdoc as HTML for the viewer window (images inlined, equations as KaTeX spans)."""
+    import base64
+    import tempfile
+
+    from lxml import html as lhtml
+
+    from .parse_docx import _fix_multiline_math, _rewrite_images, _run_pandoc, _serialize
+
+    if not _FOLDER_URL.match(folder) or (tdoc is not None and not _TDOC_ID.match(tdoc)):
+        raise ValueError("not a 3GPP working-group meeting document")
+    doc = _doc_file(folder, tdoc, cache_dir)
+    if doc is None:
+        raise FileNotFoundError(f"{tdoc or 'report'} not found in {folder_name(folder)}")
+    cached = doc.with_suffix(".html")
+    if not cached.exists():
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "media"
+            root = lhtml.fragment_fromstring(_run_pandoc(doc, media), create_parent="div")
+            assets = _rewrite_images(root, media)
+            _fix_multiline_math(root)
+            for img in root.xpath("//img[starts-with(@src, '/api/asset/')]"):
+                a = assets.get(img.get("src").rsplit("/", 1)[-1])
+                if a:
+                    img.set("src", f"data:{a.mime};base64,{base64.b64encode(a.data).decode()}")
+            cached.write_text("".join(_serialize(el) for el in root), encoding="utf-8")
+    title = ""
+    if tdoc:
+        rep = fetch_report(folder, cache_dir) or {}
+        row = next((t for t in rep.get("tdocs", []) if t["tdoc"] == tdoc), None)
+        title = f"{row['title']} ({row['source']})" if row else ""
+    return {"meeting": meeting_label(folder), "tdoc": tdoc, "title": title or ("Meeting report" if not tdoc else ""),
+            "html": cached.read_text(encoding="utf-8"),
+            "url": f"{folder}/Docs/{tdoc}.zip" if tdoc else report_url(folder)}
