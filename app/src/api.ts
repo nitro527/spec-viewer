@@ -74,7 +74,7 @@ export interface Intent { summary: string; motivation: string; impact: string; c
 export interface Annotation {
   clause: string; raw_hash: string; change: string; version: string; generated?: string;
   crs: { cr: string; tdoc: string; subject: string }[]; features: string[];
-  agreements: { meeting?: string; text: string; source?: string }[]; intent: Intent | null; intent_error?: string;
+  agreements: { meeting?: string; agenda?: string; kind?: string; text: string; source?: string; via?: "tdoc" | "clause" | "terms" }[]; intent: Intent | null; intent_error?: string;
   draft_crs?: { tdoc: string; title: string; parent_cr: string; meeting: string }[];
 }
 

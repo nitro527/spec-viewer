@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { api, tdocUrl, type Annotation } from "../api";
 
+const VIA = { tdoc: "이 CR 의 Tdoc 이 나오는 결정", clause: "이 절에 대한 TP/CR", terms: "바뀐 내용과 용어가 겹침" } as const;
+
 export function AnnotationPanel({ spec, version, clauseKey, rawHash }: {
   spec: string; version: string; clauseKey: string; rawHash?: string;
 }) {
@@ -96,7 +98,17 @@ export function AnnotationPanel({ spec, version, clauseKey, rawHash }: {
               <p className="muted tiny">신뢰도 {a.intent.confidence}{a.intent.model ? ` · ${a.intent.model}` : ""} · AI 요약은 CR 원문으로 확인하세요</p>
             </>
           ) : <p className="muted small">의도 요약 없음{a.intent_error ? ` (${a.intent_error})` : " (CR 매핑만 있음)"}</p>}
-          {a.agreements.map((g, j) => <blockquote key={j} className="small">{g.meeting && <b>{g.meeting} </b>}{g.text}</blockquote>)}
+          {a.agreements.length > 0 && <p className="small"><b>회의 합의</b> <span className="muted tiny">WG 회의록에서 찾은 근거</span></p>}
+          {a.agreements.map((g, j) => (
+            <details key={j} className="agreement small">
+              <summary>
+                <b>{g.meeting}</b> · {g.agenda || "(안건 없음)"} · {g.kind ?? "Agreement"}
+                {g.via && <span className="muted tiny"> ({VIA[g.via]})</span>}
+              </summary>
+              <blockquote>{g.text}</blockquote>
+              {g.source && <a href={g.source} target="_blank" rel="noreferrer" className="tiny">회의록 받기</a>}
+            </details>
+          ))}
         </div>
       ))}
       {actions}

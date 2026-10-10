@@ -359,3 +359,6 @@ input.num { width: 56px; margin: 0 4px; }
 .chip.on .chip-have { color: #fff; }
 .picked { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .chip b { white-space: nowrap; }
+.agreement { margin: 3px 0; }
+.agreement summary { cursor: pointer; }
+.agreement blockquote { white-space: pre-wrap; max-height: 260px; overflow-y: auto; margin: 4px 0; padding-left: 8px; border-left: 3px solid var(--border); }

@@ -46,5 +46,5 @@ specview-annotate --out packs serve --port 8800
   데스크톱 앱도 쓰도록 backend 에 있습니다. `pack.py`, `prompting.py`, `llm_openai.py` 는 그쪽을 다시 내보냅니다.
   json_schema 미지원 서버는 JSON 모드로 자동 전환, `<think>` 블록·코드펜스 제거, 하루 한도 초과(429)면 재시도 없이 중단
 - `llm.py` — Claude(`claude-opus-5-5`) structured output, 안전 거절 시 서버측 fallback
-- `chairnotes.py` — RAN1 Chairman's notes 연결 (골격)
+- 회의록 연결은 backend `specview.minutes` (WG 최종 회의록 파싱·매칭). `chairnotes.py` 는 예전 골격
 - `app.py` — `GET /v1/packs`, `GET /v1/packs/{spec}/{version}.json`

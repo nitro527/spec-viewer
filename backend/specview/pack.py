@@ -134,11 +134,62 @@ def draft_crs(hit: list[dict], clause: str, cache_dir, session=None, max_per_cr:
     return out
 
 
+class AgreementFinder:
+    """WG meeting reports for the CRs of a pack, fetched once per meeting (see minutes.py)."""
+
+    def __init__(self, cache_dir, max_meetings: int = 4):
+        from . import minutes
+
+        self.m = minutes
+        self.cache_dir = cache_dir
+        self.max_meetings = max_meetings
+        self.reports: dict[str, dict | None] = {}
+        self.index = None
+
+    def _meetings(self, hit: list[dict], drafts: list[dict]) -> list[str]:
+        from . import crdocs
+
+        out: list[str] = []
+        for d in drafts:
+            if d.get("meeting_folder"):
+                out.append(d["meeting_folder"])
+        for c in hit:
+            cov = c["detail"]
+            out += crdocs.wg_meetings(" ".join(cov.get(k) or "" for k in ("title", "reason", "summary", "consequences")))
+            if cov.get("wg_tdoc"):
+                if self.index is None:
+                    self.index = self.m.TdocIndex(self.cache_dir)
+                try:
+                    f = self.index.meeting_of(cov["wg_tdoc"])
+                except Exception:
+                    f = None
+                if f:
+                    out.append(f)
+        seen = []
+        for f in out:
+            if f not in seen:
+                seen.append(f)
+        return seen[:self.max_meetings]
+
+    def find(self, change: dict, spec: str, hit: list[dict], drafts: list[dict]) -> list[dict]:
+        reports = []
+        for f in self._meetings(hit, drafts):
+            if f not in self.reports:
+                try:
+                    self.reports[f] = self.m.fetch_report(f, self.cache_dir)
+                except Exception:
+                    self.reports[f] = None
+            if self.reports[f]:
+                reports.append(self.reports[f])
+        tdocs = {c["detail"]["wg_tdoc"] for c in hit if c["detail"].get("wg_tdoc")} | {d["wg_tdoc"] for d in drafts}
+        return self.m.match_agreements(change, reports, tdocs, spec) if reports else []
+
+
 def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None = None,
                progress: Callable[[int, int], None] | None = None, limit: int | None = None,
                clause_key: str | None = None, skip_uncovered: bool = False,
                skip_hashes: set[str] | frozenset = frozenset(), only_hashes: set[str] | None = None,
-               resolve_drafts: bool = True) -> dict:
+               resolve_drafts: bool = True, find_agreements: bool = True) -> dict:
     """``limit`` caps the LLM requests; ``skip_uncovered`` leaves changes no CR explains (front matter,
     copyright year ...) to the rules; ``skip_hashes`` are blocks that already have a summary;
     ``only_hashes`` restricts the pack to those blocks (e.g. the texts a clause shows today)."""
@@ -150,6 +201,7 @@ def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None 
         changes = [ch for ch in changes if ch["raw_hash"] not in skip_hashes]
     stopped = None
     asked = uncovered = capped = 0
+    finder = AgreementFinder(lib.path.parent / "cache") if model is not None and find_agreements else None
     for n, ch in enumerate(changes, 1):
         hit = [c for c in crs if any(_touches(x, ch["clause"]) for x in c["detail"]["clauses"])]
         ch["crs"] = [{"cr": c["cr"], "rev": c["rev"], "tdoc": c["tdoc"], "wg_tdoc": c["detail"]["wg_tdoc"],
@@ -174,6 +226,9 @@ def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None 
                 ctx["draft_covers"] = draft_crs(hit, ch["clause"], lib.path.parent / "cache")
                 ch["draft_crs"] = [{"tdoc": d["wg_tdoc"], "title": d["title"], "parent_cr": d["parent_cr"],
                                     "meeting": d.get("meeting_folder", "").rsplit("/", 1)[-1]} for d in ctx["draft_covers"]]
+            if finder and hit:
+                ch["agreements"] = finder.find(ctx, spec, hit, ctx.get("draft_covers", []))
+                ctx["agreements"] = ch["agreements"]
             try:
                 ch["intent"] = model.intent(ctx)
             except QuotaExceeded as e:  # every later request would fail the same way

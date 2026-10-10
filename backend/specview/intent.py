@@ -33,6 +33,8 @@ SYSTEM = (
     "A CR often bundles many corrections (\"Combined CR of all essential corrections ...\"): find the item that "
     "matches these changes - first in <draft_crs> (the individual draft CRs that touched this clause), then in "
     "<relevant_cr_lines> (cover-page lines ranked by overlap with the change) - and base the motivation on it. "
+    "<wg_agreements> are the working-group decisions (meeting report) behind it; use them for the technical "
+    "background and name the meeting when you rely on one. "
     "Use only the provided material; when nothing in it explains the change, say so and set confidence to low. "
     "Write in {language}; keep 3GPP terms (PDSCH, DM-RS, parameter names) in English."
 )
@@ -50,6 +52,9 @@ def user_prompt(ch: dict) -> str:
     parts.append(f"<new_text>\n{ch['text']}\n</new_text>")
     if drafts:
         parts.append(f"<draft_crs>\n{json.dumps(drafts, ensure_ascii=False, indent=1)}\n</draft_crs>")
+    if ch.get("agreements"):
+        ag = [{k: a.get(k) for k in ("meeting", "agenda", "kind", "text")} for a in ch["agreements"]]
+        parts.append(f"<wg_agreements>\n{json.dumps(ag, ensure_ascii=False, indent=1)}\n</wg_agreements>")
     if ch.get("relevant_lines"):
         parts.append("<relevant_cr_lines>\n" + "\n".join(ch["relevant_lines"]) + "\n</relevant_cr_lines>")
     parts.append(f"<cr_cover_pages>\n{json.dumps(covers, ensure_ascii=False, indent=1)}\n</cr_cover_pages>")
