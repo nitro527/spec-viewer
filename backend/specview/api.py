@@ -362,9 +362,25 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         except Exception as e:  # network / policy errors surface to the UI
             raise HTTPException(502, f"cannot reach 3GPP archive: {e}")
 
+    def _official_title(spec: str) -> str | None:
+        """Title from 3GPP's series list (saved for the download picker; fetched once if missing)."""
+        import json as _json
+
+        f = home / "catalog" / f"{spec.split('.')[0]}.json"
+        try:
+            if not f.exists():
+                rows = download.catalog(spec.split(".")[0])
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(_json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+            rows = _json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        return next((r["title"] for r in rows if r["number"] == spec), None)
+
     def _run_fetch(job_id: str, req: FetchRequest):
         job = jobs[job_id]
         skipped = []  # .doc-only versions with no converter on this PC
+        drafts_only = []  # specs with no approved (3.x and later) version yet
         try:
             for spec in req.specs:
                 if req.crs_only:
@@ -377,6 +393,9 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 remote_versions = download.select(download.list_remote(spec),
                                                   set(req.releases) if req.releases else None,
                                                   req.latest_per_release)
+                if not remote_versions:
+                    drafts_only.append(spec)
+                    continue
                 job["total"] += len(remote_versions)
                 for rv in remote_versions:
                     job["message"] = f"{spec} v{rv.version}: downloading"
@@ -391,6 +410,10 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                     with lock:
                         lib.add_version(spec, rv.version, parsed, source=rv.url, recompute=False)
                     job["done"] += 1
+                title = _official_title(spec)  # cover pages of recent versions often defeat title detection
+                if title:
+                    with lock:
+                        lib.set_spec_title(spec, title)
                 job["message"] = f"{spec}: computing history"
                 with lock:
                     lib.recompute_history(spec)
@@ -399,9 +422,13 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                         job["message"] = f"{spec}: CR 표지 {i}/{n} ({c['tdoc']})"
                     lib.fetch_cr_details(spec, cache_dir=home / "cache", progress=prog, lock=lock)
             job["state"], job["message"] = "done", "finished"
+            notes = []
             if skipped:
-                job["message"] = (f"finished — 건너뜀: {', '.join(skipped)} "
-                                  "(옛 .doc 형식, LibreOffice 또는 Word 가 있어야 변환됨)")
+                notes.append(f"건너뜀: {', '.join(skipped)} (옛 .doc 형식, LibreOffice 또는 Word 가 있어야 변환됨)")
+            if drafts_only:
+                notes.append(f"받을 버전 없음: {', '.join(drafts_only)} (승인 전 초안만 있거나 고른 릴리즈에 버전이 없음)")
+            if notes:
+                job["message"] = "finished — " + " · ".join(notes)
         except Exception as e:
             job["state"], job["message"] = "error", str(e)
 

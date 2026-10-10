@@ -20,7 +20,7 @@ from lxml import etree, html
 from .wmf import wmf_to_svg
 
 HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-_NUM_RE = re.compile(r"^((?:[A-Z]\.)?\d+(?:\.\d+)*)\s+(.*)$", re.S)
+_NUM_RE = re.compile(r"^((?:[A-Z]\.)?\d+(?:\.\d+[A-Z]{0,2})*)\s+(.*)$", re.S)  # 7.4.1, A.2, 6.2A.1 (RF specs)
 _ANNEX_RE = re.compile(r"^Annex\s+([A-Z]{1,2})\b\s*(.*)$", re.S)
 _WS = re.compile(r"\s+")
 _IMAGE_CONVERT = {".emf"}  # WMF is handled by specview.wmf

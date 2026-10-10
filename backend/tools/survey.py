@@ -80,7 +80,7 @@ def list_specs(series: str) -> list[str]:
     s = download.new_session()
     r = s.get(f"{download.ARCHIVE}/{series}_series/", timeout=60)
     r.raise_for_status()
-    return sorted(set(re.findall(rf"{series}_series/({series}\.\d{{3}}(?:-\d+)?)\b", r.text)))
+    return sorted(set(re.findall(rf"{series}_series/({series}\.\d{{3}}(?:-\d+){{0,2}})\b", r.text)))
 
 
 def classify_zip(session, rv) -> dict:

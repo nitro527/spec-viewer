@@ -87,7 +87,7 @@ def meeting_folder(tdoc: str, meeting: str) -> str | None:
 def parse_clauses(raw: str) -> list[str]:
     """``"5.3.1, Table 7.4.1.5.3-1, Annex B"`` -> ``["5.3.1", "7.4.1.5.3", "B"]``."""
     out: list[str] = []
-    for m in re.finditer(r"Annex\s+([A-Z])\b|((?:[A-Z]\.)?\d+(?:\.\d+)*)(?:-\d+)?", raw):
+    for m in re.finditer(r"Annex\s+([A-Z])\b|((?:[A-Z]\.)?\d+(?:\.\d+[A-Z]{0,2})*)(?:-\d+)?", raw):
         c = m.group(1) or m.group(2)
         if c and c not in out:
             out.append(c)

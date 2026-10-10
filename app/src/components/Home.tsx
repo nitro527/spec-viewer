@@ -38,7 +38,7 @@ export function Home({ prefill, active, onOpen }: { prefill?: string; active: bo
 
   const start = async () => {
     const typed = input.split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean);
-    const bad = typed.filter((s) => !/^\d{2}\.\d{3}(-\d{1,2})?$/.test(s));
+    const bad = typed.filter((s) => !/^\d{2}\.\d{3}(-\d{1,2}){0,2}$/.test(s));
     if (bad.length) return setError(`스펙 번호 형식이 아닙니다: ${bad.join(", ")} (예: 38.211, 38.101-1)`);
     const list = [...new Set([...selected, ...typed])];
     if (!list.length) return setError("받을 스펙을 위에서 고르세요");

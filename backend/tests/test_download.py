@@ -61,3 +61,31 @@ def test_catalog_kept_until_refresh(tmp_path, monkeypatch):
     assert c.get("/api/catalog/38?refresh=true").json()[0]["title"] == "v2"
     assert c.get("/api/catalog/38?refresh=true").status_code == 502  # refresh failed ...
     assert c.get("/api/catalog/38").json()[0]["title"] == "v2"  # ... the saved list stays
+
+
+def test_more_split_part_names(tmp_path):
+    names = ["38101-1-k10_s07-XX.docx", "38101-1-k10_cover.docx", "38101-1-k10_sAnnexes.docx",
+             "38101-1-k10_s00-05.docx", "38101-1-k10_s06-06.docx", "Band Combinations.zip"]
+    zp = tmp_path / "38101-1-k10.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        for n in names:
+            z.writestr(n, b"x")
+    with zipfile.ZipFile(zp) as z:
+        assert download._word_parts(z) == ["38101-1-k10_cover.docx", "38101-1-k10_s00-05.docx", "38101-1-k10_s06-06.docx",
+                                           "38101-1-k10_s07-XX.docx", "38101-1-k10_sAnnexes.docx"]
+
+
+def test_fetch_job_reports_specs_without_versions_and_uses_official_title(tmp_path, monkeypatch):
+    import time
+
+    from fastapi.testclient import TestClient
+
+    from specview.api import create_app
+
+    monkeypatch.setattr(download, "list_remote", lambda spec, *a: [])
+    monkeypatch.setattr(download, "catalog", lambda series: [])
+    c = TestClient(create_app(tmp_path))
+    job = c.post("/api/fetch", json={"specs": ["38.141"], "with_crs": False}).json()
+    while (j := c.get("/api/jobs").json()[0])["state"] == "running":
+        time.sleep(0.05)
+    assert j["state"] == "done" and "받을 버전 없음: 38.141" in j["message"]

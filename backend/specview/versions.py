@@ -60,7 +60,7 @@ class Version:
 
 
 # Multi-part specs carry the part number: 38101-1-k10.zip is TS 38.101-1 v20.1.0.
-_FILE_RE = re.compile(r"^(\d{4,6}(?:-\d{1,2})?)-([0-9a-z]{3}|\d{6})\.(zip|docx?)$", re.I)
+_FILE_RE = re.compile(r"^(\d{4,6}(?:-\d{1,2}){0,2})-([0-9a-z]{3}|\d{6})\.(zip|docx?)$", re.I)  # 38716-01-01-...
 
 
 def parse_archive_name(name: str) -> tuple[str, Version] | None:

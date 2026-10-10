@@ -101,7 +101,8 @@ def select(versions: Iterable[RemoteVersion], releases: set[int] | None = None,
 
 
 # Large specs (e.g. TS 36.211 since Rel-14) ship as several documents: 36211-ef0_cover.docx, _s00-s05, _s06-s08 ...
-_PART = re.compile(r"_(cover|s\w+-s\w+)\.docx?$", re.I)  # s00-s05, s09-sxx, sA0606-sA0611, sB01-sXX
+# s00-s05, s09-sxx, sA0606-sA0611, sB01-sXX, s00-05, s07-XX, sAnnexes
+_PART = re.compile(r"_(cover|s[0-9A-Za-z]+(?:-s?[0-9A-Za-z]+)?)\.docx?$", re.I)
 
 
 def _word_parts(z: zipfile.ZipFile) -> list[str]:

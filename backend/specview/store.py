@@ -242,6 +242,10 @@ class Library:
                         "crs": self.db.execute("SELECT COUNT(*) FROM cr WHERE spec=?", (r["number"],)).fetchone()[0]})
         return out
 
+    def set_spec_title(self, spec: str, title: str) -> None:
+        with self.db:
+            self.db.execute("UPDATE spec SET title=? WHERE number=?", (title, spec))
+
     def versions(self, spec: str) -> list[dict]:
         return [dict(r) for r in self.db.execute(
             "SELECT id, version, release FROM version WHERE spec=? ORDER BY sort_key", (spec,))]

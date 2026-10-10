@@ -20,7 +20,7 @@ export function CommandPalette({ spec, toc, versions, onJump, onVersion, onMode,
     const query = q.trim();
     const low = query.toLowerCase();
     const out: PaletteItem[] = [];
-    const other = query.match(/^(?:ts\s*)?(\d{2}\.\d{3}(?:-\d{1,2})?)\s*(.*)$/i);
+    const other = query.match(/^(?:ts\s*)?(\d{2}\.\d{3}(?:-\d{1,2}){0,2})\s*(.*)$/i);
     if (other && other[1] !== spec) {
       const known = specs.some((s) => s.number === other[1]);
       out.push({ label: `TS ${other[1]}${other[2] ? ` §${other[2]}` : ""}`, hint: known ? "새 탭에서 열기" : "라이브러리에 없음 · 다운로드 화면",
