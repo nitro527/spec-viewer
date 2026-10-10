@@ -39,3 +39,15 @@ def test_text_fonts_and_symbol_mapping():
     assert 'font-style="italic"' in r.svg and "<line" in r.svg
     assert 'viewBox="0 0 1440 360"' in r.svg
     assert abs(r.width_pt - 72) < 0.01 and abs(r.height_pt - 18) < 0.01
+
+
+def test_update_current_position_alignment():
+    recs = (
+        _rec(0x020C, struct.pack("<hh", 360, 1440))
+        + _font("Times New Roman", 240) + _rec(0x012D, struct.pack("<H", 0))
+        + _rec(0x012E, struct.pack("<H", 0x18 | 0x01))  # baseline + TA_UPDATECP
+        + _rec(0x0214, struct.pack("<hh", 250, 100))  # MoveTo(100, 250)
+        + _text(0, 0, b"a")
+    )
+    svg = wmf_to_svg(_wmf(recs)).svg
+    assert '<text x="100" y="250"' in svg

@@ -195,6 +195,10 @@ def wmf_to_svg(data: bytes) -> WmfResult:
                 dx = []
             font = st.font or _Font("Times New Roman", 12, 400, False)
             s = _decode(raw, font.face)
+            if st.align & 0x01:  # TA_UPDATECP: draw at the current position, then advance it
+                x, y = st.pos
+                advance = sum(dx) if dx else round(len(raw) * font.size * 0.5)
+                st.pos = (x + advance, y)
             if not s.strip():
                 continue
             texts.append((x, y, s))
