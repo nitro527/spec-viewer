@@ -68,7 +68,7 @@ def changed_blocks(lib: Library, spec: str, version: str, clause_key: str | None
 
 def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None = None,
                progress: Callable[[int, int], None] | None = None, limit: int | None = None,
-               clause_key: str | None = None, skip_uncovered: bool = True,
+               clause_key: str | None = None, skip_uncovered: bool = False,
                skip_hashes: set[str] | frozenset = frozenset(), only_hashes: set[str] | None = None) -> dict:
     """``limit`` caps the LLM requests; ``skip_uncovered`` leaves changes no CR explains (front matter,
     copyright year ...) to the rules; ``skip_hashes`` are blocks that already have a summary;

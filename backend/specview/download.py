@@ -113,9 +113,13 @@ def _convert_doc(src: Path) -> Path:
     dst = src.with_suffix(".docx")
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if soffice:
-        subprocess.run([soffice, "--headless", "--convert-to", "docx", "--outdir", str(src.parent), str(src)],
-                       capture_output=True, check=True, timeout=600)
-        return dst
+        try:
+            subprocess.run([soffice, "--headless", "--convert-to", "docx", "--outdir", str(src.parent), str(src)],
+                           capture_output=True, check=True, timeout=600)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if dst.exists():
+            return dst
     if os.name == "nt":
         env = {**os.environ, "SPECVIEW_DOC_SRC": str(src.resolve()), "SPECVIEW_DOC_DST": str(dst.resolve())}
         try:
@@ -123,9 +127,17 @@ def _convert_doc(src: Path) -> Path:
                            capture_output=True, check=True, timeout=600, env=env,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except (OSError, subprocess.SubprocessError):
-            dst.unlink(missing_ok=True)  # a half-written file would be picked up as cached
+            try:
+                dst.unlink(missing_ok=True)  # a half-written file would be picked up as cached
+            except OSError:  # still locked by a Word that timed out
+                pass
+            return _raise_legacy(src)
         if dst.exists():
             return dst
+    return _raise_legacy(src)
+
+
+def _raise_legacy(src: Path):
     raise LegacyDocError(f"{src.name} is a legacy .doc; install LibreOffice or Microsoft Word to convert it")
 
 

@@ -73,9 +73,12 @@ export interface Annotation {
 export interface Note { clause_key: string; bookmark: number; text: string; version: string | null; updated: string }
 
 export interface SearchHit { ord: number; key: string; number: string; title: string; block: number | null; snippet: string }
-export interface LlmSettings {
-  provider: string; base_url: string; model: string; has_key: boolean; key_hint: string;
-  key_source: "saved" | "env" | null; presets: Record<string, { base_url: string; model: string }>;
+export interface LlmProviderSettings {
+  base_url: string; model: string; has_key: boolean; key_hint: string; key_source: "saved" | "env" | null;
+}
+export interface LlmSettings extends LlmProviderSettings {
+  provider: string; providers: Record<string, LlmProviderSettings>;
+  presets: Record<string, { base_url: string; model: string }>;
 }
 export interface LlmForm { provider?: string; base_url?: string; model?: string; api_key?: string; clear_key?: boolean }
 export interface IntentRequest { spec: string; version: string; clause_key?: string; limit?: number | null; skip_uncovered?: boolean }

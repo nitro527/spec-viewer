@@ -471,30 +471,42 @@ class Library:
             self.db.execute("INSERT OR REPLACE INTO note VALUES (?,?,?,?,?,?)", (spec, key, bm, tx, version, now))
         return {"clause_key": key, "bookmark": bm, "text": tx, "version": version, "updated": now}
 
+    def _annotation_rows(self, spec: str, version: str) -> dict[str, dict]:
+        return {r["raw_hash"]: json.loads(r["data"]) for r in self.db.execute(
+            "SELECT raw_hash, data FROM annotation WHERE spec=? AND version=?", (spec, version))}
+
     def import_pack(self, pack: dict) -> int:
+        """Replace a version's server annotations; summaries made locally survive where the server has none."""
         if not str(pack.get("format", "")).startswith("specview-annotations/"):
             raise ValueError("not a specview annotation pack")
+        old = self._annotation_rows(pack["spec"], pack["version"])
+        rows = {h: d for h, d in old.items() if d.get("local") and d.get("intent")}
+        for ch in pack["changes"]:
+            mine = rows.get(ch["raw_hash"])
+            rows[ch["raw_hash"]] = {**ch, "generated": pack.get("generated"),
+                                    **({"intent": mine["intent"], "local": True} if mine and not ch.get("intent") else {})}
         with self.db:
             self.db.execute("DELETE FROM annotation WHERE spec=? AND version=?", (pack["spec"], pack["version"]))
-            self.db.executemany("INSERT OR REPLACE INTO annotation VALUES (?,?,?,?,?)", [
-                (pack["spec"], pack["version"], ch["raw_hash"], ch.get("clause"),
-                 json.dumps({**ch, "generated": pack.get("generated")}, ensure_ascii=False))
-                for ch in pack["changes"]])
+            self.db.executemany("INSERT INTO annotation VALUES (?,?,?,?,?)", [
+                (pack["spec"], pack["version"], h, d.get("clause"), json.dumps(d, ensure_ascii=False))
+                for h, d in rows.items()])
         return len(pack["changes"])
 
     def merge_pack(self, pack: dict) -> int:
-        """Add a locally built pack without dropping other entries or replacing a summary with nothing."""
+        """Add the summaries of a locally built pack, keeping whatever else a row already has (agreements ...)."""
+        old = self._annotation_rows(pack["spec"], pack["version"])
         n = 0
         with self.db:
             for ch in pack["changes"]:
-                key = (pack["spec"], pack["version"], ch["raw_hash"])
-                old = self.db.execute("SELECT data FROM annotation WHERE spec=? AND version=? AND raw_hash=?",
-                                      key).fetchone()
-                if not ch.get("intent") and old and json.loads(old["data"]).get("intent"):
+                if not ch.get("intent"):  # not requested / failed: nothing worth storing
                     continue
-                n += bool(ch.get("intent"))
+                prev = old.get(ch["raw_hash"], {})
+                data = {**prev, **ch, "agreements": ch.get("agreements") or prev.get("agreements", []),
+                        "generated": pack.get("generated"), "local": True}
+                data.pop("intent_error", None)
                 self.db.execute("INSERT OR REPLACE INTO annotation VALUES (?,?,?,?,?)", (
-                    *key, ch.get("clause"), json.dumps({**ch, "generated": pack.get("generated")}, ensure_ascii=False)))
+                    pack["spec"], pack["version"], ch["raw_hash"], ch.get("clause"), json.dumps(data, ensure_ascii=False)))
+                n += 1
         return n
 
     def intent_hashes(self, spec: str, version: str) -> set[str]:

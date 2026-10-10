@@ -30,14 +30,16 @@ export function LlmPanel({ specs, onJob }: { specs: SpecInfo[]; onJob: (j: Job) 
   const dirty = !!saved && (provider !== saved.provider || baseUrl !== saved.base_url || model !== saved.model || !!key);
   const isGemini = provider === "gemini";
 
-  const pickProvider = (p: string) => {
+  const pickProvider = (p: string) => {  // each provider keeps its own address, model and key
     setProvider(p);
-    const preset = saved?.presets[p];
-    setBaseUrl(preset?.base_url ?? "");
-    setModel(preset?.model ?? "");
+    const ps = saved?.providers[p];
+    setBaseUrl(ps?.base_url ?? "");
+    setModel(ps?.model ?? "");
+    setKey("");
     setModels([]);
     setStatus(null);
   };
+  const cur = saved?.providers[provider];
 
   const run = async (label: string, fn: () => Promise<void>) => {
     setBusy(true);
@@ -59,12 +61,12 @@ export function LlmPanel({ specs, onJob }: { specs: SpecInfo[]; onJob: (j: Job) 
     setStatus({ kind: "ok", text: `모델 ${r.models.length}개 — 모델 칸을 눌러 고르세요` });
   });
   const clearKey = () => run("키 삭제 중…", async () => {
-    load(await api.saveLlm({ clear_key: true }));
+    load(await api.saveLlm({ provider, clear_key: true }));
     setStatus({ kind: "ok", text: "저장된 키를 지웠습니다" });
   });
 
-  const keyPlaceholder = saved?.key_source === "saved" ? `저장됨 ${saved.key_hint} (바꾸려면 새 키 입력)`
-    : saved?.key_source === "env" ? `환경 변수의 키 사용 중 ${saved.key_hint}`
+  const keyPlaceholder = cur?.key_source === "saved" ? `저장됨 ${cur.key_hint} (바꾸려면 새 키 입력)`
+    : cur?.key_source === "env" ? `환경 변수의 키 사용 중 ${cur.key_hint}`
     : isGemini ? "AIza… 로 시작하는 키" : "키가 필요 없는 서버면 비워두세요";
 
   return (
@@ -106,7 +108,7 @@ export function LlmPanel({ specs, onJob }: { specs: SpecInfo[]; onJob: (j: Job) 
           <div className="row">
             <input id="llm-key" type="password" autoComplete="off" value={key} onChange={(e) => setKey(e.target.value)}
                    placeholder={keyPlaceholder} />
-            {saved?.key_source === "saved" && <button onClick={clearKey} disabled={busy}>키 삭제</button>}
+            {cur?.key_source === "saved" && <button onClick={clearKey} disabled={busy}>키 삭제</button>}
           </div>
         </div>
         <div className="row actions">

@@ -57,6 +57,13 @@ class LLMError(RuntimeError):
     """A request failed; the message is meant for the user."""
 
 
+class _NoJsonSchema(Exception):
+    """400 to a json_schema request: maybe the server lacks it, maybe something else is wrong."""
+
+    def __init__(self, error: LLMError):
+        self.error = error
+
+
 class QuotaExceeded(LLMError):
     """The provider's (daily) quota is used up: further requests would only fail too."""
 
@@ -164,8 +171,7 @@ class OpenAICompatIntentModel:
             r = self._post(body)
             if (r.status_code == 400 and structured and self._schema_mode == "json_schema"
                     and not re.search(r"api[ _-]?key", str(_error_body(r).get("message", "")), re.I)):
-                self._schema_mode = "json_object"  # older servers: fall back to plain JSON mode
-                return self._request(messages)
+                raise _NoJsonSchema(_http_error(r))
             if r.status_code == 429:
                 err = _error_body(r)
                 if q := _quota_error(err):
@@ -181,12 +187,24 @@ class OpenAICompatIntentModel:
             return r.json()
         raise _http_error(r)
 
-    def intent(self, change: dict) -> dict | None:
+    def _intent_messages(self, change: dict) -> list[dict]:
         system = SYSTEM.format(language=self.language)
         if self._schema_mode != "json_schema":
             system += "\nReply with only a JSON object matching this schema:\n" + json.dumps(INTENT_SCHEMA)
-        data = self._request([{"role": "system", "content": system},
-                              {"role": "user", "content": user_prompt(change)}])
+        return [{"role": "system", "content": system}, {"role": "user", "content": user_prompt(change)}]
+
+    def intent(self, change: dict) -> dict | None:
+        try:
+            data = self._request(self._intent_messages(change))
+        except _NoJsonSchema as first:
+            # Older servers reject json_schema: retry in JSON mode (schema in the prompt). If that fails as
+            # well, the 400 was about something else - keep json_schema and report the original error.
+            self._schema_mode = "json_object"
+            try:
+                data = self._request(self._intent_messages(change))
+            except LLMError:
+                self._schema_mode = "json_schema"
+                raise first.error from None
         choice = (data.get("choices") or [{}])[0]
         text = (choice.get("message") or {}).get("content")
         if not text:

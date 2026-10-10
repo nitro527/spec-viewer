@@ -102,7 +102,36 @@ def test_llm_settings_and_intent_job(library, monkeypatch, tmp_path):
     assert len(library.intent_hashes("99.211", "16.1.0")) == 2
     run(limit=None)  # already summarized blocks are not requested again
     assert len(seen) == len(library.intent_hashes("99.211", "16.1.0"))
-    assert c.put("/api/llm", json={"clear_key": True}).json()["has_key"] is False
+    # the Gemini key never goes to another provider's server
+    monkeypatch.setattr(intent.OpenAICompatIntentModel, "ping", lambda self: {"key": self.api_key, "url": self.base_url})
+    r = c.post("/api/llm/test", json={"provider": "openai", "base_url": "http://llm:8000/v1", "model": "glm-5.3"}).json()
+    assert r == {"key": None, "url": "http://llm:8000/v1"}
+    s = c.put("/api/llm", json={"provider": "openai", "base_url": "http://llm:8000/v1", "model": "glm-5.3"}).json()
+    assert s["provider"] == "openai" and not s["has_key"] and s["providers"]["gemini"]["key_hint"] == "…1234"
+    assert c.post("/api/llm/test", json={"provider": "gemini"}).json()["key"] == "AIza-secret-1234"
+    assert c.put("/api/llm", json={"provider": "gemini", "clear_key": True}).json()["has_key"] is False
+
+
+def test_server_sync_keeps_local_summaries(library, tmp_path):
+    import sqlite3
+
+    from specview.store import Library
+
+    dst = sqlite3.connect(tmp_path / "l.sqlite")
+    library.db.backup(dst)
+    dst.close()
+    lib = Library(tmp_path / "l.sqlite")
+    ch = build_pack(lib, "99.211", "16.1.0")["changes"][0]
+    local = {"format": "specview-annotations/1", "spec": "99.211", "version": "16.1.0", "generated": "a",
+             "changes": [{**ch, "intent": {"summary": "mine"}}]}
+    assert lib.merge_pack(local) == 1
+    server = {**local, "generated": "b", "changes": [{**ch, "intent": None, "agreements": [{"text": "agreed"}]}]}
+    lib.import_pack(server)
+    row = next(a for a in lib.clause_annotations("99.211", "16.1.0", ch["clause"]) if a["raw_hash"] == ch["raw_hash"])
+    assert row["intent"]["summary"] == "mine" and row["agreements"] == [{"text": "agreed"}]
+    lib.merge_pack({**local, "changes": [{**ch, "intent": {"summary": "again"}, "agreements": []}]})
+    row = next(a for a in lib.clause_annotations("99.211", "16.1.0", ch["clause"]) if a["raw_hash"] == ch["raw_hash"])
+    assert row["intent"]["summary"] == "again" and row["agreements"] == [{"text": "agreed"}]
 
 
 def test_gemini_bad_key_400_and_think_in_ping():

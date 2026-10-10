@@ -19,6 +19,7 @@ export function Home({ prefill, onOpen }: { prefill?: string; onOpen: (spec: str
   useEffect(() => { refresh(); api.settings().then((s) => setAnnUrl(s.annotation_url)).catch(() => {}); }, []);
 
   const running = jobs.some((j) => j.state === "running");
+  const downloading = jobs.some((j) => j.state === "running" && j.kind !== "intent");
   useEffect(() => {
     if (!running) return;
     const t = setInterval(() => api.jobs().then((js) => {
@@ -73,7 +74,7 @@ export function Home({ prefill, onOpen }: { prefill?: string; onOpen: (spec: str
             <span className="muted small">(선택 없음 = 전체)</span>
           </div>
           <label><input type="checkbox" checked={latestOnly} onChange={(e) => setLatestOnly(e.target.checked)} /> 릴리즈별 최신 버전만</label>
-          <button className="primary" onClick={start} disabled={running}>다운로드</button>
+          <button className="primary" onClick={start} disabled={downloading}>다운로드</button>
         </div>
         {error && <p className="error small">{error}</p>}
         <JobList jobs={jobs.filter((j) => j.kind !== "intent")} />

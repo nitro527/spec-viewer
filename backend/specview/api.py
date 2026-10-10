@@ -175,23 +175,29 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     # ---- LLM change-intent summaries (the user's own API key) ----
 
-    def _llm_settings() -> dict:
-        provider = lib.get_setting("llm_provider") or "gemini"
-        url, model, key_env = intent.PRESETS.get(provider, ("", "", None))
-        saved_key = lib.get_setting("llm_api_key") or ""
-        env_key = os.environ.get(key_env or "", "") or os.environ.get("LLM_API_KEY", "")
-        return {"provider": provider, "base_url": lib.get_setting("llm_base_url") or url,
-                "model": lib.get_setting("llm_model") or model,
-                "api_key": saved_key or env_key, "key_source": "saved" if saved_key else "env" if env_key else None}
+    def _provider_settings(p: str) -> dict:
+        """Address, model and key are kept per provider so a key never goes to another provider's server."""
+        url, model, key_env = intent.PRESETS.get(p, ("", "", None))
+        legacy = lib.get_setting("llm_provider") == p  # settings saved before they were per provider
+        get = lambda k: lib.get_setting(f"llm_{p}_{k}") or (lib.get_setting(f"llm_{k}") if legacy else None)
+        saved_key = get("api_key") or ""
+        env_key = os.environ.get(key_env, "") if key_env else os.environ.get("LLM_API_KEY", "")
+        return {"base_url": get("base_url") or url, "model": get("model") or model, "api_key": saved_key or env_key,
+                "key_source": "saved" if saved_key else "env" if env_key else None}
+
+    def _current_provider() -> str:
+        return lib.get_setting("llm_provider") or "gemini"
+
+    def _public(st: dict) -> dict:
+        st = dict(st)
+        key = st.pop("api_key")
+        return {**st, "has_key": bool(key), "key_hint": f"…{key[-4:]}" if len(key) > 8 else ""}
 
     def _llm(cfg: LLMConfig | None = None) -> intent.OpenAICompatIntentModel:
-        st = _llm_settings()
+        st = _provider_settings((cfg and cfg.provider) or _current_provider())
         if cfg:  # unsaved values from the form, so "test" works before "save"
-            if cfg.provider and cfg.provider != st["provider"]:
-                url, model, _ = intent.PRESETS.get(cfg.provider, ("", "", None))
-                st.update(base_url=url, model=model)
-            st.update({k: v for k, v in (("base_url", cfg.base_url), ("model", cfg.model), ("api_key", cfg.api_key))
-                       if v})
+            st.update({k: v.strip() for k, v in (("base_url", cfg.base_url), ("model", cfg.model),
+                                                 ("api_key", cfg.api_key)) if v and v.strip()})
         if not st["base_url"]:
             raise HTTPException(400, "LLM 서버 주소를 입력하세요")
         if not st["model"]:
@@ -200,22 +206,31 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     @app.get("/api/llm")
     def llm_settings():
-        st = _llm_settings()
-        key = st.pop("api_key")
-        return {**st, "has_key": bool(key), "key_hint": f"…{key[-4:]}" if len(key) > 8 else "",
+        p = _current_provider()
+        return {"provider": p, **_public(_provider_settings(p)),
+                "providers": {q: _public(_provider_settings(q)) for q in ("gemini", "openai")},
                 "presets": {k: {"base_url": u, "model": m} for k, (u, m, _) in intent.PRESETS.items()}}
 
     @app.put("/api/llm")
     def save_llm(cfg: LLMConfig):
+        p = cfg.provider or _current_provider()
         with lock:
-            for k in ("provider", "base_url", "model"):
+            legacy = lib.get_setting("llm_provider")
+            for k in ("base_url", "model", "api_key"):  # settings saved before they were per provider
+                v = lib.get_setting(f"llm_{k}")
+                if v and legacy and not lib.get_setting(f"llm_{legacy}_{k}"):
+                    lib.set_setting(f"llm_{legacy}_{k}", v)
+                if v:
+                    lib.set_setting(f"llm_{k}", "")
+            lib.set_setting("llm_provider", p)
+            for k in ("base_url", "model"):
                 v = getattr(cfg, k)
                 if v is not None:
-                    lib.set_setting(f"llm_{k}", v.strip().rstrip("/") if k == "base_url" else v.strip())
-            if cfg.api_key:
-                lib.set_setting("llm_api_key", cfg.api_key.strip())
+                    lib.set_setting(f"llm_{p}_{k}", v.strip().rstrip("/") if k == "base_url" else v.strip())
+            if cfg.api_key and cfg.api_key.strip():
+                lib.set_setting(f"llm_{p}_api_key", cfg.api_key.strip())
             elif cfg.clear_key:
-                lib.set_setting("llm_api_key", "")
+                lib.set_setting(f"llm_{p}_api_key", "")
         return llm_settings()
 
     @app.post("/api/llm/test")
@@ -246,17 +261,19 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 current = {b["raw_hash"] for b in blocks}  # not texts the clause replaced again later
             else:
                 versions, current = [req.version], None
-            made, errors, stopped, uncovered, capped = 0, [], None, 0, 0
+            made, errors, stopped, uncovered, capped, asked = 0, [], None, 0, 0, 0
             for v in versions:
                 def prog(i, n):
                     job["done"], job["total"] = i, n
                     job["message"] = f"{req.spec} v{v}: AI 요약 {i}/{n}"
-                pack = build_pack(reader, req.spec, v, model, progress=prog, limit=req.limit,
+                left = None if req.limit is None else max(req.limit - asked, 0)  # the limit is per job
+                pack = build_pack(reader, req.spec, v, model, progress=prog, limit=left,
                                   clause_key=req.clause_key, skip_uncovered=req.skip_uncovered,
                                   skip_hashes=reader.intent_hashes(req.spec, v), only_hashes=current)
                 with lock:
                     made += lib.merge_pack(pack)
                 errors += [c["intent_error"] for c in pack["changes"] if c.get("intent_error")]
+                asked += pack["generator"]["requested"]
                 uncovered += pack["generator"]["skipped_uncovered"]
                 capped += pack["generator"]["over_limit"]
                 if stopped := pack["generator"].get("stopped"):
@@ -286,6 +303,8 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         model = _llm()
         if not model.api_key and "googleapis.com" in model.base_url:
             raise HTTPException(400, "Gemini API 키를 먼저 저장하세요")
+        if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
+            raise HTTPException(409, "AI 요약이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
         job_id = uuid.uuid4().hex[:8]
         jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 0, "message": "AI 요약 준비",
                         "specs": [req.spec], "kind": "intent"}
