@@ -6,6 +6,7 @@ All published versions of a spec live under
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -17,6 +18,10 @@ from typing import Callable, Iterable
 import requests
 
 from .versions import Version, parse_archive_name, series_of
+
+
+class LegacyDocError(RuntimeError):
+    """A version only published as .doc that neither LibreOffice nor Word could convert."""
 
 ARCHIVE = "https://www.3gpp.org/ftp/Specs/archive"
 _HREF = re.compile(r'href="([^"]+)"', re.I)
@@ -87,13 +92,41 @@ def _extract_docx(zip_path: Path, out_dir: Path) -> Path:
         with z.open(name) as src, open(target, "wb") as dst:
             shutil.copyfileobj(src, dst)
     if target.suffix.lower() == ".doc":
-        soffice = shutil.which("soffice") or shutil.which("libreoffice")
-        if not soffice:
-            raise RuntimeError(f"{target.name} is a legacy .doc; LibreOffice is needed to convert it")
-        subprocess.run([soffice, "--headless", "--convert-to", "docx", "--outdir", str(out_dir), str(target)],
-                       capture_output=True, check=True, timeout=600)
-        target = target.with_suffix(".docx")
+        target = _convert_doc(target)
     return target
+
+
+# Word (COM) as a fallback on Windows PCs without LibreOffice. 16 = wdFormatXMLDocument (.docx).
+_WORD_PS = r"""
+$ErrorActionPreference = 'Stop'
+$w = New-Object -ComObject Word.Application
+try {
+    $w.Visible = $false; $w.DisplayAlerts = 0
+    $d = $w.Documents.Open($env:SPECVIEW_DOC_SRC, $false, $true, $false)
+    try { $d.SaveAs2($env:SPECVIEW_DOC_DST, 16) } finally { $d.Close($false) }
+} finally { $w.Quit() }
+"""
+
+
+def _convert_doc(src: Path) -> Path:
+    """.doc -> .docx with LibreOffice, else Microsoft Word; raises LegacyDocError if neither works."""
+    dst = src.with_suffix(".docx")
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice:
+        subprocess.run([soffice, "--headless", "--convert-to", "docx", "--outdir", str(src.parent), str(src)],
+                       capture_output=True, check=True, timeout=600)
+        return dst
+    if os.name == "nt":
+        env = {**os.environ, "SPECVIEW_DOC_SRC": str(src.resolve()), "SPECVIEW_DOC_DST": str(dst.resolve())}
+        try:
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _WORD_PS],
+                           capture_output=True, check=True, timeout=600, env=env,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.SubprocessError):
+            dst.unlink(missing_ok=True)  # a half-written file would be picked up as cached
+        if dst.exists():
+            return dst
+    raise LegacyDocError(f"{src.name} is a legacy .doc; install LibreOffice or Microsoft Word to convert it")
 
 
 def fetch(remote: RemoteVersion, cache_dir: Path, session: requests.Session | None = None,

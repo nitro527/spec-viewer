@@ -169,6 +169,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     def _run_fetch(job_id: str, req: FetchRequest):
         job = jobs[job_id]
+        skipped = []  # .doc-only versions with no converter on this PC
         try:
             for spec in req.specs:
                 if req.crs_only:
@@ -184,7 +185,12 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 job["total"] += len(remote_versions)
                 for rv in remote_versions:
                     job["message"] = f"{spec} v{rv.version}: downloading"
-                    path = download.fetch(rv, home / "cache")
+                    try:
+                        path = download.fetch(rv, home / "cache")
+                    except download.LegacyDocError:
+                        skipped.append(f"{spec} v{rv.version}")
+                        job["done"] += 1
+                        continue
                     job["message"] = f"{spec} v{rv.version}: converting"
                     parsed = parse_docx(path)
                     with lock:
@@ -198,6 +204,9 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                         job["message"] = f"{spec}: CR 표지 {i}/{n} ({c['tdoc']})"
                     lib.fetch_cr_details(spec, cache_dir=home / "cache", progress=prog, lock=lock)
             job["state"], job["message"] = "done", "finished"
+            if skipped:
+                job["message"] = (f"finished — 건너뜀: {', '.join(skipped)} "
+                                  "(옛 .doc 형식, LibreOffice 또는 Word 가 있어야 변환됨)")
         except Exception as e:
             job["state"], job["message"] = "error", str(e)
 

@@ -46,7 +46,11 @@ def cmd_fetch(args):
         print(f"{spec}: {len(remote)} versions")
         for rv in remote:
             print(f"  v{rv.version}: download + convert")
-            path = download.fetch(rv, Path(args.home) / "cache")
+            try:
+                path = download.fetch(rv, Path(args.home) / "cache")
+            except download.LegacyDocError as e:
+                print(f"    skipped: {e}")
+                continue
             lib.add_version(spec, rv.version, parse_docx(path), source=rv.url, recompute=False)
         print(f"{spec}: computing history")
         lib.recompute_history(spec)
