@@ -1,6 +1,10 @@
 // Typed client for the local specview backend.
 
-export interface SpecInfo { number: string; title: string | null; versions: number; latest: string | null }
+export interface SpecInfo {
+  number: string; title: string | null; versions: number; latest: string | null;
+  first: string | null; releases: number[]; crs: number;
+}
+export interface CatalogSpec { number: string; type: "TS" | "TR"; title: string; withdrawn: boolean }
 export interface VersionInfo { id: number; version: string; release: number }
 export type HistoryEntry = [version: string, change: "added" | "modified" | "moved", movedFrom?: string];
 
@@ -59,6 +63,9 @@ export interface UEFeature {
   components: string; prerequisite: string; field_name: string; mandatory: string; note: string;
   shared?: string[]; matched?: string[];
 }
+export type FeatureVia = { kind: "cr"; cr: string; version: string; wi_code: string; subject: string } | { kind: "param"; name: string };
+export interface FeatureClause { key: string | null; number: string; title: string; via: FeatureVia[]; shared: string[] }
+export interface FeatureLinks { feature: UEFeature; specs: { spec: string; title: string | null; version: string; clauses: FeatureClause[] }[] }
 export interface FeatureSection { section: string; title: string; layer: string; release: string; relevant: number; features: UEFeature[] }
 export interface WorkItemFeatures { wi_code: string; releases: string[]; crs: { cr: string; version: string; subject: string }[]; sections: FeatureSection[] }
 export interface ClauseFeatures { available: boolean; work_items: WorkItemFeatures[]; parameters: UEFeature[] }
@@ -67,17 +74,43 @@ export interface Intent { summary: string; motivation: string; impact: string; c
 export interface Annotation {
   clause: string; raw_hash: string; change: string; version: string; generated?: string;
   crs: { cr: string; tdoc: string; subject: string }[]; features: string[];
-  agreements: { meeting?: string; text: string; source?: string }[]; intent: Intent | null;
+  agreements: { meeting?: string; agenda?: string; kind?: string; text: string; source?: string; folder?: string; via?: "tdoc" | "clause" | "terms" }[]; intent: Intent | null; intent_error?: string;
+  draft_crs?: { tdoc: string; title: string; parent_cr: string; meeting: string; folder?: string }[];
+  fl_summaries?: { tdoc: string; title: string; source: string; meeting: string; agenda: string; url: string; excerpt: string }[];
 }
 
 export interface Note { clause_key: string; bookmark: number; text: string; version: string | null; updated: string }
 
 export interface SearchHit { ord: number; key: string; number: string; title: string; block: number | null; snippet: string }
-export interface Job { id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[] }
+export interface LlmProviderSettings {
+  base_url: string; model: string; has_key: boolean; key_hint: string; key_source: "saved" | "env" | null;
+}
+export interface LlmSettings extends LlmProviderSettings {
+  provider: string; providers: Record<string, LlmProviderSettings>;
+  presets: Record<string, { base_url: string; model: string }>;
+}
+export interface LlmForm { provider?: string; base_url?: string; model?: string; api_key?: string; clear_key?: boolean }
+export interface IntentRequest { spec: string; version: string; clause_key?: string; limit?: number | null; skip_uncovered?: boolean; force?: boolean }
+
+export interface MeetingDoc { meeting: string; tdoc: string | null; title: string; html: string; url: string | null }
+
+export interface Job { id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[]; kind?: "intent" }
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+/** JSON request whose error is the backend's human-readable `detail`. */
+async function send<T>(method: string, path: string, body: unknown): Promise<T> {
+  const r = await fetch(path, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) {
+    const text = await r.text();
+    let detail = text;
+    try { detail = JSON.parse(text).detail ?? text; } catch { /* not JSON */ }
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
   return r.json();
 }
 
@@ -95,6 +128,7 @@ export const api = {
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
   stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),
   jobs: () => get<Job[]>("/api/jobs"),
+  catalog: (series: string, refresh = false) => get<CatalogSpec[]>(`/api/catalog/${s(series)}${refresh ? "?refresh=true" : ""}`),
   notes: (spec: string) => get<Note[]>(`/api/specs/${s(spec)}/notes`),
   saveNote: async (spec: string, key: string, body: { bookmark?: boolean; text?: string; version?: string }) => {
     const r = await fetch(`/api/specs/${s(spec)}/notes/${s(key)}`, {
@@ -114,6 +148,16 @@ export const api = {
     if (!r.ok) throw new Error((await r.json()).detail ?? r.statusText);
     return r.json();
   },
+  llm: () => get<LlmSettings>("/api/llm"),
+  saveLlm: (form: LlmForm) => send<LlmSettings>("PUT", "/api/llm", form),
+  testLlm: (form: LlmForm) => send<{ model: string; reply: string; seconds: number }>("POST", "/api/llm/test", form),
+  llmModels: (form: LlmForm) => send<{ models: string[] }>("POST", "/api/llm/models", form),
+  makeIntents: (req: IntentRequest) => send<Job>("POST", "/api/intent", req),
+  meetingDoc: (folder: string, tdoc?: string) =>
+    get<MeetingDoc>(`/api/meeting-doc?folder=${s(folder)}${tdoc ? `&tdoc=${s(tdoc)}` : ""}`),
+  featuresStatus: () => get<{ count: number; source: string | null }>("/api/features"),
+  searchFeatures: (q: string) => get<UEFeature[]>(`/api/features/search?q=${s(q)}`),
+  featureLinks: (section: string, index: string) => get<FeatureLinks>(`/api/features/${s(section)}/${s(index)}/links`),
   clauseFeatures: (spec: string, v: string, key: string) =>
     get<ClauseFeatures>(`/api/specs/${s(spec)}/${s(v)}/clause/${s(key)}/features`),
   fetchFeatures: async (): Promise<Job> => {

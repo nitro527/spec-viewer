@@ -59,11 +59,12 @@ class Version:
         return self.sort_key < other.sort_key
 
 
-_FILE_RE = re.compile(r"^(\d{4,6})-([0-9a-z]{3}|\d{6})\.(zip|docx?)$", re.I)
+# Multi-part specs carry the part number: 38101-1-k10.zip is TS 38.101-1 v20.1.0.
+_FILE_RE = re.compile(r"^(\d{4,6}(?:-\d{1,2}){0,2})-([0-9a-z]{3}|\d{6})\.(zip|docx?)$", re.I)  # 38716-01-01-...
 
 
 def parse_archive_name(name: str) -> tuple[str, Version] | None:
-    """``38211-g10.zip`` -> (``"38.211"``, Version(16,1,0)); None if no match."""
+    """``38211-g10.zip`` -> (``"38.211"``, Version(16,1,0)), ``38101-1-k10.zip`` -> ``"38.101-1"``; None if no match."""
     m = _FILE_RE.match(name)
     if not m:
         return None

@@ -21,12 +21,16 @@ def cmd_build(args):
         model = OpenAICompatIntentModel.from_preset(args.llm, model=args.llm_model, base_url=args.llm_base_url,
                                                     language=args.language)
     for v in versions:
-        pack = build_pack(lib, args.spec, v, model, limit=args.limit,
+        pack = build_pack(lib, args.spec, v, model, limit=args.limit, skip_uncovered=args.skip_uncovered,
                           progress=lambda i, n: print(f"\r  {args.spec} v{v}: {i}/{n}", end="", flush=True))
         out = Path(args.out) / args.spec / f"{v}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(dumps(pack), encoding="utf-8")
-        print(f"\n  -> {out} ({len(pack['changes'])} changes)")
+        n_intent = sum(1 for c in pack["changes"] if c["intent"])
+        print(f"\n  -> {out} ({len(pack['changes'])} changes, {n_intent} intent summaries)")
+        if pack["generator"].get("stopped"):
+            print(f"  LLM stopped: {pack['generator']['stopped']}")
+            break
 
 
 def cmd_serve(args):
@@ -47,7 +51,9 @@ def main(argv=None):
                                  "(any OpenAI-compatible server with --llm-base-url)")
     p.add_argument("--llm-base-url", help="OpenAI-compatible base URL, e.g. http://llm.corp:8000/v1")
     p.add_argument("--llm-model", help="model name on that server, e.g. glm-5.3")
-    p.add_argument("--limit", type=int, help="only the first N changes per version (for trying a model)")
+    p.add_argument("--limit", type=int, help="at most N LLM requests per version (for trying a model; free tiers have daily caps)")
+    p.add_argument("--skip-uncovered", action="store_true",
+                   help="don't ask the LLM about changes no CR covers (front matter, copyright year ...)")
     p.add_argument("--language", default="Korean")
     p.set_defaults(func=cmd_build)
     p = sub.add_parser("serve", help="serve the pack directory")

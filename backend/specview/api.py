@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import download
+from . import download, intent
 from .parse_docx import parse_docx
 from .store import Library
 from .versions import Version
@@ -19,6 +19,23 @@ from .versions import Version
 
 def default_home() -> Path:
     return Path(os.environ.get("SPECVIEW_HOME", Path.home() / ".specview"))
+
+
+class LLMConfig(BaseModel):
+    provider: str | None = None  # gemini | openai (any OpenAI-compatible server: vLLM, Ollama ...)
+    base_url: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    clear_key: bool = False
+
+
+class IntentRequest(BaseModel):
+    spec: str
+    version: str
+    clause_key: str | None = None  # one clause (blocks shown in this version), else the whole version
+    limit: int | None = 20
+    skip_uncovered: bool = True
+    force: bool = False  # summarize again even where a summary exists (e.g. after better evidence is available)
 
 
 class FetchRequest(BaseModel):
@@ -78,6 +95,14 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     @app.get("/api/features")
     def features_status():
         return _get(lib.features_status)
+
+    @app.get("/api/features/search")
+    def search_features(q: str):
+        return _get(lib.search_features, q)
+
+    @app.get("/api/features/{section}/{index}/links")
+    def feature_links(section: str, index: str):
+        return _get(lib.feature_links, section, index)
 
     def _run_features(job_id: str):
         job = jobs[job_id]
@@ -157,7 +182,177 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             raise HTTPException(404)
         return Response(a[1], media_type=a[0], headers={"Cache-Control": "max-age=31536000, immutable"})
 
+    # ---- LLM change-intent summaries (the user's own API key) ----
+
+    def _provider_settings(p: str) -> dict:
+        """Address, model and key are kept per provider so a key never goes to another provider's server."""
+        url, model, key_env = intent.PRESETS.get(p, ("", "", None))
+        legacy = lib.get_setting("llm_provider") == p  # settings saved before they were per provider
+        get = lambda k: lib.get_setting(f"llm_{p}_{k}") or (lib.get_setting(f"llm_{k}") if legacy else None)
+        saved_key = get("api_key") or ""
+        env_key = os.environ.get(key_env, "") if key_env else os.environ.get("LLM_API_KEY", "")
+        return {"base_url": get("base_url") or url, "model": get("model") or model, "api_key": saved_key or env_key,
+                "key_source": "saved" if saved_key else "env" if env_key else None}
+
+    def _current_provider() -> str:
+        return lib.get_setting("llm_provider") or "gemini"
+
+    def _public(st: dict) -> dict:
+        st = dict(st)
+        key = st.pop("api_key")
+        return {**st, "has_key": bool(key), "key_hint": f"…{key[-4:]}" if len(key) > 8 else ""}
+
+    def _llm(cfg: LLMConfig | None = None) -> intent.OpenAICompatIntentModel:
+        st = _provider_settings((cfg and cfg.provider) or _current_provider())
+        if cfg:  # unsaved values from the form, so "test" works before "save"
+            st.update({k: v.strip() for k, v in (("base_url", cfg.base_url), ("model", cfg.model),
+                                                 ("api_key", cfg.api_key)) if v and v.strip()})
+        if not st["base_url"]:
+            raise HTTPException(400, "LLM 서버 주소를 입력하세요")
+        if not st["model"]:
+            raise HTTPException(400, "모델 이름을 입력하세요")
+        return intent.OpenAICompatIntentModel(st["base_url"], st["model"], st["api_key"] or None, timeout=120)
+
+    @app.get("/api/llm")
+    def llm_settings():
+        p = _current_provider()
+        return {"provider": p, **_public(_provider_settings(p)),
+                "providers": {q: _public(_provider_settings(q)) for q in ("gemini", "openai")},
+                "presets": {k: {"base_url": u, "model": m} for k, (u, m, _) in intent.PRESETS.items()}}
+
+    @app.put("/api/llm")
+    def save_llm(cfg: LLMConfig):
+        p = cfg.provider or _current_provider()
+        with lock:
+            legacy = lib.get_setting("llm_provider")
+            for k in ("base_url", "model", "api_key"):  # settings saved before they were per provider
+                v = lib.get_setting(f"llm_{k}")
+                if v and legacy and not lib.get_setting(f"llm_{legacy}_{k}"):
+                    lib.set_setting(f"llm_{legacy}_{k}", v)
+                if v:
+                    lib.set_setting(f"llm_{k}", "")
+            lib.set_setting("llm_provider", p)
+            for k in ("base_url", "model"):
+                v = getattr(cfg, k)
+                if v is not None:
+                    lib.set_setting(f"llm_{p}_{k}", v.strip().rstrip("/") if k == "base_url" else v.strip())
+            if cfg.api_key and cfg.api_key.strip():
+                lib.set_setting(f"llm_{p}_api_key", cfg.api_key.strip())
+            elif cfg.clear_key:
+                lib.set_setting(f"llm_{p}_api_key", "")
+        return llm_settings()
+
+    @app.post("/api/llm/test")
+    def test_llm(cfg: LLMConfig):
+        try:
+            return _llm(cfg).ping()
+        except intent.LLMError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/api/llm/models")
+    def llm_models(cfg: LLMConfig):
+        try:
+            return {"models": _llm(cfg).list_models()}
+        except intent.LLMError as e:
+            raise HTTPException(400, str(e))
+
+    def _run_intent(job_id: str, req: IntentRequest, model: intent.OpenAICompatIntentModel):
+        from .pack import build_pack
+
+        job = jobs[job_id]
+        reader = Library(home / "library.sqlite")  # own connection: LLM calls are slow, don't hold the lock
+        try:
+            if req.clause_key:  # blocks of the clause as shown, each under the version that introduced it
+                clause = next((c for c in reader.clauses(req.spec, req.version, 0, 100000)
+                               if c["key"] == req.clause_key), None)
+                blocks = clause["blocks"] if clause else []
+                versions = sorted({b["changed"] for b in blocks if b["changed"]}, key=lambda v: Version.parse(v).sort_key)
+                current = {b["raw_hash"] for b in blocks}  # not texts the clause replaced again later
+            else:
+                versions, current = [req.version], None
+            made, errors, stopped, uncovered, capped, asked = 0, [], None, 0, 0, 0
+            for v in versions:
+                def prog(i, n):
+                    job["done"], job["total"] = i, n
+                    job["message"] = f"{req.spec} v{v}: AI 요약 {i}/{n}"
+                left = None if req.limit is None else max(req.limit - asked, 0)  # the limit is per job
+                pack = build_pack(reader, req.spec, v, model, progress=prog, limit=left,
+                                  clause_key=req.clause_key, skip_uncovered=req.skip_uncovered,
+                                  skip_hashes=set() if req.force else reader.intent_hashes(req.spec, v),
+                                  only_hashes=current)
+                with lock:
+                    made += lib.merge_pack(pack)
+                errors += [c["intent_error"] for c in pack["changes"] if c.get("intent_error")]
+                asked += pack["generator"]["requested"]
+                uncovered += pack["generator"]["skipped_uncovered"]
+                capped += pack["generator"]["over_limit"]
+                if stopped := pack["generator"].get("stopped"):
+                    break
+            msg = f"AI 요약 {made}개 만듦 ({model.name})"
+            if stopped:
+                msg += f" · 중단: {stopped}"
+            elif errors:
+                msg += f" · 실패 {len(errors)}개: {errors[0]}"
+            elif not versions:
+                msg = "이 절에는 변경된 문단이 없습니다"
+            if capped:
+                msg += f" · 최대 요청 수에 걸려 {capped}개 남음 (다시 시작하면 이어서 함)"
+            if uncovered:
+                msg += f" · CR 이 연결되지 않은 변경 {uncovered}개 건너뜀"
+                if not made and not errors and not stopped:
+                    msg += " ('CR 이 연결되지 않은 변경 건너뛰기'를 끄면 요청합니다)"
+            job["state"] = "error" if (stopped or errors) and not made else "done"
+            job["message"] = msg
+        except Exception as e:
+            job["state"], job["message"] = "error", str(e)
+        finally:
+            reader.close()
+
+    @app.post("/api/intent")
+    def make_intents(req: IntentRequest):
+        model = _llm()
+        if not model.api_key and "googleapis.com" in model.base_url:
+            raise HTTPException(400, "Gemini API 키를 먼저 저장하세요")
+        if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
+            raise HTTPException(409, "AI 요약이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
+        job_id = uuid.uuid4().hex[:8]
+        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 0, "message": "AI 요약 준비",
+                        "specs": [req.spec], "kind": "intent"}
+        threading.Thread(target=_run_intent, args=(job_id, req, model), daemon=True).start()
+        return jobs[job_id]
+
     # ---- downloads (background jobs) ----
+
+    @app.get("/api/meeting-doc")
+    def meeting_doc(folder: str, tdoc: str | None = None):
+        """A WG meeting report (no tdoc) or meeting Tdoc rendered for the document viewer window."""
+        from . import minutes
+
+        try:
+            return minutes.document_html(folder, tdoc, home / "cache")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+
+    @app.get("/api/catalog/{series}")
+    def spec_catalog(series: str, refresh: bool = False):
+        """Specs of a series with titles for the download picker. Fetched once, then kept on disk until the
+        user asks for a refresh."""
+        import json as _json
+
+        if series not in ("36", "37", "38"):
+            raise HTTPException(404, "unknown series")
+        f = home / "catalog" / f"{series}.json"
+        if f.exists() and not refresh:
+            return _json.loads(f.read_text(encoding="utf-8"))
+        try:
+            rows = download.catalog(series)
+        except Exception as e:
+            raise HTTPException(502, f"3GPP 스펙 목록을 받을 수 없습니다: {e}")
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(_json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+        return rows
 
     @app.get("/api/remote/{spec}")
     def remote(spec: str):
@@ -167,8 +362,25 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         except Exception as e:  # network / policy errors surface to the UI
             raise HTTPException(502, f"cannot reach 3GPP archive: {e}")
 
+    def _official_title(spec: str) -> str | None:
+        """Title from 3GPP's series list (saved for the download picker; fetched once if missing)."""
+        import json as _json
+
+        f = home / "catalog" / f"{spec.split('.')[0]}.json"
+        try:
+            if not f.exists():
+                rows = download.catalog(spec.split(".")[0])
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(_json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+            rows = _json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        return next((r["title"] for r in rows if r["number"] == spec), None)
+
     def _run_fetch(job_id: str, req: FetchRequest):
         job = jobs[job_id]
+        skipped = []  # .doc-only versions with no converter on this PC
+        drafts_only = []  # specs with no approved (3.x and later) version yet
         try:
             for spec in req.specs:
                 if req.crs_only:
@@ -181,15 +393,27 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 remote_versions = download.select(download.list_remote(spec),
                                                   set(req.releases) if req.releases else None,
                                                   req.latest_per_release)
+                if not remote_versions:
+                    drafts_only.append(spec)
+                    continue
                 job["total"] += len(remote_versions)
                 for rv in remote_versions:
                     job["message"] = f"{spec} v{rv.version}: downloading"
-                    path = download.fetch(rv, home / "cache")
+                    try:
+                        path = download.fetch(rv, home / "cache")
+                    except download.LegacyDocError:
+                        skipped.append(f"{spec} v{rv.version}")
+                        job["done"] += 1
+                        continue
                     job["message"] = f"{spec} v{rv.version}: converting"
                     parsed = parse_docx(path)
                     with lock:
                         lib.add_version(spec, rv.version, parsed, source=rv.url, recompute=False)
                     job["done"] += 1
+                title = _official_title(spec)  # cover pages of recent versions often defeat title detection
+                if title:
+                    with lock:
+                        lib.set_spec_title(spec, title)
                 job["message"] = f"{spec}: computing history"
                 with lock:
                     lib.recompute_history(spec)
@@ -198,6 +422,13 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                         job["message"] = f"{spec}: CR 표지 {i}/{n} ({c['tdoc']})"
                     lib.fetch_cr_details(spec, cache_dir=home / "cache", progress=prog, lock=lock)
             job["state"], job["message"] = "done", "finished"
+            notes = []
+            if skipped:
+                notes.append(f"건너뜀: {', '.join(skipped)} (옛 .doc 형식, LibreOffice 또는 Word 가 있어야 변환됨)")
+            if drafts_only:
+                notes.append(f"받을 버전 없음: {', '.join(drafts_only)} (승인 전 초안만 있거나 고른 릴리즈에 버전이 없음)")
+            if notes:
+                job["message"] = "finished — " + " · ".join(notes)
         except Exception as e:
             job["state"], job["message"] = "error", str(e)
 

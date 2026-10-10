@@ -9,10 +9,21 @@
 - **CR 연결**: Change history 표 + CR 표지(Reason / Summary / **Clauses affected** / WI code)를 받아
   절마다 "이 절을 수정한 CR"을 표시 (38.211 Rel-16 기준 diff 결과와 96~98% 일치)
 - **TR 38.822 UE feature 연결**: CR 의 work item → 38.822 의 해당 WI 섹션 feature, 본문 용어와 겹치는 것부터
+- **Feature 로 찾기**: 새 뷰어 탭 → "Feature 로 찾기"에서 38.822 feature 를 고르면 받은 모든 스펙의 관련 절을
+  스펙별로 모아 보여 줌 (근거: 그 WI 의 CR 이 고친 절 / 본문에 RRC 필드 이름이 나오는 절, 겹치는 용어 순)
 - **Statistics**: 버전별 변경 절 수·CR 수, 가장 자주 바뀐 절
+- **AI 변경 의도 요약(선택)**: 메인 탭에서 LLM API(Gemini 또는 사내 OpenAI 호환 서버: vLLM·Ollama 등)를 설정하면
+  바뀐 문단마다 "무엇이·왜·구현 영향"을 CR 표지 근거로 요약 (버전 단위 또는 절 하나씩, 이미 요약한 문단은 재요청 안 함)
+- **회의 합의 연결**: AI 요약 때 CR 의 WG 회의(RAN1#95 등) 최종 회의록에서 그 변경의 Agreement/Decision/TP 를 찾아
+  패널에 보여 주고 요약 근거로 사용 (묶음 CR 은 그 안의 개별 draft CR 표지도 받아 씀)
+- **회의 논의 (FL summary)**: 그 합의가 나온 안건의 Feature lead / Moderator summary(모든 개정본)에서
+  이 변경과 관련된 쟁점·제안·회사 의견을 발췌해 보여 주고 요약 근거로 사용 (회의 Tdoc 목록 xlsx 로 찾음)
+- **회의 문서 뷰어(새 창)**: FL summary·회의록·draft CR 을 앱 안의 별도 창으로 열어 해당 문단/합의 위치로 바로 이동
+  (수식·그림 포함, 문서 안 R1-xxxx 링크는 같은 회의의 그 문서를 또 새 창으로)
 - **Annotation 서버(선택)**: 서버에서 만든 변경 의도 요약(LLM) pack 을 받아 표시 — `server/` 참고
 - 절 단위 스트리밍 스크롤, 전체 검색(Ctrl+F, SQLite FTS5), 변경 위치 눈금자, 목차 필터/접기
-- 탭 + 스펙 간 참조 링크(`clause 5.2.1 of TS 38.213` 클릭 → 새 탭), Ctrl+P 명령 팔레트
+- 메인 탭(다운로드·설정)과 뷰어 탭 분리: 새 뷰어 탭(+, Ctrl+T)에 받은 스펙이 카드로 한눈에 보임
+- 스펙 간 참조 링크(`clause 5.2.1 of TS 38.213` 클릭 → 새 뷰어 탭, 안 받은 스펙이면 메인 탭에 다운로드 제안), Ctrl+P 명령 팔레트
 - 북마크·메모(버전이 바뀌어도 절에 유지), 인용 복사, 비교 결과 HTML 보고서 내보내기
 - 3GPP archive 에서 스펙 전 버전 자동 다운로드 (여러 스펙 동시 선택, 릴리즈 필터)
 - 구형 Equation Editor/MathType 수식(WMF)을 내장 변환기로 SVG 렌더링
@@ -42,7 +53,7 @@ docs/      설계 문서, Windows 패키징 (docs/PACKAGING.md)
 cd backend
 pip install -e ".[dev]"
 
-# 2) 스펙 받기 (CLI 로도 가능, 앱의 Library 탭에서도 가능)
+# 2) 스펙 받기 (CLI 로도 가능, 앱의 메인 탭에서도 가능)
 specview fetch 38.211 --with-crs          # 모든 버전 + CR 표지 (--release 16, --latest-per-release 로 줄이기)
 specview fetch-features                   # TR 38.822 UE feature list
 #   이미 받은 파일이 있다면:  specview import 38211-g10.docx 38211-h50.docx ...

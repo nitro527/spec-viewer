@@ -6,6 +6,7 @@ All published versions of a spec live under
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -17,6 +18,10 @@ from typing import Callable, Iterable
 import requests
 
 from .versions import Version, parse_archive_name, series_of
+
+
+class LegacyDocError(RuntimeError):
+    """A version only published as .doc that neither LibreOffice nor Word could convert."""
 
 ARCHIVE = "https://www.3gpp.org/ftp/Specs/archive"
 _HREF = re.compile(r'href="([^"]+)"', re.I)
@@ -59,6 +64,24 @@ def list_remote(spec: str, session: requests.Session | None = None) -> list[Remo
     return [found[v] for v in sorted(found)]
 
 
+_REPORT_ROW = re.compile(r"<td[^>]*>\s*(TS|TR)\s*<a[^>]*>([\d.\-]+)</a>.*?</td>\s*<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>",
+                         re.S)
+
+
+def catalog(series: str, session: requests.Session | None = None) -> list[dict]:
+    """Every TS/TR of a series with its title, from 3GPP's series report (e.g. dynareport/38-series.htm)."""
+    import html as _html
+
+    s = session or new_session()
+    r = s.get(f"https://www.3gpp.org/dynareport/{series}-series.htm", timeout=60)
+    r.raise_for_status()
+    rows = [{"number": num, "type": typ, "title": " ".join(_html.unescape(re.sub(r"<[^>]+>", "", title)).split()),
+             "withdrawn": "WITHDRAWN" in flag.upper()}
+            for typ, num, title, flag in _REPORT_ROW.findall(r.text)]
+    parents = {n["number"].rsplit("-", 1)[0] for n in rows if "-" in n["number"]}
+    return [x for x in rows if x["number"] not in parents]  # 38.101 itself only exists as 38.101-1, -2 ...
+
+
 def is_draft(v: Version) -> bool:
     """0.x/1.x/2.x are pre-approval drafts (major 3+ only after TSG approval)."""
     return v.major < 3
@@ -77,35 +100,108 @@ def select(versions: Iterable[RemoteVersion], releases: set[int] | None = None,
     return vs
 
 
-def _extract_docx(zip_path: Path, out_dir: Path) -> Path:
+# Large specs (e.g. TS 36.211 since Rel-14) ship as several documents: 36211-ef0_cover.docx, _s00-s05, _s06-s08 ...
+# s00-s05, s09-sxx, sA0606-sA0611, sB01-sXX, s00-05, s07-XX, sAnnexes
+# "_s00-s05", "_1_s0-s7", "_sA0407-sA05", and dotted ones like 38.133 v20.0.0's "_sA.407-A.5"
+_PART = re.compile(r"_(cover|s[0-9A-Za-z.]+(?:-s?[0-9A-Za-z.]+)?)\.docx?$", re.I)
+
+
+def _natural(n: str) -> list:
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", n)]
+
+
+def _word_parts(z: zipfile.ZipFile) -> list[str]:
+    names = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc"))]
+    # TRs with annexes in their own files: 38857-h00.docx + "38857-h00 annex C1.1.1-7.docx" ...
+    main = [n for n in names if Path(n).stem.lower() == Path(z.filename or "").stem.lower()]
+    annexes = [n for n in names if re.search(r"\bannex", Path(n).stem, re.I)]
+    if main and annexes:
+        return main + sorted(annexes, key=_natural)
+    # natural order: 38133-k10_2_s8 before 38133-k10_10_sA06; "_cover" before "_s00". Names without an index
+    # ("_sA.406" = A.4.6 but "_sA.10" = A.10) are put in clause order by parse_docx once their headings are known.
+    parts = sorted((n for n in names if _PART.search(n)), key=_natural)
+    if len(parts) > 1:
+        return parts
+    return [max(names, key=lambda n: z.getinfo(n).file_size)] if names else []  # main body, not cover sheets
+
+
+def _extract_docx(zip_path: Path, out_dir: Path) -> list[Path]:
     with zipfile.ZipFile(zip_path) as z:
-        names = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc"))]
+        names = _word_parts(z)
         if not names:
             raise RuntimeError(f"no Word document in {zip_path.name}")
-        name = max(names, key=lambda n: z.getinfo(n).file_size)  # main body, not cover sheets
-        target = out_dir / Path(name).name
-        with z.open(name) as src, open(target, "wb") as dst:
-            shutil.copyfileobj(src, dst)
-    if target.suffix.lower() == ".doc":
-        soffice = shutil.which("soffice") or shutil.which("libreoffice")
-        if not soffice:
-            raise RuntimeError(f"{target.name} is a legacy .doc; LibreOffice is needed to convert it")
-        subprocess.run([soffice, "--headless", "--convert-to", "docx", "--outdir", str(out_dir), str(target)],
-                       capture_output=True, check=True, timeout=600)
-        target = target.with_suffix(".docx")
-    return target
+        targets = []
+        for name in names:
+            target = out_dir / Path(name).name
+            with z.open(name) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            targets.append(target)
+    return [_convert_doc(t) if t.suffix.lower() == ".doc" else t for t in targets]
+
+
+def _cached_parts(zip_path: Path, out_dir: Path) -> list[Path] | None:
+    """The extracted documents of an earlier run, if all of them are there (older runs kept only the largest part)."""
+    if not zip_path.exists():
+        return None
+    with zipfile.ZipFile(zip_path) as z:
+        want = [out_dir / Path(n).with_suffix(".docx").name for n in _word_parts(z)]
+    return want if want and all(p.exists() for p in want) else None
+
+
+# Word (COM) as a fallback on Windows PCs without LibreOffice. 16 = wdFormatXMLDocument (.docx).
+_WORD_PS = r"""
+$ErrorActionPreference = 'Stop'
+$w = New-Object -ComObject Word.Application
+try {
+    $w.Visible = $false; $w.DisplayAlerts = 0
+    $d = $w.Documents.Open($env:SPECVIEW_DOC_SRC, $false, $true, $false)
+    try { $d.SaveAs2($env:SPECVIEW_DOC_DST, 16) } finally { $d.Close($false) }
+} finally { $w.Quit() }
+"""
+
+
+def _convert_doc(src: Path) -> Path:
+    """.doc -> .docx with LibreOffice, else Microsoft Word; raises LegacyDocError if neither works."""
+    dst = src.with_suffix(".docx")
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice:
+        try:
+            subprocess.run([soffice, "--headless", "--convert-to", "docx", "--outdir", str(src.parent), str(src)],
+                           capture_output=True, check=True, timeout=600)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if dst.exists():
+            return dst
+    if os.name == "nt":
+        env = {**os.environ, "SPECVIEW_DOC_SRC": str(src.resolve()), "SPECVIEW_DOC_DST": str(dst.resolve())}
+        try:
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _WORD_PS],
+                           capture_output=True, check=True, timeout=600, env=env,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.SubprocessError):
+            try:
+                dst.unlink(missing_ok=True)  # a half-written file would be picked up as cached
+            except OSError:  # still locked by a Word that timed out
+                pass
+            return _raise_legacy(src)
+        if dst.exists():
+            return dst
+    return _raise_legacy(src)
+
+
+def _raise_legacy(src: Path):
+    raise LegacyDocError(f"{src.name} is a legacy .doc; install LibreOffice or Microsoft Word to convert it")
 
 
 def fetch(remote: RemoteVersion, cache_dir: Path, session: requests.Session | None = None,
-          progress: Callable[[int, int], None] | None = None) -> Path:
-    """Download (cached) and return the path of the extracted .docx."""
+          progress: Callable[[int, int], None] | None = None) -> list[Path]:
+    """Download (cached) and return the extracted .docx files of one version (usually one, in order if split)."""
     s = session or new_session()
     d = Path(cache_dir) / remote.spec / str(remote.version)
     d.mkdir(parents=True, exist_ok=True)
-    docs = list(d.glob("*.docx"))
-    if docs:
-        return docs[0]
     zip_path = d / remote.filename
+    if cached := _cached_parts(zip_path, d):
+        return cached
     if not zip_path.exists():
         with s.get(remote.url, stream=True, timeout=120) as r:
             r.raise_for_status()

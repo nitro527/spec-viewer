@@ -95,7 +95,7 @@ def wi_matches(wi_code: str, section_title: str) -> bool:
 
 
 _ACRONYM = re.compile(r"\b[A-Z][A-Z0-9-]{2,}[A-Z0-9]\b")
-_COMMON = {"NOTE", "TABLE", "UE", "NR", "TS", "THE", "FR1", "FR2", "TDD", "FDD", "RRC"}
+_COMMON = {"NOTE", "TABLE", "UE", "NR", "TS", "THE", "FR1", "FR2", "TDD", "FDD", "RRC", "OFDM"}
 
 
 def acronyms(text: str) -> set[str]:

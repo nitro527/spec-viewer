@@ -20,7 +20,7 @@ from lxml import etree, html
 from .wmf import wmf_to_svg
 
 HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-_NUM_RE = re.compile(r"^((?:[A-Z]\.)?\d+(?:\.\d+)*)\s+(.*)$", re.S)
+_NUM_RE = re.compile(r"^((?:[A-Z]\.)?\d+(?:\.\d+[A-Z]{0,2})*)\s+(.*)$", re.S)  # 7.4.1, A.2, 6.2A.1 (RF specs)
 _ANNEX_RE = re.compile(r"^Annex\s+([A-Z]{1,2})\b\s*(.*)$", re.S)
 _WS = re.compile(r"\s+")
 _IMAGE_CONVERT = {".emf"}  # WMF is handled by specview.wmf
@@ -254,11 +254,16 @@ def html_to_clauses(doc_html: str) -> list[Clause]:
     root = html.fragment_fromstring(doc_html, create_parent="div")
     clauses: list[Clause] = [Clause("front", "", "Front matter", 0)]
     seen: dict[str, int] = {}
+    numbered = ""  # last numbered clause: unnumbered sub-headings ("UE:", "Preamble:") are keyed under it
     for el in root:
         tag = el.tag if isinstance(el.tag, str) else ""
         is_heading = tag in HEADING_TAGS or (tag == "p" and "heading" in (el.get("class") or "").split())
         if is_heading:
             key, number, title = _split_heading(el.text_content())
+            if number:
+                numbered = key
+            elif numbered:  # stable across versions: "6.2.3/ue", not the 7th "ue" of the document
+                key = f"{numbered}/{key}"
             n = seen.get(key, 0)
             seen[key] = n + 1
             if n:
@@ -286,7 +291,15 @@ def guess_title(clauses: list[Clause]) -> str | None:
     return None
 
 
-def parse_docx(docx: Path) -> ParsedSpec:
+def parse_docx(docx: Path | list[Path]) -> ParsedSpec:
+    """One spec from a .docx, or from the parts a large spec is split into (cover, s00-s05, s06-s08 ...)."""
+    if isinstance(docx, (list, tuple)):
+        parts = [_parse_one(Path(p)) for p in docx]
+        return merge_parts(sorted(parts, key=_part_order)) if len(parts) > 1 else parts[0]
+    return _parse_one(Path(docx))
+
+
+def _parse_one(docx: Path) -> ParsedSpec:
     with tempfile.TemporaryDirectory() as tmp:
         media = Path(tmp) / "media"
         doc_html = _run_pandoc(Path(docx), media)
@@ -296,3 +309,37 @@ def parse_docx(docx: Path) -> ParsedSpec:
         doc_html = "".join(_serialize(el) for el in root)
     clauses = html_to_clauses(doc_html)
     return ParsedSpec(guess_title(clauses), clauses, assets)
+
+
+def _clause_order(number: str) -> tuple:
+    """"6.2A.1" < "6.10" < "Annex A" < "A.4.6" < "A.10" < "B.1": numbered clauses, then annexes by letter."""
+    number = re.sub(r"^Annex\s+", "", number)
+    comps = [[(0, int(t)) if t.isdigit() else (1, t.lower()) for t in re.split(r"(\d+)", c) if t]
+             for c in number.split(".")]
+    return (1 if number[:1].isalpha() else 0, comps)
+
+
+def _part_order(part: ParsedSpec) -> tuple:
+    """Split parts cover disjoint clause ranges: order them by their first numbered heading (cover sheets first).
+    Stable, so parts without numbered headings keep their file order."""
+    first = next((c.number for c in part.clauses if c.number), None)
+    return (0, ()) if first is None else (1, _clause_order(first))
+
+
+def merge_parts(parts: list[ParsedSpec]) -> ParsedSpec:
+    """Concatenate split documents in order; text before a part's first heading continues the previous clause."""
+    clauses: list[Clause] = []
+    seen: dict[str, int] = {}
+    assets: dict[str, Asset] = {}
+    for part in parts:
+        assets.update(part.assets)
+        for i, c in enumerate(part.clauses):
+            if i == 0 and c.key == "front" and clauses:
+                clauses[-1].blocks.extend(c.blocks)
+                continue
+            base = c.key.split("~")[0]
+            n = seen.get(base, 0)
+            seen[base] = n + 1
+            clauses.append(Clause(f"{base}~{n + 1}" if n else base, c.number, c.title, c.level, list(c.blocks)))
+    title = next((p.title for p in parts if p.title), None)
+    return ParsedSpec(title, clauses, assets)

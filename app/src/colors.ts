@@ -49,3 +49,8 @@ export function highlightCss(colors: Map<string, VersionColor>, shown: VersionIn
   }
   return `${light.join("\n")}\n@media (prefers-color-scheme: dark){${dark.join("\n")}}`;
 }
+
+/** One representative colour per release (badges in the spec picker). */
+export function releaseColor(release: number): string {
+  return `hsl(${band(release)[0]} 80% 36%)`;
+}
