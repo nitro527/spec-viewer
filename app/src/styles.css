@@ -118,6 +118,7 @@ h4.clause-title, h5.clause-title, h6.clause-title { font-size: 14.5px; }
 .blk th, .blk td, .diff-blk th, .diff-blk td { border: 1px solid var(--border); padding: 2px 6px; vertical-align: top; }
 .blk th, .diff-blk th { background: var(--panel); }
 .blk img, .diff-blk img { max-width: 100%; vertical-align: middle; }
+img.eq-img { max-width: none; vertical-align: middle; margin: 0 1px; }
 @media (prefers-color-scheme: dark) { .blk img, .diff-blk img { filter: invert(.9) hue-rotate(180deg); } }
 .katex { font-size: 1.05em; }
 

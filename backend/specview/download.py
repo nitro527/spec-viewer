@@ -20,6 +20,14 @@ from .versions import Version, parse_archive_name, series_of
 
 ARCHIVE = "https://www.3gpp.org/ftp/Specs/archive"
 _HREF = re.compile(r'href="([^"]+)"', re.I)
+# 3gpp.org sits behind a WAF that rejects the default python-requests/curl User-Agent.
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+
+
+def new_session() -> requests.Session:
+    s = requests.Session()
+    s.headers["User-Agent"] = USER_AGENT
+    return s
 
 
 @dataclass
@@ -38,7 +46,7 @@ def archive_url(spec: str) -> str:
 
 
 def list_remote(spec: str, session: requests.Session | None = None) -> list[RemoteVersion]:
-    s = session or requests.Session()
+    s = session or new_session()
     r = s.get(archive_url(spec), timeout=60)
     r.raise_for_status()
     found: dict[Version, RemoteVersion] = {}
@@ -51,9 +59,15 @@ def list_remote(spec: str, session: requests.Session | None = None) -> list[Remo
     return [found[v] for v in sorted(found)]
 
 
+def is_draft(v: Version) -> bool:
+    """0.x/1.x/2.x are pre-approval drafts (major 3+ only after TSG approval)."""
+    return v.major < 3
+
+
 def select(versions: Iterable[RemoteVersion], releases: set[int] | None = None,
-           latest_per_release: bool = False) -> list[RemoteVersion]:
-    vs = [v for v in versions if not releases or v.version.release in releases]
+           latest_per_release: bool = False, include_drafts: bool = False) -> list[RemoteVersion]:
+    vs = [v for v in versions
+          if (include_drafts or not is_draft(v.version)) and (not releases or v.version.release in releases)]
     if latest_per_release:
         best: dict[int, RemoteVersion] = {}
         for v in vs:
@@ -85,7 +99,7 @@ def _extract_docx(zip_path: Path, out_dir: Path) -> Path:
 def fetch(remote: RemoteVersion, cache_dir: Path, session: requests.Session | None = None,
           progress: Callable[[int, int], None] | None = None) -> Path:
     """Download (cached) and return the path of the extracted .docx."""
-    s = session or requests.Session()
+    s = session or new_session()
     d = Path(cache_dir) / remote.spec / str(remote.version)
     d.mkdir(parents=True, exist_ok=True)
     docs = list(d.glob("*.docx"))

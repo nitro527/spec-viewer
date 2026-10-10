@@ -41,7 +41,8 @@ def cmd_fetch(args):
     lib = _lib(args)
     releases = set(args.release) if args.release else None
     for spec in args.specs:
-        remote = download.select(download.list_remote(spec), releases, args.latest_per_release)
+        remote = download.select(download.list_remote(spec), releases, args.latest_per_release,
+                                 args.include_drafts)
         print(f"{spec}: {len(remote)} versions")
         for rv in remote:
             print(f"  v{rv.version}: download + convert")
@@ -79,6 +80,7 @@ def main(argv=None):
     p.add_argument("specs", nargs="+", help="e.g. 38.211 38.212")
     p.add_argument("--release", type=int, action="append", help="limit to release(s), repeatable")
     p.add_argument("--latest-per-release", action="store_true")
+    p.add_argument("--include-drafts", action="store_true", help="also fetch pre-approval 0.x-2.x drafts")
     p.set_defaults(func=cmd_fetch)
 
     p = sub.add_parser("list", help="list specs in the library")

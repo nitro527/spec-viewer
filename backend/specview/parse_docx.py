@@ -17,11 +17,13 @@ from pathlib import Path
 
 from lxml import etree, html
 
+from .wmf import wmf_to_svg
+
 HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 _NUM_RE = re.compile(r"^((?:[A-Z]\.)?\d+(?:\.\d+)*)\s+(.*)$", re.S)
 _ANNEX_RE = re.compile(r"^Annex\s+([A-Z]{1,2})\b\s*(.*)$", re.S)
 _WS = re.compile(r"\s+")
-_IMAGE_CONVERT = {".wmf", ".emf"}
+_IMAGE_CONVERT = {".emf"}  # WMF is handled by specview.wmf
 
 
 @dataclass
@@ -137,16 +139,34 @@ def _rewrite_images(root, media_dir: Path) -> dict[str, Asset]:
     imgs = root.xpath("//img[@src]")
     srcs = [Path(i.get("src")) for i in imgs]
     converted = _convert_vector_images(sorted({s for s in srcs if s.suffix.lower() in _IMAGE_CONVERT and s.exists()}))
+    wmf_cache: dict[Path, tuple] = {}
     for img, src in zip(imgs, srcs):
         path = converted.get(src, src)
         if not path.exists():
             continue
+        for attr in ("style", "width", "height"):
+            img.attrib.pop(attr, None)
+        if path.suffix.lower() == ".wmf":
+            if path not in wmf_cache:
+                try:
+                    wmf_cache[path] = (wmf_to_svg(path.read_bytes()),)
+                except Exception:
+                    wmf_cache[path] = (None,)
+            res = wmf_cache[path][0]
+            if res is not None:
+                data = res.svg.encode("utf-8")
+                h = hashlib.sha1(data).hexdigest()[:20]
+                assets[h] = Asset(h, "image/svg+xml", data)
+                img.set("src", f"/api/asset/{h}")
+                img.set("class", "eq-img")
+                img.set("alt", res.text)
+                # Word body text is 10 pt: sizing in em keeps equations proportional to the text.
+                img.set("style", f"height:{res.height_pt / 10:.3f}em")
+                continue
         data = path.read_bytes()
         h = hashlib.sha1(data).hexdigest()[:20]
         assets[h] = Asset(h, _MIME.get(path.suffix.lower(), "application/octet-stream"), data)
         img.set("src", f"/api/asset/{h}")
-        for attr in ("style", "width", "height"):
-            img.attrib.pop(attr, None)
     return assets
 
 
@@ -170,7 +190,7 @@ def _blocks_from(el) -> list[Block]:
     if tag == "table":
         for cg in el.xpath(".//colgroup"):
             cg.getparent().remove(cg)
-    text = norm_text(el.text_content())
+    text = norm_text(" ".join([el.text_content(), *el.xpath(".//img/@alt")]))
     if kind == "p" and not text and not el.xpath(".//img"):
         return []
     return [Block(kind, "", _serialize(el), text)]
@@ -194,10 +214,17 @@ def html_to_clauses(doc_html: str) -> list[Clause]:
         clauses[-1].blocks.extend(_blocks_from(el))
     if not clauses[0].blocks:
         clauses.pop(0)
-    return clauses
+    # The "Contents" clause is Word's generated TOC: page-number links, not spec text.
+    return [c for c in clauses if c.title.strip().lower() not in ("contents", "table of contents")]
 
 
 def guess_title(clauses: list[Clause]) -> str | None:
+    # Cover page: ZT-styled lines "3rd Generation Partnership Project;" ... "NR;" "Physical channels ..."
+    front = clauses[0].blocks if clauses else []
+    zt = [b.text for b in front[:30] if b.style == "ZT" and b.text]
+    parts = [t for t in zt if not re.match(r"(3rd Generation|Technical Specification Group|\(Release)", t)]
+    if parts:
+        return " ".join(parts)
     for c in clauses[:3]:
         for b in c.blocks[:40]:
             if re.match(r"^(NR|Evolved|E-UTRA|5G|LTE|Study|Technical Specification Group)\b.*;", b.text):
