@@ -42,3 +42,15 @@ def test_unnumbered_subheadings_keyed_under_their_clause():
     cl = html_to_clauses("<h1>Foreword</h1><p>f</p><h2>6.2.3 Test A</h2><h4>UE:</h4><p>a</p>"
                          "<h2>6.2.4 Test B</h2><h4>UE:</h4><p>b</p>")
     assert [c.key for c in cl] == ["foreword", "6.2.3", "6.2.3/ue", "6.2.4", "6.2.4/ue"]
+
+
+def test_unnumbered_subheadings_keyed_under_their_parents():
+    from specview.parse_docx import html_to_clauses
+
+    cl = html_to_clauses("<h4>5.4.2 CSI-RS</h4><h5>CSI-RS for CSI acquisition</h5><h6>NZP-CSI-RS-Resource</h6><p>a</p>"
+                         "<h5>CSI-RS for beam refinement</h5><h6>NZP-CSI-RS-Resource</h6><p>b</p><h4></h4><p>c</p>"
+                         '<h4><img src="x.png"/></h4>')
+    assert [c.key for c in cl] == ["5.4.2", "5.4.2/csi-rs-for-csi-acquisition",
+                                   "5.4.2/csi-rs-for-csi-acquisition/nzp-csi-rs-resource",
+                                   "5.4.2/csi-rs-for-beam-refinement", "5.4.2/csi-rs-for-beam-refinement/nzp-csi-rs-resource"]
+    assert "c" in cl[-1].blocks[-2].text and "<img" in cl[-1].blocks[-1].html  # empty headings are not clauses

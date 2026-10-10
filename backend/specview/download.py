@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,8 +103,10 @@ def select(versions: Iterable[RemoteVersion], releases: set[int] | None = None,
 
 # Large specs (e.g. TS 36.211 since Rel-14) ship as several documents: 36211-ef0_cover.docx, _s00-s05, _s06-s08 ...
 # s00-s05, s09-sxx, sA0606-sA0611, sB01-sXX, s00-05, s07-XX, sAnnexes
-# "_s00-s05", "_1_s0-s7", "_sA0407-sA05", and dotted ones like 38.133 v20.0.0's "_sA.407-A.5"
-_PART = re.compile(r"_(cover|s[0-9A-Za-z.]+(?:-s?[0-9A-Za-z.]+)?)\.docx?$", re.I)
+# "_s00-s05", "_1_s0-s7", "_sA0407-sA05", dotted "_sA.407-A.5" (38.133 v20.0.0), "-sB.1-XX" (v16.0.0),
+# "_s07_01_01-s07_01_04" (36.523-1), "_s00-s06_noTOC_wrongfilenames!" (36.521-3), "_1" "_2" (36.777)
+_PART = re.compile(r"[_-](cover\b.*|s[0-9A-Za-z][^/]*|\d{1,2})\.docx?$", re.I)
+_NOT_PART = re.compile(r"rev_?marks|track|with_?changes", re.I)  # "36133-ba0_sA.7-A.8_with_rev_marks.doc" copies
 
 
 def _natural(n: str) -> list:
@@ -114,12 +117,12 @@ def _word_parts(z: zipfile.ZipFile) -> list[str]:
     names = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc"))]
     # TRs with annexes in their own files: 38857-h00.docx + "38857-h00 annex C1.1.1-7.docx" ...
     main = [n for n in names if Path(n).stem.lower() == Path(z.filename or "").stem.lower()]
-    annexes = [n for n in names if re.search(r"\bannex", Path(n).stem, re.I)]
+    annexes = [n for n in names if re.search(r"(?<![a-z])annex", Path(n).stem, re.I)]  # "_AnnexB1", " annex C1.2"
     if main and annexes:
         return main + sorted(annexes, key=_natural)
     # natural order: 38133-k10_2_s8 before 38133-k10_10_sA06; "_cover" before "_s00". Names without an index
     # ("_sA.406" = A.4.6 but "_sA.10" = A.10) are put in clause order by parse_docx once their headings are known.
-    parts = sorted((n for n in names if _PART.search(n)), key=_natural)
+    parts = sorted((n for n in names if _PART.search(Path(n).name) and not _NOT_PART.search(n)), key=_natural)
     if len(parts) > 1:
         return parts
     return [max(names, key=lambda n: z.getinfo(n).file_size)] if names else []  # main body, not cover sheets
@@ -165,11 +168,14 @@ def _convert_doc(src: Path) -> Path:
     dst = src.with_suffix(".docx")
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if soffice:
-        try:
-            subprocess.run([soffice, "--headless", "--convert-to", "docx", "--outdir", str(src.parent), str(src)],
-                           capture_output=True, check=True, timeout=600)
-        except (OSError, subprocess.SubprocessError):
-            pass
+        # own profile per call: a second LibreOffice on the same profile fails (a download and a CR lookup at once)
+        with tempfile.TemporaryDirectory(prefix="specview-lo-") as profile:
+            try:
+                subprocess.run([soffice, f"-env:UserInstallation={Path(profile).as_uri()}", "--headless",
+                                "--convert-to", "docx", "--outdir", str(src.parent), str(src)],
+                               capture_output=True, check=True, timeout=600)
+            except (OSError, subprocess.SubprocessError):
+                pass
         if dst.exists():
             return dst
     if os.name == "nt":

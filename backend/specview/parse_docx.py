@@ -255,20 +255,28 @@ def html_to_clauses(doc_html: str) -> list[Clause]:
     clauses: list[Clause] = [Clause("front", "", "Front matter", 0)]
     seen: dict[str, int] = {}
     numbered = ""  # last numbered clause: unnumbered sub-headings ("UE:", "Preamble:") are keyed under it
+    path: list[tuple[int, str]] = []  # enclosing unnumbered headings (level, slug) below that clause
     for el in root:
         tag = el.tag if isinstance(el.tag, str) else ""
         is_heading = tag in HEADING_TAGS or (tag == "p" and "heading" in (el.get("class") or "").split())
+        is_heading = is_heading and bool(el.text_content().strip())  # an empty paragraph in a heading style
         if is_heading:
             key, number, title = _split_heading(el.text_content())
+            level = _level_for(tag, number)
             if number:
-                numbered = key
+                numbered, path = key, []
             elif numbered:  # stable across versions: "6.2.3/ue", not the 7th "ue" of the document
-                key = f"{numbered}/{key}"
+                # and under their unnumbered parents: 38.508-1 repeats "NZP-CSI-RS-Resource" below
+                # "CSI-RS for CSI acquisition" and "CSI-RS for beam refinement"
+                path = [(lv, k) for lv, k in path if lv < level]
+                slug = key
+                key = "/".join([numbered, *(k for _, k in path), slug])
+                path.append((level, slug))
             n = seen.get(key, 0)
             seen[key] = n + 1
             if n:
                 key = f"{key}~{n + 1}"
-            clauses.append(Clause(key, number, title, _level_for(tag, number)))
+            clauses.append(Clause(key, number, title, level))
             continue
         clauses[-1].blocks.extend(_blocks_from(el))
     if not clauses[0].blocks:
