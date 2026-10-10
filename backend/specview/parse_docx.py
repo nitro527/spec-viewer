@@ -254,11 +254,16 @@ def html_to_clauses(doc_html: str) -> list[Clause]:
     root = html.fragment_fromstring(doc_html, create_parent="div")
     clauses: list[Clause] = [Clause("front", "", "Front matter", 0)]
     seen: dict[str, int] = {}
+    numbered = ""  # last numbered clause: unnumbered sub-headings ("UE:", "Preamble:") are keyed under it
     for el in root:
         tag = el.tag if isinstance(el.tag, str) else ""
         is_heading = tag in HEADING_TAGS or (tag == "p" and "heading" in (el.get("class") or "").split())
         if is_heading:
             key, number, title = _split_heading(el.text_content())
+            if number:
+                numbered = key
+            elif numbered:  # stable across versions: "6.2.3/ue", not the 7th "ue" of the document
+                key = f"{numbered}/{key}"
             n = seen.get(key, 0)
             seen[key] = n + 1
             if n:

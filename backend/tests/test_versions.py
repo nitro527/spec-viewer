@@ -34,3 +34,11 @@ def test_heading_numbers_with_letters():
     assert _split_heading("5G NR overview")[1] == ""  # not a clause number
     assert parse_clauses("6.2A.1, 6.5D") == ["6.2A.1", "6.5D"]
     assert parse_archive_name("38716-01-01-h00.zip") == ("38.716-01-01", Version(17, 0, 0))
+
+
+def test_unnumbered_subheadings_keyed_under_their_clause():
+    from specview.parse_docx import html_to_clauses
+
+    cl = html_to_clauses("<h1>Foreword</h1><p>f</p><h2>6.2.3 Test A</h2><h4>UE:</h4><p>a</p>"
+                         "<h2>6.2.4 Test B</h2><h4>UE:</h4><p>b</p>")
+    assert [c.key for c in cl] == ["foreword", "6.2.3", "6.2.3/ue", "6.2.4", "6.2.4/ue"]

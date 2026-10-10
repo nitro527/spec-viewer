@@ -105,11 +105,19 @@ def select(versions: Iterable[RemoteVersion], releases: set[int] | None = None,
 _PART = re.compile(r"_(cover|s[0-9A-Za-z]+(?:-s?[0-9A-Za-z]+)?)\.docx?$", re.I)
 
 
+def _natural(n: str) -> list:
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", n)]
+
+
 def _word_parts(z: zipfile.ZipFile) -> list[str]:
     names = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc"))]
+    # TRs with annexes in their own files: 38857-h00.docx + "38857-h00 annex C1.1.1-7.docx" ...
+    main = [n for n in names if Path(n).stem.lower() == Path(z.filename or "").stem.lower()]
+    annexes = [n for n in names if re.search(r"\bannex", Path(n).stem, re.I)]
+    if main and annexes:
+        return main + sorted(annexes, key=_natural)
     # natural order: 38133-k10_2_s8 before 38133-k10_10_sA06; "_cover" before "_s00"
-    parts = sorted((n for n in names if _PART.search(n)),
-                   key=lambda n: [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", n)])
+    parts = sorted((n for n in names if _PART.search(n)), key=_natural)
     if len(parts) > 1:
         return parts
     return [max(names, key=lambda n: z.getinfo(n).file_size)] if names else []  # main body, not cover sheets

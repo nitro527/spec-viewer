@@ -89,3 +89,14 @@ def test_fetch_job_reports_specs_without_versions_and_uses_official_title(tmp_pa
     while (j := c.get("/api/jobs").json()[0])["state"] == "running":
         time.sleep(0.05)
     assert j["state"] == "done" and "받을 버전 없음: 38.141" in j["message"]
+
+
+def test_tr_with_separate_annex_files(tmp_path):
+    zp = tmp_path / "38857-h00.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        for n, size in (("38857-h00 annex C1.1.8-11.docx", 900), ("38857-h00.docx", 100),
+                        ("38857-h00 annex C1.1.1-7.docx", 800), ("38857-h00 annex C3.docx", 10)):
+            z.writestr(n, b"x" * size)
+    with zipfile.ZipFile(zp) as z:
+        assert download._word_parts(z) == ["38857-h00.docx", "38857-h00 annex C1.1.1-7.docx",
+                                           "38857-h00 annex C1.1.8-11.docx", "38857-h00 annex C3.docx"]
