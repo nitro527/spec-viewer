@@ -24,11 +24,12 @@ from lxml import etree
 from .download import new_session
 
 FTP = "https://www.3gpp.org/ftp/tsg_ran"
-WG_PATH = {"1": "WG1_RL1", "2": "WG2_RL2", "3": "WG3_Iu", "4": "WG4_Radio"}
+WG_PATH = {"1": "WG1_RL1", "2": "WG2_RL2", "3": "WG3_Iu", "4": "WG4_Radio", "5": "WG5_Test_ex-T1"}
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _MARK = re.compile(r"^\s*(Agreements?|Decision|Conclusions?|Working assumptions?)\s*:?\s*(.*)$", re.I)
-_TDOC = re.compile(r"\bR([1-4])-(\d{6,7})\b")
-_FOLDER = re.compile(r"^TSGR([1-4])_(\d+)(b|bis)?(_e)?$", re.I)
+_TDOC = re.compile(r"\bR([1-5])-(\d{6,7})\b")
+# TSGR1_95, TSGR1_100b_e, TSGR5__113_Calgary (RAN5 adds the city)
+_FOLDER = re.compile(r"^TSGR([1-5])_+(\d+)(b|bis)?(_e)?(?:_[A-Za-z][A-Za-z_-]*)?$", re.I)
 
 
 def folder_name(folder_url: str) -> str:
@@ -73,7 +74,7 @@ def list_meetings(wg: str, session=None) -> list[str]:
     r = _get(s, f"{FTP}/{WG_PATH[wg]}/")
     if r is None:
         return []
-    names = {n for n in re.findall(r"/(TSGR[1-4]_[0-9A-Za-z_]+)/?\"", r.text) if _FOLDER.match(n)}
+    names = {n for n in re.findall(r"/(TSGR[1-5]_[0-9A-Za-z_-]+)/?\"", r.text) if _FOLDER.match(n)}
 
     def key(n):
         m = _FOLDER.match(n)
@@ -439,8 +440,8 @@ def summaries_for(change: dict, agreements: list[dict], reports: dict[str, dict]
 
 # ---------------------------------------------------------------- document viewer
 
-_FOLDER_URL = re.compile(r"^https://www\.3gpp\.org/ftp/tsg_ran/WG[1-4]_[A-Za-z0-9]+/TSGR[1-4]_[0-9A-Za-z_]+$")
-_TDOC_ID = re.compile(r"^R[1-4]-\d{6,7}$")
+_FOLDER_URL = re.compile(r"^https://www\.3gpp\.org/ftp/tsg_ran/WG[1-5]_[A-Za-z0-9-]+/TSGR[1-5]_[0-9A-Za-z_-]+$")
+_TDOC_ID = re.compile(r"^R[1-5]-\d{6,7}$")
 
 
 def _doc_file(folder: str, tdoc: str | None, cache_dir: Path) -> Path | None:

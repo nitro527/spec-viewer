@@ -143,10 +143,15 @@ def fetch_pack(tdoc: str, meeting: str, cache_dir: Path, session: requests.Sessi
     target = Path(cache_dir) / "tdocs" / f"{tdoc}.zip"
     if target.exists():
         return target
+    s = session or new_session()
     folder = meeting_folder(tdoc, meeting)
+    if not folder and re.match(r"R[1-5]-\d{6,7}$", tdoc):
+        # conformance specs (38.5xx) list the RAN5 Tdoc itself: find the WG meeting by its Tdoc number
+        from .minutes import TdocIndex
+
+        folder = TdocIndex(cache_dir, s).meeting_of(tdoc)
     if not folder:
         return None
-    s = session or new_session()
     target.parent.mkdir(parents=True, exist_ok=True)
     for url in (f"{folder}/Docs/{tdoc}.zip", f"{folder}/Docs/{tdoc.lower()}.zip"):
         for attempt in range(3):  # the 3GPP server times out now and then
@@ -193,9 +198,10 @@ _WG = {  # Tdoc prefix -> (FTP path, meeting folder prefix)
     "R2": ("tsg_ran/WG2_RL2", "TSGR2_"),
     "R3": ("tsg_ran/WG3_Iu", "TSGR3_"),
     "R4": ("tsg_ran/WG4_Radio", "TSGR4_"),
+    "R5": ("tsg_ran/WG5_Test_ex-T1", "TSGR5_"),
 }
 _WG_MEETING = re.compile(r"RAN\s*([1-4])\s*#\s*(\d+)\s*(bis|b)?(?:\s*-?\s*(e))?", re.I)
-_WG_TDOC = re.compile(r"\b(R[1-4]-\d{6,7})\b")
+_WG_TDOC = re.compile(r"\b(R[1-5]-\d{6,7})\b")
 
 
 def wg_meetings(text: str) -> list[str]:
