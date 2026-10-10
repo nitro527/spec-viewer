@@ -133,7 +133,7 @@ def parse_cover(docx: Path) -> CRCover:
                 else:
                     i += 1
     cover.clauses = parse_clauses(cover.clauses_raw)
-    m = re.search(r"\b([A-Z]\d-\d{6,7})\b", docx.name)
+    m = re.search(r"\b([A-Z]\d-\d{6,7}|R5s\d{6})\b", docx.name)
     cover.wg_tdoc = m.group(1) if m else ""
     return cover
 
@@ -150,6 +150,9 @@ def fetch_pack(tdoc: str, meeting: str, cache_dir: Path, session: requests.Sessi
         from .minutes import TdocIndex
 
         folder = TdocIndex(cache_dir, s).meeting_of(tdoc)
+    if not folder and (m := re.match(r"R5s(\d\d)\d{4}$", tdoc)):
+        # TTCN test suite CRs (38.523-3, 36.523-3 ...) come from RAN5's TTCN e-mail meetings, filed by year
+        folder = f"{FTP}/tsg_ran/WG5_Test_ex-T1/TTCN/TTCN_CRs/20{m.group(1)}"
     if not folder:
         return None
     target.parent.mkdir(parents=True, exist_ok=True)

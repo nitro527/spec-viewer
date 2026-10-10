@@ -102,7 +102,8 @@ def select(versions: Iterable[RemoteVersion], releases: set[int] | None = None,
 
 # Large specs (e.g. TS 36.211 since Rel-14) ship as several documents: 36211-ef0_cover.docx, _s00-s05, _s06-s08 ...
 # s00-s05, s09-sxx, sA0606-sA0611, sB01-sXX, s00-05, s07-XX, sAnnexes
-_PART = re.compile(r"_(cover|s[0-9A-Za-z]+(?:-s?[0-9A-Za-z]+)?)\.docx?$", re.I)
+# "_s00-s05", "_1_s0-s7", "_sA0407-sA05", and dotted ones like 38.133 v20.0.0's "_sA.407-A.5"
+_PART = re.compile(r"_(cover|s[0-9A-Za-z.]+(?:-s?[0-9A-Za-z.]+)?)\.docx?$", re.I)
 
 
 def _natural(n: str) -> list:
@@ -116,7 +117,8 @@ def _word_parts(z: zipfile.ZipFile) -> list[str]:
     annexes = [n for n in names if re.search(r"\bannex", Path(n).stem, re.I)]
     if main and annexes:
         return main + sorted(annexes, key=_natural)
-    # natural order: 38133-k10_2_s8 before 38133-k10_10_sA06; "_cover" before "_s00"
+    # natural order: 38133-k10_2_s8 before 38133-k10_10_sA06; "_cover" before "_s00". Names without an index
+    # ("_sA.406" = A.4.6 but "_sA.10" = A.10) are put in clause order by parse_docx once their headings are known.
     parts = sorted((n for n in names if _PART.search(n)), key=_natural)
     if len(parts) > 1:
         return parts

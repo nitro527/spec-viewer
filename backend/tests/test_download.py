@@ -100,3 +100,18 @@ def test_tr_with_separate_annex_files(tmp_path):
     with zipfile.ZipFile(zp) as z:
         assert download._word_parts(z) == ["38857-h00.docx", "38857-h00 annex C1.1.1-7.docx",
                                            "38857-h00 annex C1.1.8-11.docx", "38857-h00 annex C3.docx"]
+
+
+def test_dotted_part_names_ordered_by_clause():
+    # 38.133 v20.0.0: no index in the names, and "A.406" means A.4.6 while "A.10" means A.10
+    from specview.parse_docx import Clause, ParsedSpec, _part_order
+
+    names = ["38133-k00_sB.1-XX.docx", "38133-k00_cover.docx", "38133-k00_s0-7.docx", "38133-k00_sA.10-A.10.docx",
+             "38133-k00_sA.4-A.406.docx", "38133-k00_sA.407-A.5.docx", "38133-k00_sA.1-A.3.docx"]
+    assert all(download._PART.search(n) for n in names)
+    first = {"cover": None, "s0-7": "1", "sA.1-A.3": "Annex A", "sA.4-A.406": "A.4", "sA.407-A.5": "A.4.7",
+             "sA.10-A.10": "A.10", "sB.1-XX": "B.1"}
+    parts = [ParsedSpec(n, [Clause("front", "", "", 0)] + ([Clause(first[n], first[n], "", 1)] if first[n] else []), {})
+             for n in ["sB.1-XX", "cover", "s0-7", "sA.10-A.10", "sA.4-A.406", "sA.407-A.5", "sA.1-A.3"]]
+    assert [p.title for p in sorted(parts, key=_part_order)] == [
+        "cover", "s0-7", "sA.1-A.3", "sA.4-A.406", "sA.407-A.5", "sA.10-A.10", "sB.1-XX"]

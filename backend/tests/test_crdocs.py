@@ -76,3 +76,19 @@ def test_old_pack_with_doc_cr(tmp_path, monkeypatch):
     got = crdocs.find_cr_doc(pack, "36.211", "142", tmp_path / "out")
     assert got.suffix == ".docx" and converted == ["36211_CR0142_(Rel-8)_R1-094495.doc"]
     assert crdocs.find_cr_doc(pack, "36.211", "142", tmp_path / "out") == got and len(converted) == 1  # cached
+
+
+def test_ttcn_cr_tdoc_found_by_year(tmp_path):
+    # 38.523-3 lists RAN5 TTCN e-mail Tdocs (R5s...), filed under TTCN_CRs/<year>/Docs
+    asked = []
+
+    class Resp:
+        status_code, content = 200, b"PK\x03\x04"
+
+    class Session:
+        def get(self, url, timeout=None):
+            asked.append(url)
+            return Resp()
+
+    assert crdocs.fetch_pack("R5s260219", "RAN#113", tmp_path, Session()).name == "R5s260219.zip"
+    assert asked == [f"{crdocs.FTP}/tsg_ran/WG5_Test_ex-T1/TTCN/TTCN_CRs/2026/Docs/R5s260219.zip"]

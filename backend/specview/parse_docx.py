@@ -295,7 +295,7 @@ def parse_docx(docx: Path | list[Path]) -> ParsedSpec:
     """One spec from a .docx, or from the parts a large spec is split into (cover, s00-s05, s06-s08 ...)."""
     if isinstance(docx, (list, tuple)):
         parts = [_parse_one(Path(p)) for p in docx]
-        return merge_parts(parts) if len(parts) > 1 else parts[0]
+        return merge_parts(sorted(parts, key=_part_order)) if len(parts) > 1 else parts[0]
     return _parse_one(Path(docx))
 
 
@@ -309,6 +309,21 @@ def _parse_one(docx: Path) -> ParsedSpec:
         doc_html = "".join(_serialize(el) for el in root)
     clauses = html_to_clauses(doc_html)
     return ParsedSpec(guess_title(clauses), clauses, assets)
+
+
+def _clause_order(number: str) -> tuple:
+    """"6.2A.1" < "6.10" < "Annex A" < "A.4.6" < "A.10" < "B.1": numbered clauses, then annexes by letter."""
+    number = re.sub(r"^Annex\s+", "", number)
+    comps = [[(0, int(t)) if t.isdigit() else (1, t.lower()) for t in re.split(r"(\d+)", c) if t]
+             for c in number.split(".")]
+    return (1 if number[:1].isalpha() else 0, comps)
+
+
+def _part_order(part: ParsedSpec) -> tuple:
+    """Split parts cover disjoint clause ranges: order them by their first numbered heading (cover sheets first).
+    Stable, so parts without numbered headings keep their file order."""
+    first = next((c.number for c in part.clauses if c.number), None)
+    return (0, ()) if first is None else (1, _clause_order(first))
 
 
 def merge_parts(parts: list[ParsedSpec]) -> ParsedSpec:
