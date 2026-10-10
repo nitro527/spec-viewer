@@ -65,6 +65,10 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     def crs(spec: str, version: str | None = None):
         return _get(lib.crs, spec, version)
 
+    @app.get("/api/specs/{spec}/stats")
+    def stats(spec: str):
+        return _get(lib.stats, spec)
+
     @app.get("/api/specs/{spec}/compare")
     def compare(spec: str, old: str, new: str, changed_only: bool = True):
         return _get(lib.compare, spec, old, new, changed_only)

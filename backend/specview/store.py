@@ -223,6 +223,34 @@ class Library:
         rows.sort(key=lambda r: Version.parse(r["new_version"]).sort_key)
         return rows
 
+    def stats(self, spec: str) -> dict:
+        """Per-version change counts and the most frequently changed clauses."""
+        vers = self.versions(spec)
+        crs = self.crs(spec)
+        per_version = []
+        for v in vers:
+            counts = {r["status"]: r["n"] for r in self.db.execute(
+                "SELECT status, COUNT(*) AS n FROM clause_ver WHERE version_id=? GROUP BY status", (v["id"],))}
+            removed = self.db.execute("SELECT COUNT(*) FROM removed_clause WHERE version_id=?", (v["id"],)).fetchone()[0]
+            cats: dict[str, int] = {}
+            for c in crs:
+                if c["new_version"] == v["version"]:
+                    cats[c["cat"] or "-"] = cats.get(c["cat"] or "-", 0) + 1
+            per_version.append({"version": v["version"], "release": v["release"],
+                                "added": counts.get("added", 0) if v is not vers[0] else 0,
+                                "modified": counts.get("modified", 0), "removed": removed,
+                                "clauses": sum(counts.values()), "crs": cats})
+        clauses = []
+        if vers:
+            for r in self.db.execute("SELECT ord, key, number, title, level, introduced, history FROM clause_ver "
+                                     "WHERE version_id=? ORDER BY ord", (vers[-1]["id"],)):
+                hist = json.loads(r["history"] or "[]")
+                changes = [v for v, t in hist if t == "modified"]
+                clauses.append({"ord": r["ord"], "key": r["key"], "number": r["number"], "title": r["title"],
+                                "level": r["level"], "introduced": r["introduced"], "changes": changes})
+        return {"spec": spec, "latest": vers[-1]["version"] if vers else None,
+                "versions": per_version, "clauses": clauses}
+
     def asset(self, h: str) -> tuple[str, bytes] | None:
         r = self.db.execute("SELECT mime, data FROM asset WHERE hash=?", (h,)).fetchone()
         return (r["mime"], r["data"]) if r else None

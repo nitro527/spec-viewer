@@ -1,5 +1,5 @@
 // Side panels: table of contents (left) and change information (right).
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cmpVersion, tdocUrl, type CR, type TocEntry } from "../api";
 import type { VersionColor } from "../colors";
 import type { Selection } from "./HistoryView";
@@ -11,23 +11,65 @@ export function Toc({ toc, active, baseline, highlight, changedOnly, onJump }: {
   onJump: (ord: number) => void;
 }) {
   const activeRef = useRef<HTMLButtonElement>(null);
+  const [query, setQuery] = useState("");
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   useEffect(() => activeRef.current?.scrollIntoView({ block: "nearest" }), [active]);
+
+  const hasChildren = useMemo(() => {
+    const s = new Set<string>();
+    toc.forEach((t, i) => { if (toc[i + 1] && toc[i + 1].level > t.level) s.add(t.key); });
+    return s;
+  }, [toc]);
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const out: TocEntry[] = [];
+    let hideBelow = Infinity;
+    for (const t of toc) {
+      if (q) {
+        if (`${t.number} ${t.title}`.toLowerCase().includes(q)) out.push(t);
+        continue;
+      }
+      if (t.level > hideBelow) continue;
+      hideBelow = collapsed.has(t.key) ? t.level : Infinity;
+      out.push(t);
+    }
+    return out;
+  }, [toc, query, collapsed]);
+
+  const toggle = (key: string) => setCollapsed((c) => {
+    const n = new Set(c);
+    if (n.has(key)) n.delete(key); else n.add(key);
+    return n;
+  });
+
   return (
-    <nav className="toc">
-      {toc.map((t) => {
-        const changed = highlight && newer(t.last_changed, baseline);
-        if (changedOnly && !changed) return null;
-        return (
-          <button key={t.ord} ref={t.ord === active ? activeRef : undefined}
-                  className={`toc-item ${t.ord === active ? "active" : ""}`}
-                  style={{ paddingLeft: 8 + (Math.max(t.level, 1) - 1) * 12 }} onClick={() => onJump(t.ord)}
-                  title={`${t.number} ${t.title}`}>
-            {changed && <span className="dot" data-bv={t.last_changed!} />}
-            <span className="num">{t.number}</span> {t.title}
-          </button>
-        );
-      })}
-    </nav>
+    <>
+      <div className="toc-tools">
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="목차 필터 (번호/제목)" />
+        <button title="모두 접기" onClick={() => setCollapsed(new Set(toc.filter((t) => t.level === 1 && hasChildren.has(t.key)).map((t) => t.key)))}>−</button>
+        <button title="모두 펼치기" onClick={() => setCollapsed(new Set())}>+</button>
+      </div>
+      <nav className="toc">
+        {visible.map((t) => {
+          const changed = highlight && newer(t.last_changed, baseline);
+          if (changedOnly && !changed) return null;
+          return (
+            <div key={t.ord} className={`toc-row ${t.ord === active ? "active" : ""}`}
+                 style={{ paddingLeft: (Math.max(t.level, 1) - 1) * 12 }}>
+              {hasChildren.has(t.key) && !query
+                ? <button className="twisty" onClick={() => toggle(t.key)}>{collapsed.has(t.key) ? "▸" : "▾"}</button>
+                : <span className="twisty" />}
+              <button ref={t.ord === active ? activeRef : undefined} className="toc-item"
+                      onClick={() => onJump(t.ord)} title={`${t.number} ${t.title}`}>
+                {changed && <span className="dot" data-bv={t.last_changed!} />}
+                <span className="num">{t.number}</span> {t.title}
+              </button>
+            </div>
+          );
+        })}
+      </nav>
+    </>
   );
 }
 

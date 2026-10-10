@@ -42,7 +42,25 @@ def _key(t: Token) -> str:
 
 
 def opcodes(a: Sequence[Token], b: Sequence[Token]):
-    return SequenceMatcher(None, [_key(t) for t in a], [_key(t) for t in b], autojunk=False).get_opcodes()
+    """difflib opcodes over token keys.
+
+    Edits are usually local, so the common prefix/suffix is trimmed first; long
+    remainders (big tables full of repeated tags) use difflib's popularity
+    heuristic, otherwise matching is quadratic.
+    """
+    ka, kb = [_key(t) for t in a], [_key(t) for t in b]
+    lo, hi_a, hi_b = 0, len(ka), len(kb)
+    while lo < hi_a and lo < hi_b and ka[lo] == kb[lo]:
+        lo += 1
+    while hi_a > lo and hi_b > lo and ka[hi_a - 1] == kb[hi_b - 1]:
+        hi_a -= 1
+        hi_b -= 1
+    mid = SequenceMatcher(None, ka[lo:hi_a], kb[lo:hi_b], autojunk=(hi_a - lo) + (hi_b - lo) > 3000)
+    out = [("equal", 0, lo, 0, lo)] if lo else []
+    out += [(tag, i1 + lo, i2 + lo, j1 + lo, j2 + lo) for tag, i1, i2, j1, j2 in mid.get_opcodes()]
+    if hi_a < len(ka):
+        out.append(("equal", hi_a, len(ka), hi_b, len(kb)))
+    return out
 
 
 def similarity(a: str, b: str) -> float:

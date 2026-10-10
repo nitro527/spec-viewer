@@ -55,3 +55,11 @@ def test_storage_is_deduplicated(library):
     blocks = library.db.execute("SELECT COUNT(*) FROM block_ver").fetchone()[0]
     blobs = library.db.execute("SELECT COUNT(*) FROM blob").fetchone()[0]
     assert blobs < blocks / 2
+
+
+def test_stats(library):
+    st = library.stats("99.211")
+    by_v = {v["version"]: v for v in st["versions"]}
+    assert by_v["16.2.0"]["added"] == 1 and by_v["16.1.0"]["crs"] == {"F": 1}
+    seq = next(c for c in st["clauses"] if c["key"] == "7.4.1.1.1")
+    assert seq["changes"] == ["16.0.0", "16.1.0"]

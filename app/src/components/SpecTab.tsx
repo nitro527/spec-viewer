@@ -6,9 +6,10 @@ import { CompareView, VersionSelect } from "./CompareView";
 import { FindBar } from "./FindBar";
 import { HistoryView, type HistoryViewHandle, type Selection } from "./HistoryView";
 import { ChangeRuler, InfoPanel, Toc } from "./Panels";
+import { StatsView } from "./StatsView";
 import { Timeline } from "./Timeline";
 
-export type Mode = "history" | "compare" | "clean";
+export type Mode = "history" | "compare" | "clean" | "stats";
 
 export interface TabState {
   id: string;
@@ -102,8 +103,9 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
   }, [crs]);
 
   const jump = useCallback((ord: number, block: number | null = null) => {
-    if (mode === "compare") setMode("history");
-    setTimeout(() => view.current?.scrollToOrd(ord, block), mode === "compare" ? 50 : 0);
+    const away = mode === "compare" || mode === "stats";
+    if (away) setMode("history");
+    setTimeout(() => view.current?.scrollToOrd(ord, block), away ? 80 : 0);
   }, [mode]);
 
   const onXref = useCallback((clause: string | undefined, ref: string | undefined) => {
@@ -125,15 +127,15 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
       <style>{css}</style>
       <header className="toolbar">
         <b className="spec-name">TS {spec}</b>
-        {mode !== "compare" && <VersionSelect versions={versions} value={version} onChange={setVersion} label="버전" />}
+        {(mode === "history" || mode === "clean") && <VersionSelect versions={versions} value={version} onChange={setVersion} label="버전" />}
         {mode === "history" && (
           <VersionSelect versions={versions} value={baseline}
                          onChange={setBaseline} label="이후 변경 표시" />
         )}
         <div className="seg">
-          {(["history", "compare", "clean"] as Mode[]).map((m) => (
+          {(["history", "compare", "clean", "stats"] as Mode[]).map((m) => (
             <button key={m} className={mode === m ? "on" : ""} onClick={() => setMode(m)}>
-              {{ history: "History", compare: "Compare", clean: "Clean" }[m]}
+              {{ history: "History", compare: "Compare", clean: "Clean", stats: "Statistics" }[m]}
             </button>
           ))}
         </div>
@@ -164,12 +166,20 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
 
         <main className="center">
           {findOpen && <FindBar spec={spec} version={version} onGo={onFind} onClose={() => setFindOpen(false)} />}
-          {mode === "compare" ? (
+          {mode === "stats" ? (
+            <StatsView spec={spec} colors={colors}
+                       onJump={(key) => { const e = toc.find((t) => t.key === key); if (e) jump(e.ord); }}
+                       onCompare={(v) => {
+                         const i = versions.findIndex((x) => x.version === v);
+                         setCmp([versions[Math.max(0, i - 1)].version, v]);
+                         setMode("compare");
+                       }} />
+          ) : mode === "compare" ? (
             <CompareView spec={spec} versions={versions} oldV={cmpOld} newV={cmpNew}
                          onChange={(o, n) => setCmp([o, n])} onXref={onXref} />
           ) : (
             <div className="doc-wrap">
-              <HistoryView ref={view} spec={spec} version={version} baseline={baseline} toc={toc}
+              <HistoryView ref={view} spec={spec} version={version} citeLabel={`TS ${spec}`} baseline={baseline} toc={toc}
                            highlight={mode === "history"} selected={selection} onSelect={setSelection}
                            onVisible={setVisible} onXref={onXref} />
               {mode === "history" && <ChangeRuler toc={toc} baseline={baseline} onJump={(o) => jump(o)} />}
@@ -177,7 +187,7 @@ export function SpecTab({ tab, active, findSignal, onUpdate, onOpenSpec }: Props
           )}
         </main>
 
-        {infoOpen && mode !== "compare" && (
+        {infoOpen && (mode === "history" || mode === "clean") && (
           <InfoPanel selection={selection} version={version} baseline={baseline} crsByVersion={crsByVersion}
                      colors={colors} onClose={() => setSelection(null)} />
         )}

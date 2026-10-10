@@ -29,6 +29,13 @@ export interface DiffBlock { op: "equal" | "replace" | "insert" | "delete"; kind
 export interface DiffClause { key: string; number: string; title: string; old_title: string | null; level: number; status: "added" | "modified" | "removed"; blocks: DiffBlock[] }
 export interface CompareResult { spec: string; old: string; new: string; clauses: DiffClause[]; removed: DiffClause[]; crs: CR[] }
 
+export interface VersionStats {
+  version: string; release: number; added: number; modified: number; removed: number; clauses: number;
+  crs: Record<string, number>;
+}
+export interface ClauseStats { ord: number; key: string; number: string; title: string; level: number; introduced: string; changes: string[] }
+export interface Stats { spec: string; latest: string | null; versions: VersionStats[]; clauses: ClauseStats[] }
+
 export interface SearchHit { ord: number; key: string; number: string; title: string; block: number | null; snippet: string }
 export interface Job { id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[] }
 
@@ -50,6 +57,7 @@ export const api = {
   crs: (spec: string) => get<CR[]>(`/api/specs/${s(spec)}/crs`),
   compare: (spec: string, oldV: string, newV: string, changedOnly = true) =>
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
+  stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),
   jobs: () => get<Job[]>("/api/jobs"),
   fetchSpecs: async (specs: string[], releases: number[] | null, latestPerRelease: boolean): Promise<Job> => {
     const r = await fetch("/api/fetch", {
