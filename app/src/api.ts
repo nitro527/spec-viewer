@@ -67,17 +67,36 @@ export interface Intent { summary: string; motivation: string; impact: string; c
 export interface Annotation {
   clause: string; raw_hash: string; change: string; version: string; generated?: string;
   crs: { cr: string; tdoc: string; subject: string }[]; features: string[];
-  agreements: { meeting?: string; text: string; source?: string }[]; intent: Intent | null;
+  agreements: { meeting?: string; text: string; source?: string }[]; intent: Intent | null; intent_error?: string;
 }
 
 export interface Note { clause_key: string; bookmark: number; text: string; version: string | null; updated: string }
 
 export interface SearchHit { ord: number; key: string; number: string; title: string; block: number | null; snippet: string }
-export interface Job { id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[] }
+export interface LlmSettings {
+  provider: string; base_url: string; model: string; has_key: boolean; key_hint: string;
+  key_source: "saved" | "env" | null; presets: Record<string, { base_url: string; model: string }>;
+}
+export interface LlmForm { provider?: string; base_url?: string; model?: string; api_key?: string; clear_key?: boolean }
+export interface IntentRequest { spec: string; version: string; clause_key?: string; limit?: number | null; skip_uncovered?: boolean }
+
+export interface Job { id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[]; kind?: "intent" }
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+/** JSON request whose error is the backend's human-readable `detail`. */
+async function send<T>(method: string, path: string, body: unknown): Promise<T> {
+  const r = await fetch(path, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) {
+    const text = await r.text();
+    let detail = text;
+    try { detail = JSON.parse(text).detail ?? text; } catch { /* not JSON */ }
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
   return r.json();
 }
 
@@ -114,6 +133,11 @@ export const api = {
     if (!r.ok) throw new Error((await r.json()).detail ?? r.statusText);
     return r.json();
   },
+  llm: () => get<LlmSettings>("/api/llm"),
+  saveLlm: (form: LlmForm) => send<LlmSettings>("PUT", "/api/llm", form),
+  testLlm: (form: LlmForm) => send<{ model: string; reply: string; seconds: number }>("POST", "/api/llm/test", form),
+  llmModels: (form: LlmForm) => send<{ models: string[] }>("POST", "/api/llm/models", form),
+  makeIntents: (req: IntentRequest) => send<Job>("POST", "/api/intent", req),
   clauseFeatures: (spec: string, v: string, key: string) =>
     get<ClauseFeatures>(`/api/specs/${s(spec)}/${s(v)}/clause/${s(key)}/features`),
   fetchFeatures: async (): Promise<Job> => {

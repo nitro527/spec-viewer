@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import download
+from . import download, intent
 from .parse_docx import parse_docx
 from .store import Library
 from .versions import Version
@@ -19,6 +19,22 @@ from .versions import Version
 
 def default_home() -> Path:
     return Path(os.environ.get("SPECVIEW_HOME", Path.home() / ".specview"))
+
+
+class LLMConfig(BaseModel):
+    provider: str | None = None  # gemini | openai (any OpenAI-compatible server: vLLM, Ollama ...)
+    base_url: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    clear_key: bool = False
+
+
+class IntentRequest(BaseModel):
+    spec: str
+    version: str
+    clause_key: str | None = None  # one clause (blocks shown in this version), else the whole version
+    limit: int | None = 20
+    skip_uncovered: bool = True
 
 
 class FetchRequest(BaseModel):
@@ -156,6 +172,116 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         if not a:
             raise HTTPException(404)
         return Response(a[1], media_type=a[0], headers={"Cache-Control": "max-age=31536000, immutable"})
+
+    # ---- LLM change-intent summaries (the user's own API key) ----
+
+    def _llm_settings() -> dict:
+        provider = lib.get_setting("llm_provider") or "gemini"
+        url, model, key_env = intent.PRESETS.get(provider, ("", "", None))
+        saved_key = lib.get_setting("llm_api_key") or ""
+        env_key = os.environ.get(key_env or "", "") or os.environ.get("LLM_API_KEY", "")
+        return {"provider": provider, "base_url": lib.get_setting("llm_base_url") or url,
+                "model": lib.get_setting("llm_model") or model,
+                "api_key": saved_key or env_key, "key_source": "saved" if saved_key else "env" if env_key else None}
+
+    def _llm(cfg: LLMConfig | None = None) -> intent.OpenAICompatIntentModel:
+        st = _llm_settings()
+        if cfg:  # unsaved values from the form, so "test" works before "save"
+            if cfg.provider and cfg.provider != st["provider"]:
+                url, model, _ = intent.PRESETS.get(cfg.provider, ("", "", None))
+                st.update(base_url=url, model=model)
+            st.update({k: v for k, v in (("base_url", cfg.base_url), ("model", cfg.model), ("api_key", cfg.api_key))
+                       if v})
+        if not st["base_url"]:
+            raise HTTPException(400, "LLM 서버 주소를 입력하세요")
+        if not st["model"]:
+            raise HTTPException(400, "모델 이름을 입력하세요")
+        return intent.OpenAICompatIntentModel(st["base_url"], st["model"], st["api_key"] or None, timeout=120)
+
+    @app.get("/api/llm")
+    def llm_settings():
+        st = _llm_settings()
+        key = st.pop("api_key")
+        return {**st, "has_key": bool(key), "key_hint": f"…{key[-4:]}" if len(key) > 8 else "",
+                "presets": {k: {"base_url": u, "model": m} for k, (u, m, _) in intent.PRESETS.items()}}
+
+    @app.put("/api/llm")
+    def save_llm(cfg: LLMConfig):
+        with lock:
+            for k in ("provider", "base_url", "model"):
+                v = getattr(cfg, k)
+                if v is not None:
+                    lib.set_setting(f"llm_{k}", v.strip().rstrip("/") if k == "base_url" else v.strip())
+            if cfg.api_key:
+                lib.set_setting("llm_api_key", cfg.api_key.strip())
+            elif cfg.clear_key:
+                lib.set_setting("llm_api_key", "")
+        return llm_settings()
+
+    @app.post("/api/llm/test")
+    def test_llm(cfg: LLMConfig):
+        try:
+            return _llm(cfg).ping()
+        except intent.LLMError as e:
+            raise HTTPException(400, str(e))
+
+    @app.post("/api/llm/models")
+    def llm_models(cfg: LLMConfig):
+        try:
+            return {"models": _llm(cfg).list_models()}
+        except intent.LLMError as e:
+            raise HTTPException(400, str(e))
+
+    def _run_intent(job_id: str, req: IntentRequest, model: intent.OpenAICompatIntentModel):
+        from .pack import build_pack
+
+        job = jobs[job_id]
+        reader = Library(home / "library.sqlite")  # own connection: LLM calls are slow, don't hold the lock
+        try:
+            if req.clause_key:  # blocks of the clause as shown, each under the version that introduced it
+                clause = next((c for c in reader.clauses(req.spec, req.version, 0, 100000)
+                               if c["key"] == req.clause_key), None)
+                versions = sorted({b["changed"] for b in clause["blocks"] if b["changed"]} if clause else set(),
+                                  key=lambda v: Version.parse(v).sort_key)
+            else:
+                versions = [req.version]
+            made, errors, stopped = 0, [], None
+            for v in versions:
+                def prog(i, n):
+                    job["done"], job["total"] = i, n
+                    job["message"] = f"{req.spec} v{v}: AI 요약 {i}/{n}"
+                pack = build_pack(reader, req.spec, v, model, progress=prog, limit=req.limit,
+                                  clause_key=req.clause_key, skip_uncovered=req.skip_uncovered,
+                                  skip_hashes=reader.intent_hashes(req.spec, v))
+                with lock:
+                    made += lib.merge_pack(pack)
+                errors += [c["intent_error"] for c in pack["changes"] if c.get("intent_error")]
+                if stopped := pack["generator"].get("stopped"):
+                    break
+            msg = f"AI 요약 {made}개 만듦 ({model.name})"
+            if stopped:
+                msg += f" · 중단: {stopped}"
+            elif errors:
+                msg += f" · 실패 {len(errors)}개: {errors[0]}"
+            elif not versions:
+                msg = "이 절에는 변경된 문단이 없습니다"
+            job["state"] = "error" if (stopped or errors) and not made else "done"
+            job["message"] = msg
+        except Exception as e:
+            job["state"], job["message"] = "error", str(e)
+        finally:
+            reader.close()
+
+    @app.post("/api/intent")
+    def make_intents(req: IntentRequest):
+        model = _llm()
+        if not model.api_key and "googleapis.com" in model.base_url:
+            raise HTTPException(400, "Gemini API 키를 먼저 저장하세요")
+        job_id = uuid.uuid4().hex[:8]
+        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 0, "message": "AI 요약 준비",
+                        "specs": [req.spec], "kind": "intent"}
+        threading.Thread(target=_run_intent, args=(job_id, req, model), daemon=True).start()
+        return jobs[job_id]
 
     # ---- downloads (background jobs) ----
 

@@ -202,6 +202,22 @@ del { background: var(--del); color: var(--del-text); border-radius: 2px; }
 .rels { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .job { display: flex; gap: 10px; align-items: center; padding: 6px 0; }
 .job-error { color: var(--del-text); }
+.step { border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin: 10px 0; max-width: 680px; }
+.step h3 { font-size: 13.5px; margin: 0 0 8px; }
+.seg { display: inline-flex; margin-bottom: 4px; }
+.seg button { border-radius: 0; }
+.seg button:first-child { border-radius: 6px 0 0 6px; }
+.seg button:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+.seg button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.llm-grid { display: grid; grid-template-columns: 72px 1fr; gap: 6px 10px; align-items: center; margin: 8px 0; }
+.llm-grid label { font-size: 12.5px; color: var(--muted); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row > input:not([type="checkbox"]) { flex: 1; min-width: 160px; }
+.row.actions { margin-top: 8px; }
+input.num { width: 56px; margin: 0 4px; }
+.status-ok { color: var(--ins-text); }
+.status-error { color: var(--del-text); }
+.status-info { color: var(--muted); }
 
 /* ---- statistics ---- */
 .stats { flex: 1; overflow-y: auto; padding: 16px 28px 40px; }

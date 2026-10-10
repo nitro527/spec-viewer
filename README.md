@@ -10,6 +10,8 @@
   절마다 "이 절을 수정한 CR"을 표시 (38.211 Rel-16 기준 diff 결과와 96~98% 일치)
 - **TR 38.822 UE feature 연결**: CR 의 work item → 38.822 의 해당 WI 섹션 feature, 본문 용어와 겹치는 것부터
 - **Statistics**: 버전별 변경 절 수·CR 수, 가장 자주 바뀐 절
+- **AI 변경 의도 요약(선택)**: Library 탭에서 LLM API(Gemini 또는 사내 OpenAI 호환 서버: vLLM·Ollama 등)를 설정하면
+  바뀐 문단마다 "무엇이·왜·구현 영향"을 CR 표지 근거로 요약 (버전 단위 또는 절 하나씩, 이미 요약한 문단은 재요청 안 함)
 - **Annotation 서버(선택)**: 서버에서 만든 변경 의도 요약(LLM) pack 을 받아 표시 — `server/` 참고
 - 절 단위 스트리밍 스크롤, 전체 검색(Ctrl+F, SQLite FTS5), 변경 위치 눈금자, 목차 필터/접기
 - 탭 + 스펙 간 참조 링크(`clause 5.2.1 of TS 38.213` 클릭 → 새 탭), Ctrl+P 명령 팔레트

@@ -233,8 +233,9 @@ class Library:
 
     def specs(self) -> list[dict]:
         return [dict(r) for r in self.db.execute(
-            "SELECT s.number, s.title, COUNT(v.id) AS versions, MAX(v.version) AS latest FROM spec s "
-            "LEFT JOIN version v ON v.spec = s.number GROUP BY s.number ORDER BY s.number")]
+            "SELECT s.number, s.title, COUNT(v.id) AS versions, "
+            "(SELECT version FROM version WHERE spec = s.number ORDER BY sort_key DESC LIMIT 1) AS latest "
+            "FROM spec s LEFT JOIN version v ON v.spec = s.number GROUP BY s.number ORDER BY s.number")]
 
     def versions(self, spec: str) -> list[dict]:
         return [dict(r) for r in self.db.execute(
@@ -480,6 +481,26 @@ class Library:
                  json.dumps({**ch, "generated": pack.get("generated")}, ensure_ascii=False))
                 for ch in pack["changes"]])
         return len(pack["changes"])
+
+    def merge_pack(self, pack: dict) -> int:
+        """Add a locally built pack without dropping other entries or replacing a summary with nothing."""
+        n = 0
+        with self.db:
+            for ch in pack["changes"]:
+                key = (pack["spec"], pack["version"], ch["raw_hash"])
+                old = self.db.execute("SELECT data FROM annotation WHERE spec=? AND version=? AND raw_hash=?",
+                                      key).fetchone()
+                if not ch.get("intent") and old and json.loads(old["data"]).get("intent"):
+                    continue
+                n += bool(ch.get("intent"))
+                self.db.execute("INSERT OR REPLACE INTO annotation VALUES (?,?,?,?,?)", (
+                    *key, ch.get("clause"), json.dumps({**ch, "generated": pack.get("generated")}, ensure_ascii=False)))
+        return n
+
+    def intent_hashes(self, spec: str, version: str) -> set[str]:
+        """Blocks of a version that already have an intent summary."""
+        rows = self.db.execute("SELECT raw_hash, data FROM annotation WHERE spec=? AND version=?", (spec, version))
+        return {r["raw_hash"] for r in rows if json.loads(r["data"]).get("intent")}
 
     def clause_annotations(self, spec: str, version: str, key: str) -> list[dict]:
         """Server annotations for the blocks of a clause (any version that introduced their current text)."""

@@ -1,2 +1,2 @@
 """specview annotation server: builds packs offline and serves them to viewer clients."""
-PACK_FORMAT = "specview-annotations/1"
+from specview.pack import PACK_FORMAT  # noqa: F401

@@ -1,6 +1,7 @@
 // Library home: specs already converted, and the 3GPP downloader.
 import { useEffect, useState } from "react";
 import { api, type Job, type SpecInfo } from "../api";
+import { LlmPanel } from "./LlmPanel";
 
 const RELEASES = [15, 16, 17, 18, 19, 20];
 
@@ -75,6 +76,7 @@ export function Home({ prefill, onOpen }: { prefill?: string; onOpen: (spec: str
           <button className="primary" onClick={start} disabled={running}>다운로드</button>
         </div>
         {error && <p className="error small">{error}</p>}
+        <JobList jobs={jobs.filter((j) => j.kind !== "intent")} />
         <h2>Annotation 서버 <span className="muted small">(선택)</span></h2>
         <p className="muted small">변경 의도 요약·Chairman’s notes 연결 등 서버에서 만든 결과를 받아 함께 보여줍니다. 없어도 뷰어는 그대로 동작합니다.</p>
         <div className="dl-form">
@@ -82,14 +84,24 @@ export function Home({ prefill, onOpen }: { prefill?: string; onOpen: (spec: str
           <button onClick={async () => { await api.saveSettings({ annotation_url: annUrl }); setAnnSaved(true); }}>저장</button>
           {annSaved && <span className="small muted">저장됨</span>}
         </div>
-        {jobs.map((j) => (
-          <div key={j.id} className={`job job-${j.state}`}>
-            <b>{j.specs.join(", ")}</b> <span className="small">{j.message}</span>
-            {j.total > 0 && <progress value={j.done} max={j.total} />}
-            <span className="small muted">{j.done}/{j.total || "?"}</span>
-          </div>
-        ))}
       </section>
+
+      <LlmPanel specs={specs ?? []} onJob={(job) => setJobs((js) => [...js, job])} />
+      <JobList jobs={jobs.filter((j) => j.kind === "intent")} />
     </div>
+  );
+}
+
+function JobList({ jobs }: { jobs: Job[] }) {
+  return (
+    <>
+      {jobs.map((j) => (
+        <div key={j.id} className={`job job-${j.state}`}>
+          <b>{j.specs.join(", ")}</b> <span className="small">{j.message}</span>
+          {j.total > 0 && <progress value={j.done} max={j.total} />}
+          <span className="small muted">{j.done}/{j.total || "?"}</span>
+        </div>
+      ))}
+    </>
   );
 }
