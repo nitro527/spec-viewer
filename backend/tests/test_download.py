@@ -1,4 +1,5 @@
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -115,3 +116,20 @@ def test_dotted_part_names_ordered_by_clause():
              for n in ["sB.1-XX", "cover", "s0-7", "sA.10-A.10", "sA.4-A.406", "sA.407-A.5", "sA.1-A.3"]]
     assert [p.title for p in sorted(parts, key=_part_order)] == [
         "cover", "s0-7", "sA.1-A.3", "sA.4-A.406", "sA.407-A.5", "sA.10-A.10", "sB.1-XX"]
+
+
+def test_libreoffice_gets_its_own_profile(tmp_path, monkeypatch):
+    # two LibreOffice runs on one profile: the second fails (seen converting .doc files in parallel)
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        Path(cmd[-1]).with_suffix(".docx").write_bytes(b"PK")
+
+    monkeypatch.setattr(download.shutil, "which", lambda name: "/usr/bin/soffice")
+    monkeypatch.setattr(download.subprocess, "run", run)
+    for name in ("a.doc", "b.doc"):
+        (tmp_path / name).write_bytes(b"x")
+        assert download._convert_doc(tmp_path / name).suffix == ".docx"
+    profiles = [next(a for a in c if a.startswith("-env:UserInstallation=")) for c in calls]
+    assert len(set(profiles)) == 2

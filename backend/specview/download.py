@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -165,11 +166,14 @@ def _convert_doc(src: Path) -> Path:
     dst = src.with_suffix(".docx")
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if soffice:
-        try:
-            subprocess.run([soffice, "--headless", "--convert-to", "docx", "--outdir", str(src.parent), str(src)],
-                           capture_output=True, check=True, timeout=600)
-        except (OSError, subprocess.SubprocessError):
-            pass
+        # own profile per call: a second LibreOffice on the same profile fails (a download and a CR lookup at once)
+        with tempfile.TemporaryDirectory(prefix="specview-lo-") as profile:
+            try:
+                subprocess.run([soffice, f"-env:UserInstallation={Path(profile).as_uri()}", "--headless",
+                                "--convert-to", "docx", "--outdir", str(src.parent), str(src)],
+                               capture_output=True, check=True, timeout=600)
+            except (OSError, subprocess.SubprocessError):
+                pass
         if dst.exists():
             return dst
     if os.name == "nt":
