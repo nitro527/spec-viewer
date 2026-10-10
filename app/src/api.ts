@@ -124,7 +124,7 @@ export const api = {
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
   stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),
   jobs: () => get<Job[]>("/api/jobs"),
-  catalog: (series: string) => get<CatalogSpec[]>(`/api/catalog/${s(series)}`),
+  catalog: (series: string, refresh = false) => get<CatalogSpec[]>(`/api/catalog/${s(series)}${refresh ? "?refresh=true" : ""}`),
   notes: (spec: string) => get<Note[]>(`/api/specs/${s(spec)}/notes`),
   saveNote: async (spec: string, key: string, body: { bookmark?: boolean; text?: string; version?: string }) => {
     const r = await fetch(`/api/specs/${s(spec)}/notes/${s(key)}`, {

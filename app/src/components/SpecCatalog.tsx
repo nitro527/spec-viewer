@@ -42,6 +42,20 @@ export function SpecCatalog({ selected, downloaded, focus, onToggle }: {
     api.catalog(series).then((rows) => setCat((c) => ({ ...c, [series]: rows })), (e) => setError(String(e).replace(/^Error: /, "")));
   }, [series, cat]);
 
+  const [refreshing, setRefreshing] = useState(false);
+  const refresh = async () => {  // the list is kept locally; only this goes back to 3GPP
+    setRefreshing(true);
+    setError(null);
+    try {
+      const rows = await api.catalog(series, true);
+      setCat((c) => ({ ...c, [series]: rows }));
+    } catch (e) {
+      setError(String(e).replace(/^Error: /, "") + " (저장된 목록을 그대로 씁니다)");
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   const rows = cat[series];
   const byNumber = useMemo(() => new Map((rows ?? []).map((r) => [r.number, r])), [rows]);
   const groups = useMemo(() => {
@@ -79,8 +93,12 @@ export function SpecCatalog({ selected, downloaded, focus, onToggle }: {
         </div>
         <input className="catalog-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="번호·제목으로 찾기 (예: 331, PDCP)" />
         <label className="small"><input type="checkbox" checked={showWithdrawn} onChange={(e) => setShowWithdrawn(e.target.checked)} /> 폐기된 스펙도</label>
+        <button className="small" onClick={refresh} disabled={refreshing}
+                title="3GPP 에서 스펙 목록을 다시 받습니다 (새 스펙·폐기 반영). 평소에는 저장된 목록을 씁니다.">
+          {refreshing ? "받는 중…" : "목록 새로고침"}
+        </button>
       </div>
-      {error && <p className="small status-error">{error} — 아래 “직접 입력”으로 받을 수 있습니다.</p>}
+      {error && <p className="small status-error">{error}{!rows && " — 아래 “직접 입력”으로 받을 수 있습니다."}</p>}
       {!rows && !error && <p className="muted small">3GPP 스펙 목록을 불러오는 중…</p>}
       {rows && !q && (
         <div className="catalog-group">

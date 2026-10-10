@@ -323,20 +323,18 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     @app.get("/api/catalog/{series}")
     def spec_catalog(series: str, refresh: bool = False):
-        """Specs of a series with titles for the download picker; cached on disk for a week."""
+        """Specs of a series with titles for the download picker. Fetched once, then kept on disk until the
+        user asks for a refresh."""
         import json as _json
-        import time as _time
 
         if series not in ("36", "37", "38"):
             raise HTTPException(404, "unknown series")
         f = home / "catalog" / f"{series}.json"
-        if f.exists() and not refresh and _time.time() - f.stat().st_mtime < 7 * 86400:
+        if f.exists() and not refresh:
             return _json.loads(f.read_text(encoding="utf-8"))
         try:
             rows = download.catalog(series)
         except Exception as e:
-            if f.exists():  # offline: an old list beats none
-                return _json.loads(f.read_text(encoding="utf-8"))
             raise HTTPException(502, f"3GPP 스펙 목록을 받을 수 없습니다: {e}")
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(_json.dumps(rows, ensure_ascii=False), encoding="utf-8")

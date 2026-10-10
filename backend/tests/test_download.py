@@ -39,3 +39,25 @@ def test_numbered_parts_in_natural_order(tmp_path):
     with zipfile.ZipFile(zp) as z:
         assert download._word_parts(z) == ["38133-k10_0_cover.docx", "38133-k10_1_s0-s7.docx", "38133-k10_2_s8-s8.docx",
                                            "38133-k10_10_sA0606-sA0611.docx", "38133-k10_21_sB01-sXX.docx"]
+
+
+def test_catalog_kept_until_refresh(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from specview.api import create_app
+
+    calls = []
+
+    def fake(series):
+        calls.append(series)
+        if len(calls) == 3:
+            raise RuntimeError("offline")
+        return [{"number": f"{series}.211", "type": "TS", "title": f"v{len(calls)}", "withdrawn": False}]
+
+    monkeypatch.setattr(download, "catalog", fake)
+    c = TestClient(create_app(tmp_path))
+    assert c.get("/api/catalog/38").json()[0]["title"] == "v1"
+    assert c.get("/api/catalog/38").json()[0]["title"] == "v1" and len(calls) == 1  # no network after the first time
+    assert c.get("/api/catalog/38?refresh=true").json()[0]["title"] == "v2"
+    assert c.get("/api/catalog/38?refresh=true").status_code == 502  # refresh failed ...
+    assert c.get("/api/catalog/38").json()[0]["title"] == "v2"  # ... the saved list stays
