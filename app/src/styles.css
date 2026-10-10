@@ -358,3 +358,4 @@ input.num { width: 56px; margin: 0 4px; }
 .chip-have { color: var(--ins-text); font-size: 11px; }
 .chip.on .chip-have { color: #fff; }
 .picked { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip b { white-space: nowrap; }
