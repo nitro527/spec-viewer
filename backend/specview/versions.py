@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from functools import total_ordering
+from functools import lru_cache, total_ordering
 
 _DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+_VERSION = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
 
 
 @total_ordering
@@ -23,10 +24,7 @@ class Version:
 
     @classmethod
     def parse(cls, text: str) -> "Version":
-        m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", text.strip())
-        if not m:
-            raise ValueError(f"not a version: {text!r}")
-        return cls(*(int(g) for g in m.groups()))
+        return _parse(cls, text)
 
     @classmethod
     def from_code(cls, code: str) -> "Version":
@@ -79,3 +77,12 @@ def spec_digits(spec: str) -> str:
 
 def series_of(spec: str) -> str:
     return spec.split(".")[0]
+
+
+@lru_cache(maxsize=8192)
+def _parse(cls, text: str) -> Version:
+    """Versions are immutable and the same few hundred strings are parsed over and over (CR lists, sorting)."""
+    m = _VERSION.fullmatch(text.strip())
+    if not m:
+        raise ValueError(f"not a version: {text!r}")
+    return cls(*(int(g) for g in m.groups()))

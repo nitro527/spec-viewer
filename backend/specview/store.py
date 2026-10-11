@@ -133,7 +133,7 @@ def _mark_moves(clauses: list[dict]) -> None:
     spec has thousands of each)."""
     import bisect
 
-    from .diff import strip_tags, word_similarity
+    from .diff import best_similar, strip_tags
 
     dels = [(c, b) for c in clauses for b in c["blocks"] if b["op"] == "delete"]
     ins = [(c, b) for c in clauses for b in c["blocks"] if b["op"] == "insert"]
@@ -166,14 +166,9 @@ def _mark_moves(clauses: list[dict]) -> None:
     for ic, ib in fuzzy:
         w = text[id(ib)].split()
         lo, hi = len(w) * floor / (2 - floor), len(w) * (2 - floor) / floor  # 2·min/(a+b) ≥ floor
-        best, best_s = None, floor
-        for _, i in by_len[bisect.bisect_left(lens, lo):bisect.bisect_right(lens, hi)]:
-            dc, db = dels[i]
-            if id(db) in used or dc is ic:
-                continue
-            sc = word_similarity(words[id(db)], w, best_s)
-            if sc >= best_s:
-                best, best_s = (dc, db), sc
+        cands = ((dels[i], words[id(dels[i][1])]) for _, i in by_len[bisect.bisect_left(lens, lo):bisect.bisect_right(lens, hi)]
+                 if id(dels[i][1]) not in used and dels[i][0] is not ic)
+        best, _ = best_similar(cands, w, floor, strict=False)
         if best is not None:
             pair(ic, ib, *best)
 
@@ -813,8 +808,6 @@ class Library:
     def analysis_status(self) -> dict:
         """How far the AI analysis got: per spec and version the paragraphs that changed, how many a CR explains
         (what the full analysis summarises by default) and how many have a summary; CR analyses; WI summaries."""
-        from .pack import _touches
-
         out = []
         for sp in self.specs():
             spec = sp["number"]
@@ -826,14 +819,24 @@ class Library:
                 done.setdefault(r["version"], set()).add(r["raw_hash"])
             rows = []
             for v in vers[1:]:
-                clauses = [x for c in crs if c["lib_version"] == v["version"] for x in c["detail"].get("clauses", [])]
+                clauses = {x for c in crs if c["lib_version"] == v["version"] for x in c["detail"].get("clauses", []) if x}
+                # _touches(x, n) for any x, as set lookups: n itself, a parent of n, or a child of n is listed
+                parents = {x.rsplit(".", k)[0] for x in clauses for k in range(1, x.count(".") + 1)}
+                touched: dict[str, bool] = {}
+
+                def covers(n: str) -> bool:
+                    if n not in touched:
+                        parts = n.split(".")
+                        touched[n] = bool(n) and (n in parents or any(".".join(parts[:i]) in clauses
+                                                                       for i in range(1, len(parts) + 1)))
+                    return touched[n]
                 changed = covered = summarised = 0
                 for r in self.db.execute(
                         "SELECT b.raw_hash, c.number FROM block_ver b JOIN annot a ON a.hash=b.annot_hash "
                         "JOIN clause_ver c ON c.version_id=b.version_id AND c.key=b.clause_key "
                         "WHERE b.version_id=? AND a.changed=?", (v["id"], v["version"])):
                     changed += 1
-                    covered += any(_touches(x, r["number"]) for x in clauses)
+                    covered += covers(r["number"])
                     summarised += r["raw_hash"] in done.get(v["version"], ())
                 rows.append({"version": v["version"], "changed": changed, "covered": covered, "summarised": summarised})
             analysed = self.db.execute("SELECT count(*) FROM cr_analysis WHERE spec=?", (spec,)).fetchone()[0]

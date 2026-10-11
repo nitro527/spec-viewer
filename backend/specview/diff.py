@@ -239,6 +239,32 @@ def word_similarity(wa: Sequence[str], wb: Sequence[str], floor: float = 0.0) ->
     return (2 * same + 2 * sum(m.size for m in sm.get_matching_blocks())) / n
 
 
+def best_similar(cands, words: Sequence[str], floor: float, strict: bool | str = True):
+    """The candidate (key, words) most similar to ``words``, above ``floor`` (``strict``: must beat it), or
+    (None, floor). ``strict="first"``: the first candidate may equal the floor, later ones must beat the best.
+    One SequenceMatcher keeps ``words`` as its second sequence, so the multiset bound
+    (quick_ratio) costs one pass over each candidate; only candidates that pass it are compared for real.
+    Comparing one new paragraph against a run of old ones built a matcher per pair before (most of the time
+    of comparing distant versions)."""
+    sm = SequenceMatcher(None, autojunk=False)
+    sm.set_seq2(words)
+    best, best_s, nb = None, floor, len(words)
+    must_beat = lambda: strict is True or (strict == "first" and best is not None)  # noqa: E731
+    for key, wa in cands:
+        n = len(wa) + nb
+        if n and 2 * min(len(wa), nb) < best_s * n:
+            continue
+        if n:
+            sm.set_seq1(wa)
+            q = sm.quick_ratio()
+            if q < best_s or (q == best_s and must_beat()):
+                continue
+        sc = word_similarity(wa, words, best_s)
+        if sc > best_s or (sc == best_s and not must_beat()):
+            best, best_s = key, sc
+    return best, best_s
+
+
 def similarity(a: str, b: str, floor: float = 0.0) -> float:
     return word_similarity(a.split(), b.split(), floor)
 
@@ -266,12 +292,8 @@ def align(old: Sequence[T], new: Sequence[T], key: Callable[[T], str], text: Cal
         # Greedy monotone pairing by similarity.
         oi = 0
         for j in news:
-            best, best_s = None, threshold
             words = text(new[j]).split()
-            for k in range(oi, len(olds)):
-                s = word_similarity(old_words[k], words, best_s)
-                if s > best_s:
-                    best, best_s = k, s
+            best, _ = best_similar(((k, old_words[k]) for k in range(oi, len(olds))), words, threshold)
             if best is None:
                 pairs.append((None, j))
                 continue
