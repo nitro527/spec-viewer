@@ -68,7 +68,9 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
     if (!version) return;
     onUpdate({ version, label: `${spec} v${version}` });
     setSelection(null);
-    api.toc(spec, version).then((t) => { tocVersion.current = version; setToc(t); });
+    let live = true;  // quick version steps (Alt+→): only the TOC of the version shown now may land
+    api.toc(spec, version).then((t) => { if (live) { tocVersion.current = version; setToc(t); } }, () => undefined);
+    return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spec, version]);
 
@@ -94,11 +96,16 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
     pendingJump.current = undefined;
   }, [toc, tab.jumpTo]);
 
+  // Ctrl+F / Ctrl+P count up in App; a tab opens the bar only for a press made while it is the active tab.
+  const seenFind = useRef(findSignal);
+  const seenPalette = useRef(paletteSignal);
   useEffect(() => {
-    if (active && findSignal) setFindOpen(true);
+    if (active && findSignal !== seenFind.current) setFindOpen(true);
+    seenFind.current = findSignal;
   }, [findSignal, active]);
   useEffect(() => {
-    if (active && paletteSignal) setPaletteOpen(true);
+    if (active && paletteSignal !== seenPalette.current) setPaletteOpen(true);
+    seenPalette.current = paletteSignal;
   }, [paletteSignal, active]);
 
   // Alt+←/→ steps through versions.

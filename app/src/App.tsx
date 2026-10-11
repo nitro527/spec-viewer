@@ -111,8 +111,8 @@ export function App() {
       {tabs.map((t) => (
         <div key={t.id} className="tabpane" style={{ display: t.id === activeId ? "flex" : "none" }}>
           {t.spec ? (
-            <SpecTab tab={t} active={t.id === activeId} findSignal={t.id === activeId ? findSignal : 0}
-                     paletteSignal={t.id === activeId ? paletteSignal : 0}
+            <SpecTab tab={t} active={t.id === activeId} findSignal={findSignal}
+                     paletteSignal={paletteSignal}
                      onUpdate={(p) => update(t.id, p)} onOpenSpec={openSpec} />
           ) : (
             <SpecPicker active={t.id === activeId} onOpen={(spec) => update(t.id, { spec, label: spec })}

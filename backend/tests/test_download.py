@@ -221,3 +221,19 @@ def test_download_retries_a_body_cut_off_midway(tmp_path, monkeypatch):
     monkeypatch.setattr(download, "_download", flaky)
     rv = download.RemoteVersion("38.211", download.Version.parse("17.0.0"), "https://x/38211-h00.zip")
     assert [p.name for p in download.fetch(rv, tmp_path)] == ["38211-h00.docx"] and len(calls) == 3
+
+
+def test_static_files_stay_inside_the_ui_folder(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from specview.api import create_app
+
+    ui = tmp_path / "ui"
+    (ui / "assets").mkdir(parents=True)
+    (ui / "index.html").write_text("INDEX")
+    (tmp_path / "secret.txt").write_text("SECRET")
+    c = TestClient(create_app(tmp_path / "home", ui))
+    for p in ("/..%2fsecret.txt", "/%2e%2e/secret.txt", "/..%2f..%2fsecret.txt"):
+        assert "SECRET" not in c.get(p).text
+    assert c.get("/index.html").text == "INDEX"
+    assert c.get("/api/specs", headers={"Host": "evil.example"}).status_code == 400

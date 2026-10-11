@@ -255,16 +255,32 @@ _THINK = re.compile(r"<think>.*?</think>", re.S)
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.S)
 
 
+def strip_think(text: str) -> str:
+    """Drop reasoning: <think>...</think> blocks, everything up to a closing </think> whose opening tag was part
+    of the prompt template (GLM / Qwen3 on vLLM without a reasoning parser), and an unterminated <think>."""
+    t = _THINK.sub("", text or "")
+    if "</think>" in t:
+        t = t.rsplit("</think>", 1)[1]
+    if t.lstrip().startswith("<think>"):
+        return ""
+    return t.strip()
+
+
 def _parse_json(text: str) -> dict:
-    """Reasoning models may prepend <think> blocks or wrap JSON in fences."""
-    t = _FENCE.sub("", _THINK.sub("", text).strip()).strip()
+    """Reasoning models may prepend <think> blocks, wrap JSON in fences or add prose around it."""
+    t = _FENCE.sub("", strip_think(text)).strip()
     try:
         return json.loads(t)
     except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", t, re.S)
-        if not m:
-            raise
-        return json.loads(m.group(0))
+        dec = json.JSONDecoder()
+        for m in re.finditer(r"\{", t):  # the first complete object, wherever it starts
+            try:
+                obj, _ = dec.raw_decode(t, m.start())
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                return obj
+        raise
 
 
 def _error_body(r) -> dict:
@@ -339,7 +355,10 @@ class OpenAICompatIntentModel:
     def _post(self, body: dict):
         try:
             return self.session.post(f"{self.base_url}/chat/completions", json=body, headers=self._headers(),
-                                     timeout=self.timeout)
+                                     timeout=(20, self.timeout))
+        except requests.ReadTimeout as e:
+            raise LLMError(f"LLM 서버가 {int(self.timeout)}초 안에 답하지 않았습니다 (모델이 느리거나 입력이 김; "
+                           "SPECVIEW_LLM_TIMEOUT 으로 늘릴 수 있음)") from e
         except requests.RequestException as e:
             raise LLMError(f"LLM 서버에 연결할 수 없습니다 (주소·네트워크·프록시 확인): {e}") from e
 
@@ -354,7 +373,8 @@ class OpenAICompatIntentModel:
         for attempt in range(4):
             r = self._post(body)
             if (r.status_code == 400 and structured and self._schema_mode == "json_schema"
-                    and not re.search(r"api[ _-]?key", str(_error_body(r).get("message", "")), re.I)):
+                    and not re.search(r"api[ _-]?key|context|token|length|too long|maximum",
+                                      str(_error_body(r).get("message", "")), re.I)):
                 raise _NoJsonSchema(_http_error(r))
             if r.status_code == 429:
                 err = _error_body(r)
@@ -363,7 +383,7 @@ class OpenAICompatIntentModel:
                 if attempt < 3:  # per-minute limit: wait as long as the server asks
                     time.sleep(min(_retry_delay(err) or 2 ** attempt * 2, 60))
                     continue
-            elif r.status_code in (500, 502, 503) and attempt < 3:
+            elif r.status_code in (408, 500, 502, 503, 504) and attempt < 3:
                 time.sleep(2 ** attempt * 2)
                 continue
             if r.status_code >= 400:
@@ -379,8 +399,9 @@ class OpenAICompatIntentModel:
             body["tools"], body["tool_choice"] = tools, "auto"
         for attempt in range(4):
             r = self._post(body)
-            if r.status_code == 400 and tools and not re.search(
-                    r"api[ _-]?key|context|token", str(_error_body(r).get("message", "")), re.I):
+            msg400 = str(_error_body(r).get("message", "")) if r.status_code == 400 else ""
+            if tools and r.status_code == 400 and re.search(r"tool|function", msg400, re.I) \
+                    and not re.search(r"context|token|length|maximum", msg400, re.I):
                 raise ToolsUnsupported(str(_http_error(r)))
             if r.status_code == 429:
                 err = _error_body(r)
@@ -389,14 +410,14 @@ class OpenAICompatIntentModel:
                 if attempt < 3:
                     time.sleep(min(_retry_delay(err) or 2 ** attempt * 2, 60))
                     continue
-            elif r.status_code in (500, 502, 503) and attempt < 3:
+            elif r.status_code in (408, 500, 502, 503, 504) and attempt < 3:
                 time.sleep(2 ** attempt * 2)
                 continue
             if r.status_code >= 400:
                 raise _http_error(r)
             data = r.json()
             msg = dict((data.get("choices") or [{}])[0].get("message") or {})
-            msg["content"] = _THINK.sub("", msg.get("content") or "").strip()
+            msg["content"] = strip_think(msg.get("content") or "")
             msg["model"] = data.get("model") or self.model
             return msg
         raise _http_error(r)
@@ -424,7 +445,7 @@ class OpenAICompatIntentModel:
 
     def intent(self, change: dict) -> dict | None:
         data = self._structured(lambda: self._intent_messages(change), ("change_intent", INTENT_SCHEMA))
-        return self._answer(data)
+        return self._answer(data, INTENT_SCHEMA)
 
     def analyze_cr(self, evidence: dict) -> dict | None:
         def messages():
@@ -433,7 +454,7 @@ class OpenAICompatIntentModel:
                 system += "\nReply with only a JSON object matching this schema:\n" + json.dumps(CR_SCHEMA)
             return [{"role": "system", "content": system},
                     {"role": "user", "content": cr_prompt(evidence) + f"\n\nWrite every field in {self.language}."}]
-        return self._answer(self._structured(messages, ("cr_analysis", CR_SCHEMA)))
+        return self._answer(self._structured(messages, ("cr_analysis", CR_SCHEMA)), CR_SCHEMA)
 
     def summarize_wi(self, wi: dict) -> dict | None:
         def messages():
@@ -442,7 +463,7 @@ class OpenAICompatIntentModel:
                 system += "\nReply with only a JSON object matching this schema:\n" + json.dumps(WI_SCHEMA)
             return [{"role": "system", "content": system},
                     {"role": "user", "content": wi_prompt(wi) + f"\n\nWrite every field in {self.language}."}]
-        return self._answer(self._structured(messages, ("wi_summary", WI_SCHEMA)))
+        return self._answer(self._structured(messages, ("wi_summary", WI_SCHEMA)), WI_SCHEMA)
 
     def release_notes(self, data: dict) -> dict | None:
         def messages():
@@ -451,14 +472,26 @@ class OpenAICompatIntentModel:
                 system += "\nReply with only a JSON object matching this schema:\n" + json.dumps(RN_SCHEMA)
             return [{"role": "system", "content": system},
                     {"role": "user", "content": rn_prompt(data) + f"\n\nWrite every field in {self.language}."}]
-        return self._answer(self._structured(messages, ("release_notes", RN_SCHEMA)))
+        return self._answer(self._structured(messages, ("release_notes", RN_SCHEMA)), RN_SCHEMA)
 
-    def _answer(self, data: dict) -> dict | None:
+    def _answer(self, data: dict, schema: dict | None = None) -> dict:
+        """The JSON object of a structured reply. An empty, cut-off or non-object reply is an error (never
+        None: a batch would ask for the same paragraph again forever); missing fields get empty defaults."""
         choice = (data.get("choices") or [{}])[0]
-        text = (choice.get("message") or {}).get("content")
+        reason = choice.get("finish_reason")
+        text = strip_think((choice.get("message") or {}).get("content") or "")
         if not text:
-            return None
-        out = _parse_json(text)
+            raise LLMError(f"AI 응답이 비어 있습니다 (finish_reason={reason}; 안전 필터·출력 길이 제한·추론만 하고 끝남)")
+        try:
+            out = _parse_json(text)
+        except json.JSONDecodeError as e:
+            if reason == "length":
+                raise LLMError("AI 응답이 출력 길이 제한에서 잘렸습니다 (finish_reason=length)") from e
+            raise LLMError(f"AI 응답이 JSON 이 아닙니다: {text[:120]}") from e
+        if not isinstance(out, dict):
+            raise LLMError("AI 응답이 JSON 객체가 아닙니다")
+        for k, spec in ((schema or {}).get("properties") or {}).items():
+            out.setdefault(k, [] if spec.get("type") == "array" else "")
         out["model"] = data.get("model") or self.model
         return out
 
@@ -467,7 +500,7 @@ class OpenAICompatIntentModel:
         t = time.monotonic()
         data = self._request([{"role": "user", "content": "Reply with the single word: OK"}], structured=False)
         text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-        return {"model": data.get("model") or self.model, "reply": _THINK.sub("", text).strip()[:100],
+        return {"model": data.get("model") or self.model, "reply": strip_think(text)[:100],
                 "seconds": round(time.monotonic() - t, 1)}
 
     def list_models(self) -> list[str]:

@@ -1,5 +1,5 @@
 // Electron shell: starts the Python backend on a free localhost port and opens the viewer.
-const { app, BrowserWindow, shell } = require("electron");
+const { app, BrowserWindow, Menu, dialog, shell } = require("electron");
 const { spawn } = require("child_process");
 const net = require("net");
 const path = require("path");
@@ -29,19 +29,38 @@ async function waitFor(url, timeoutMs = 20000) {
   throw new Error(`backend did not start: ${url}`);
 }
 
-async function createWindow() {
-  const win = new BrowserWindow({ width: 1500, height: 950, title: "Spec Viewer", autoHideMenuBar: true });
-  // External links (3GPP portal, Tdoc pages) open in the system browser.
-  // Our own pages (meeting document viewer) open in a new app window, from any window; everything else in the browser.
-  const openHandler = (wc) => ({ url }) => {
-    if (url.startsWith(new URL(wc.getURL()).origin + "/")) {
-      return { action: "allow", overrideBrowserWindowOptions: { width: 1100, height: 900, autoHideMenuBar: true } };
+const SAFE = { contextIsolation: true, nodeIntegration: false, sandbox: true };
+
+// Only web links leave the app (spec and meeting documents carry arbitrary hyperlinks: file:, smb:, javascript:).
+function openOutside(url) {
+  if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+}
+
+// A window never navigates away from the app: links to the outside go to the system browser, so a click on a
+// hyperlink inside a spec or meeting document cannot replace the viewer (and every open tab) with a web page.
+function guard(wc) {
+  const own = (url) => { try { return new URL(url).origin === new URL(wc.getURL()).origin; } catch (_) { return false; } };
+  wc.setWindowOpenHandler(({ url }) => {
+    if (own(url)) {  // our own pages (CR / meeting document viewer) open in a new app window
+      return { action: "allow", overrideBrowserWindowOptions: { width: 1100, height: 900, autoHideMenuBar: true, webPreferences: SAFE } };
     }
-    shell.openExternal(url);
+    openOutside(url);
     return { action: "deny" };
-  };
-  win.webContents.setWindowOpenHandler(openHandler(win.webContents));
-  app.on("browser-window-created", (_e, child) => child.webContents.setWindowOpenHandler(openHandler(child.webContents)));
+  });
+  wc.on("will-navigate", (e, url) => {
+    if (wc.getURL() && !own(url)) {
+      e.preventDefault();
+      openOutside(url);
+    }
+  });
+}
+
+async function createWindow() {
+  // No default menu: its Reload (Ctrl+R / F5) would drop every open tab. Copy/paste keep working via the edit role.
+  Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: "Edit", submenu: [
+    { role: "undo" }, { role: "redo" }, { type: "separator" }, { role: "cut" }, { role: "copy" }, { role: "paste" },
+    { role: "selectAll" }, { type: "separator" }, { role: "toggleDevTools" }] }]));
+  const win = new BrowserWindow({ width: 1500, height: 950, title: "Spec Viewer", autoHideMenuBar: true, webPreferences: SAFE });
 
   // Dev: Vite serves the UI and proxies /api to a backend started by hand (specview serve).
   const devUrl = process.env.SPECVIEW_UI_URL;
@@ -65,10 +84,17 @@ async function createWindow() {
     args.push("--static", path.join(__dirname, "..", "dist"));
   }
   backend = spawn(cmd, args, { cwd, env, stdio: "inherit" });
-  await waitFor(`http://127.0.0.1:${port}/api/specs`);
+  try {
+    await waitFor(`http://127.0.0.1:${port}/api/specs`, 60000);
+  } catch (e) {
+    dialog.showErrorBox("Spec Viewer", `백엔드를 시작하지 못했습니다.\n${e.message}\n\n백신·보안 프로그램이 specview.exe 를 막고 있지 않은지 확인하세요.`);
+    app.quit();
+    return;
+  }
   await win.loadURL(`http://127.0.0.1:${port}/`);
 }
 
+app.on("web-contents-created", (_e, wc) => guard(wc));  // every window, the document viewers included
 app.whenReady().then(createWindow);
 app.on("window-all-closed", () => app.quit());
 app.on("quit", () => backend && backend.kill());

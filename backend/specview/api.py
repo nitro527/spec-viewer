@@ -85,6 +85,15 @@ class FetchRequest(BaseModel):
 FULL_RETRY_WAIT = 60  # seconds before the n-th retry waits n times this, when the LLM server fails every request
 
 
+def _llm_timeout() -> float:
+    """Seconds to wait for one LLM reply: SPECVIEW_LLM_TIMEOUT, else 300 (a local model on a long prompt can
+    take minutes; the connection itself is given up after 20 s)."""
+    try:
+        return max(30.0, float(os.environ.get("SPECVIEW_LLM_TIMEOUT", "300")))
+    except ValueError:
+        return 300.0
+
+
 def _convert_workers() -> int:
     """How many versions are downloaded and converted at once: SPECVIEW_CONVERT_WORKERS, else half the CPU cores
     up to 4 (each pandoc on a big spec can take a gigabyte or more of memory; 4 at once is ~3x faster than one)."""
@@ -132,6 +141,10 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     lock = threading.Lock()
     jobs: dict[str, dict] = {}
     app = FastAPI(title="specview")
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+    # Local API: only for this machine. A web page that re-binds its DNS name to 127.0.0.1 must not reach it.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 
     def _get(fn, *a):
         try:
@@ -300,7 +313,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             raise HTTPException(400, "LLM 서버 주소를 입력하세요")
         if not st["model"]:
             raise HTTPException(400, "모델 이름을 입력하세요")
-        return intent.OpenAICompatIntentModel(st["base_url"], st["model"], st["api_key"] or None, timeout=120)
+        return intent.OpenAICompatIntentModel(st["base_url"], st["model"], st["api_key"] or None, timeout=_llm_timeout())
 
     @app.get("/api/llm")
     def llm_settings():
@@ -1022,9 +1035,12 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         static_dir = Path(static_dir)
         app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
 
+        root = static_dir.resolve()
+
         @app.get("/{path:path}")
         def spa(path: str):
-            f = static_dir / path
-            return FileResponse(f if path and f.is_file() else static_dir / "index.html")
+            f = (root / path).resolve()
+            ok = path and f.is_file() and f.is_relative_to(root)  # "..%2f" must not leave the UI folder
+            return FileResponse(f if ok else root / "index.html")
 
     return app

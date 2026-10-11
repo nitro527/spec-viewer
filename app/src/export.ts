@@ -2,7 +2,8 @@
 import { tdocUrl, type ChatMessage, type ChatSource, type CompareResult, type ReleaseNote } from "./api";
 import { expandTag, renderAnswer } from "./markdown";
 
-const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
 async function inlineAssets(html: string): Promise<string> {
   const urls = [...new Set([...html.matchAll(/src="(\/api\/asset\/[0-9a-f]+)"/g)].map((m) => m[1]))];

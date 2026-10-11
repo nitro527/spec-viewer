@@ -3,7 +3,8 @@
 import katex from "katex";
 import type { ChatSource } from "./api";
 
-const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
 function tex(src: string, display: boolean) {
   try {
