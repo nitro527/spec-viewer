@@ -310,12 +310,16 @@ def fetch_draft_cr(tdoc: str, cover: dict, cache_dir: Path, session: requests.Se
     folders = [f for f in wg_meetings(text) if f"/{_WG.get(tdoc[:2], ('', ''))[1]}" in f]
     s = session or new_session()
     result = None
+    unsure = False  # a folder that could not be reached: the cover may be there, so "not found" is not cached
     for folder in folders:
         for url in (f"{folder}/Docs/{tdoc}.zip",):
             try:
                 r = s.get(url, timeout=120)
             except requests.RequestException:
+                unsure = True
                 continue
+            if r.status_code >= 500:
+                unsure = True
             if r.status_code != 200 or r.content[:2] != b"PK":
                 continue
             out_dir = Path(cache_dir) / "tdocs" / tdoc
@@ -341,6 +345,7 @@ def fetch_draft_cr(tdoc: str, cover: dict, cache_dir: Path, session: requests.Se
             break
         if result:
             break
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(result or {}, ensure_ascii=False), encoding="utf-8")
+    if result or not unsure:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(result or {}, ensure_ascii=False), encoding="utf-8")
     return result

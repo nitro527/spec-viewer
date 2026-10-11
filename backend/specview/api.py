@@ -580,6 +580,8 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
         try:
             return minutes.document_html(folder, tdoc, home / "cache")
+        except minutes.Unreachable as e:
+            raise HTTPException(503, f"3gpp.org 에 연결할 수 없습니다. 잠시 후 다시 열어 보세요 ({e})")
         except ValueError as e:
             raise HTTPException(400, str(e))
         except FileNotFoundError as e:

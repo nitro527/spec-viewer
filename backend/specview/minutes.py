@@ -57,7 +57,14 @@ def tdoc_value(tdoc: str) -> int:
 
 # ---------------------------------------------------------------- meetings and Tdoc ranges
 
+class Unreachable(Exception):
+    """3gpp.org did not answer (network, timeout, 5xx): unlike a 404 nothing is known, so nothing is cached."""
+
+
 def _get(session, url: str) -> requests.Response | None:
+    """The response, or None when the file is not there (404/403); raises Unreachable when the server could not
+    be reached, so a network hiccup is never cached as "no such document"."""
+    last = None
     for _ in range(3):
         try:
             r = session.get(url, timeout=120)
@@ -65,14 +72,32 @@ def _get(session, url: str) -> requests.Response | None:
                 return r
             if r.status_code in (403, 404):
                 return None
-        except requests.RequestException:
-            pass
-    return None
+            last = f"HTTP {r.status_code}"
+        except requests.RequestException as e:
+            last = str(e)
+    raise Unreachable(f"{url}: {last}")
+
+
+_MEETINGS: dict[str, tuple[float, list[str]]] = {}  # wg -> (time, folders): listed once a day per process
 
 
 def list_meetings(wg: str, session=None) -> list[str]:
     """Regular meeting folders of a WG ("1".."5", or "P" for TSG RAN) in order (ad hoc meetings are left out)."""
-    s = session or new_session()
+    import time
+
+    hit = _MEETINGS.get(wg)
+    if hit and time.time() - hit[0] < 86400:
+        return hit[1]
+    try:
+        out = _list_meetings(wg, session or new_session())
+    except Unreachable:
+        return hit[1] if hit else []
+    if out:
+        _MEETINGS[wg] = (time.time(), out)
+    return out
+
+
+def _list_meetings(wg: str, s) -> list[str]:
     if wg == "P":
         r = _get(s, f"{FTP}/TSG_RAN/")
         names = {n for n in re.findall(r"/(TSGR_[0-9A-Za-z_-]+)/?\"", r.text) if _TSG_FOLDER.match(n)} if r else set()
@@ -99,7 +124,10 @@ class TdocIndex:
 
     def _range(self, folder: str) -> list[int] | None:
         if folder not in self.ranges:
-            r = _get(self.s, f"{folder}/Docs/")
+            try:
+                r = _get(self.s, f"{folder}/Docs/")
+            except Unreachable:
+                return None  # not recorded: asked again next time
             vals = [tdoc_value(f"R{m[0]}-{m[1]}") for m in _ANY_TDOC.findall(r.text)] if r is not None else []
             self.ranges[folder] = [min(vals), max(vals)] if vals else []
             self.file.parent.mkdir(parents=True, exist_ok=True)
@@ -130,6 +158,13 @@ class TdocIndex:
 
 
 # ---------------------------------------------------------------- reports
+
+def _report_url_or_folder(folder: str) -> str:
+    try:
+        return report_url(folder) or f"{folder}/Report/"
+    except Unreachable:
+        return f"{folder}/Report/"
+
 
 def report_url(folder: str, session=None) -> str | None:
     """The final report of a meeting (else its latest draft)."""
@@ -206,9 +241,12 @@ def fetch_report(folder: str, cache_dir: Path, session=None) -> dict | None:
         if not data or data.get("v") == 2:
             return data or None  # older cache entries lack the Tdoc list: fetch again
     s = session or new_session()
-    url = report_url(folder, s)
     result = None
-    r = _get(s, url) if url else None
+    try:
+        url = report_url(folder, s)
+        r = _get(s, url) if url else None
+    except Unreachable:
+        return None  # not cached: the report may well be there
     if r is not None and r.content[:2] == b"PK":
         work = cache.parent / folder_name(folder)
         work.mkdir(parents=True, exist_ok=True)
@@ -305,7 +343,10 @@ def fetch_tdoc_text(folder: str, tdoc: str, cache_dir: Path, session=None) -> li
     if cache.exists():
         return json.loads(cache.read_text(encoding="utf-8")) or None
     s = session or new_session()
-    r = _get(s, f"{folder}/Docs/{tdoc}.zip")
+    try:
+        r = _get(s, f"{folder}/Docs/{tdoc}.zip")
+    except Unreachable:
+        return None  # not cached
     paras = None
     if r is not None and r.content[:2] == b"PK":
         import io
@@ -484,4 +525,4 @@ def document_html(folder: str, tdoc: str | None, cache_dir: Path) -> dict:
         title = f"{row['title']} ({row['source']})" if row else ""
     return {"meeting": meeting_label(folder), "tdoc": tdoc, "title": title or ("Meeting report" if not tdoc else ""),
             "html": cached.read_text(encoding="utf-8"),
-            "url": f"{folder}/Docs/{tdoc}.zip" if tdoc else report_url(folder)}
+            "url": f"{folder}/Docs/{tdoc}.zip" if tdoc else _report_url_or_folder(folder)}
