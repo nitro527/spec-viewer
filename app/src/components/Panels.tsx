@@ -1,6 +1,7 @@
 // Side panels: table of contents (left) and change information (right).
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cmpVersion, crKey, crTouches, tdocUrl, type CR, type CRAnalysis, type Note, type TocEntry } from "../api";
+import { askAboutParagraph } from "../ask";
 import { openCRDoc } from "./DocWindow";
 import { useCRAnalyses } from "./CRAnalysis";
 import type { VersionColor } from "../colors";
@@ -184,6 +185,15 @@ export function InfoPanel({ spec, selection, version, baseline, crsByVersion, co
       {fetching && <p className="small job">{fetching}</p>}
       <div className="info-head">
         <b>{selection ? `§${selection.clause.number || selection.clause.title}` : `v${version}`}</b>
+        {selection && (
+          <button className="link small ask-ai" title="이 문단(또는 절)을 맥락으로 AI 채팅에서 질문합니다"
+                  onClick={() => askAboutParagraph({
+                    spec, version, clause: selection.clause.number || selection.clause.key,
+                    text: (block ? block.html : selection.clause.blocks.map((b) => b.html).join("\n"))
+                      .replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
+                      .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/[ \t]+/g, " ").trim().slice(0, 3000),
+                  })}>💬 AI 에게 질문</button>
+        )}
         {selection && <button className="link" onClick={onClose}>✕</button>}
       </div>
       {selection ? (

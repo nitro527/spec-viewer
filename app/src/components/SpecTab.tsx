@@ -19,6 +19,7 @@ export interface TabState {
   version?: string;
   label?: string;
   jumpTo?: string; // clause number to open at
+  jumpVersion?: string; // ...in this version (switches the tab's version first)
 }
 
 interface Props {
@@ -27,7 +28,7 @@ interface Props {
   findSignal: number;
   paletteSignal: number;
   onUpdate: (patch: Partial<TabState>) => void;
-  onOpenSpec: (spec: string, clause?: string) => void;
+  onOpenSpec: (spec: string, clause?: string, version?: string) => void;
 }
 
 export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOpenSpec }: Props) {
@@ -50,6 +51,7 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
   const [paletteOpen, setPaletteOpen] = useState(false);
   const view = useRef<HistoryViewHandle>(null);
   const pendingJump = useRef<string | undefined>(tab.jumpTo);
+  const tocVersion = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     api.versions(spec).then((vs) => {
@@ -66,18 +68,27 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
     if (!version) return;
     onUpdate({ version, label: `${spec} v${version}` });
     setSelection(null);
-    api.toc(spec, version).then(setToc);
+    api.toc(spec, version).then((t) => { tocVersion.current = version; setToc(t); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spec, version]);
 
-  // Jump requested by a cross-reference from another tab.
+  // Jump requested by a cross-reference from another tab (or a chat source, possibly in another version).
+  const wantVersion = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (tab.jumpTo) pendingJump.current = tab.jumpTo;
-    if (tab.jumpTo) onUpdate({ jumpTo: undefined });  // consumed; the same clause can be requested again
-  }, [tab.jumpTo]);
+    if (tab.jumpVersion && versions.some((v) => v.version === tab.jumpVersion) && tab.jumpVersion !== version) {
+      wantVersion.current = tab.jumpVersion;  // jump once that version's TOC is loaded
+      setVersion(tab.jumpVersion);
+    }
+    if (tab.jumpTo || tab.jumpVersion) onUpdate({ jumpTo: undefined, jumpVersion: undefined });  // consumed
+  }, [tab.jumpTo, tab.jumpVersion]);
   useEffect(() => {  // runs once the TOC is there, or right away when the tab is already open
     const target = pendingJump.current;
     if (!target || !toc.length) return;
+    if (wantVersion.current) {
+      if (wantVersion.current !== tocVersion.current) return;
+      wantVersion.current = undefined;
+    }
     const e = toc.find((t) => t.number === target || t.key === target);
     if (e) setTimeout(() => view.current?.scrollToOrd(e.ord), 50);
     pendingJump.current = undefined;

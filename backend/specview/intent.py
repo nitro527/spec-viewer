@@ -187,6 +187,10 @@ class LLMError(RuntimeError):
     """A request failed; the message is meant for the user."""
 
 
+class ToolsUnsupported(LLMError):
+    """The server rejected a request with tools (no function calling): the chat falls back to plain retrieval."""
+
+
 class _NoJsonSchema(Exception):
     """400 to a json_schema request: maybe the server lacks it, maybe something else is wrong."""
 
@@ -316,6 +320,36 @@ class OpenAICompatIntentModel:
             if r.status_code >= 400:
                 raise _http_error(r)
             return r.json()
+        raise _http_error(r)
+
+    def complete(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
+        """One chat completion, optionally with function tools; returns the assistant message
+        (``content`` with any <think> block removed, ``tool_calls`` when the model asks for tools)."""
+        body = {"model": self.model, "messages": messages, "temperature": 0.2}
+        if tools:
+            body["tools"], body["tool_choice"] = tools, "auto"
+        for attempt in range(4):
+            r = self._post(body)
+            if r.status_code == 400 and tools and not re.search(
+                    r"api[ _-]?key|context|token", str(_error_body(r).get("message", "")), re.I):
+                raise ToolsUnsupported(str(_http_error(r)))
+            if r.status_code == 429:
+                err = _error_body(r)
+                if q := _quota_error(err):
+                    raise q
+                if attempt < 3:
+                    time.sleep(min(_retry_delay(err) or 2 ** attempt * 2, 60))
+                    continue
+            elif r.status_code in (500, 502, 503) and attempt < 3:
+                time.sleep(2 ** attempt * 2)
+                continue
+            if r.status_code >= 400:
+                raise _http_error(r)
+            data = r.json()
+            msg = dict((data.get("choices") or [{}])[0].get("message") or {})
+            msg["content"] = _THINK.sub("", msg.get("content") or "").strip()
+            msg["model"] = data.get("model") or self.model
+            return msg
         raise _http_error(r)
 
     def _intent_messages(self, change: dict) -> list[dict]:
