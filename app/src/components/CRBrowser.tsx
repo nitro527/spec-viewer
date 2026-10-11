@@ -66,13 +66,17 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
         const job = await api.analyzeCR(spec, c.cr, c.tdoc);
         for (;;) {
           await new Promise((r) => setTimeout(r, 1500));
-          const j = (await api.jobs()).find((x) => x.id === job.id);
-          if (!j || j.state !== "running") {
-            if (j?.state !== "done") failed++;
+          const j = await api.job(job.id);
+          if (j && j.state !== "running") {
+            if (j.state !== "done") failed++;
             break;
           }
         }
-      } catch {
+      } catch (e) {
+        if (String(e).includes("이미 진행 중")) {  // another AI job (e.g. the full analysis) has the server
+          alert(`다른 AI 작업이 진행 중이라 일괄 분석을 멈췄습니다 (${i}/${list.length} 완료). 끝난 뒤에 다시 누르세요.`);
+          break;
+        }
         failed++;
       }
       announceAnalysesChanged();

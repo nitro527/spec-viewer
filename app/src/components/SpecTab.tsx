@@ -152,7 +152,7 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
     const job = await api.fetchCrs(spec);
     setCrJob("CR 표지 받는 중…");
     const t = setInterval(async () => {
-      const j = (await api.jobs()).find((x) => x.id === job.id);
+      const j = await api.job(job.id);
       if (!j) return;
       setCrJob(j.state === "running" ? `CR 표지 받는 중 ${j.done}/${j.total || "?"}` : j.state === "error" ? `실패: ${j.message}` : null);
       if (j.state !== "running") { clearInterval(t); api.crs(spec).then(setCrs); }

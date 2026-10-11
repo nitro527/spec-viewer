@@ -1,6 +1,6 @@
 // AI chat over the downloaded material. The model looks things up (search, clauses, history, CRs, work items)
 // and answers with source tags [[38.211 §6.3.3.2 v19.5.0]] / [[CR 38.211 0023]] that become links.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Chat, type ChatContext, type ChatMessage, type ChatSummary } from "../api";
 import { useLlmReady } from "./CRAnalysis";
 import { openCRDoc } from "./DocWindow";
@@ -16,6 +16,12 @@ function copyMd(button: HTMLElement, text: string) {
     setTimeout(() => { button.textContent = old; }, 1200);
   });
 }
+
+// rendering markdown + KaTeX of every answer again on each poll of the running job was the slow part of a long chat
+const Answer = memo(function Answer({ m, onClick }: { m: ChatMessage; onClick: (e: React.MouseEvent, m: ChatMessage) => void }) {
+  const html = useMemo(() => renderAnswer(m.content, m.sources ?? {}), [m.content, m.sources]);
+  return <div className="answer" onClick={(e) => onClick(e, m)} dangerouslySetInnerHTML={{ __html: html }} />;
+});
 
 export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
   active: boolean; pending: ChatContext | null; onPendingTaken: () => void;
@@ -45,21 +51,30 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
   useEffect(() => {
     if (!job) return;
     const t = setInterval(async () => {
-      const j = (await api.jobs()).find((x) => x.id === job.id);
+      const j = await api.job(job.id);
       if (!j) return;
       if (j.state === "running") return setJob((cur) => cur && { ...cur, steps: j.steps ?? [] });
       setJob(null);
-      const done = await api.chat(job.chatId);
-      setChat((cur) => (!cur || cur.id === done.id ? done : cur));  // the user may have opened another one
+      if (j.state === "error" && j.message.startsWith("작업 정보가 없습니다")) setError(j.message);  // other errors are in the chat
+      const done = await api.chat(job.chatId).catch(() => null);
+      if (done) setChat((cur) => (!cur || cur.id === done.id ? done : cur));  // the user may have opened another one
       loadList();
     }, 1000);
     return () => clearInterval(t);
   }, [job, loadList]);
 
+  const opening = useRef("");
   const open = async (id: string) => {
     setError(null);
     setContext(null);
-    setChat(await api.chat(id));
+    opening.current = id;
+    try {
+      const c = await api.chat(id);
+      if (opening.current === id) setChat(c);  // a slower earlier click must not win
+    } catch (e) {
+      setError(String(e).replace(/^Error: /, ""));
+      loadList();
+    }
   };
   const send = async () => {
     const q = question.trim();
@@ -76,13 +91,13 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
       setError(String(e).replace(/^Error: /, ""));
     }
   };
-  const onAnswerClick = (e: React.MouseEvent, m: ChatMessage) => {
+  const onAnswerClick = useCallback((e: React.MouseEvent, m: ChatMessage) => {
     const el = (e.target as HTMLElement).closest<HTMLElement>("[data-src]");
     const s = el && m.sources?.[el.dataset.src!];
     if (!s) return;
     if (s.type === "clause") onOpenSpec(s.spec, s.clause, s.version);
     else if (s.type === "cr") openCRDoc(s.spec, s.cr, s.tdoc);
-  };
+  }, [onOpenSpec]);
 
   return (
     <div className="chat">
@@ -144,8 +159,7 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
                     <details className="steps"><summary>찾아본 자료 {m.steps.length}건</summary>
                       <ol>{m.steps.map((s, k) => <li key={k}>{s}</li>)}</ol></details>
                   )}
-                  <div className="answer" onClick={(e) => onAnswerClick(e, m)}
-                       dangerouslySetInnerHTML={{ __html: renderAnswer(m.content, m.sources ?? {}) }} />
+                  <Answer m={m} onClick={onAnswerClick} />
                   <p className="muted tiny msg-foot">
                     {m.model && <>{m.model}{m.mode === "retrieval" ? " · 검색 결과 기반(도구 호출 미지원 서버)" : ""}
                       {" · AI 답변은 출처의 원문으로 확인하세요 · "}</>}

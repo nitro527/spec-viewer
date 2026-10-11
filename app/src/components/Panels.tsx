@@ -1,5 +1,5 @@
 // Side panels: table of contents (left) and change information (right).
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cmpVersion, crKey, crTouches, tdocUrl, type CR, type CRAnalysis, type Note, type TocEntry } from "../api";
 import { askAboutParagraph } from "../ask";
 import { openCRDoc } from "./DocWindow";
@@ -16,10 +16,24 @@ export function Toc({ toc, active, baseline, highlight, changedOnly, bookmarks, 
   toc: TocEntry[]; active: number; baseline: string; highlight: boolean; changedOnly: boolean;
   bookmarks: Set<string>; bookmarkedOnly: boolean; onJump: (ord: number) => void;
 }) {
-  const activeRef = useRef<HTMLButtonElement>(null);
+  const navRef = useRef<HTMLElement>(null);
+  const shownActive = useRef(-1);
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  useEffect(() => activeRef.current?.scrollIntoView({ block: "nearest" }), [active]);
+  const onJumpRef = useRef(onJump);
+  onJumpRef.current = onJump;
+  const jump = useCallback((ord: number) => onJumpRef.current(ord), []);
+  // scrolling the document changes `active` many times a second: mark the row in the DOM instead of
+  // rendering thousands of rows again (a 36.523-1 has ~9000 clauses)
+  useEffect(() => {
+    const nav = navRef.current;
+    if (!nav) return;
+    nav.querySelector(".toc-row.active")?.classList.remove("active");
+    const row = nav.querySelector<HTMLElement>(`.toc-row[data-ord="${active}"]`);
+    row?.classList.add("active");
+    if (shownActive.current !== active) row?.scrollIntoView({ block: "nearest" });
+    shownActive.current = active;
+  });
 
   const hasChildren = useMemo(() => {
     const s = new Set<string>();
@@ -43,11 +57,11 @@ export function Toc({ toc, active, baseline, highlight, changedOnly, bookmarks, 
     return out;
   }, [toc, query, collapsed]);
 
-  const toggle = (key: string) => setCollapsed((c) => {
+  const toggle = useCallback((key: string) => setCollapsed((c) => {
     const n = new Set(c);
     if (n.has(key)) n.delete(key); else n.add(key);
     return n;
-  });
+  }), []);
 
   return (
     <>
@@ -56,30 +70,41 @@ export function Toc({ toc, active, baseline, highlight, changedOnly, bookmarks, 
         <button title="모두 접기" onClick={() => setCollapsed(new Set(toc.filter((t) => t.level === 1 && hasChildren.has(t.key)).map((t) => t.key)))}>−</button>
         <button title="모두 펼치기" onClick={() => setCollapsed(new Set())}>+</button>
       </div>
-      <nav className="toc">
-        {visible.map((t) => {
-          const changed = highlight && newer(t.last_changed, baseline);
-          if (changedOnly && !changed) return null;
-          if (bookmarkedOnly && !bookmarks.has(t.key)) return null;
-          return (
-            <div key={t.ord} className={`toc-row ${t.ord === active ? "active" : ""}`}
-                 style={{ paddingLeft: (Math.max(t.level, 1) - 1) * 12 }}>
-              {hasChildren.has(t.key) && !query
-                ? <button className="twisty" onClick={() => toggle(t.key)}>{collapsed.has(t.key) ? "▸" : "▾"}</button>
-                : <span className="twisty" />}
-              <button ref={t.ord === active ? activeRef : undefined} className="toc-item"
-                      onClick={() => onJump(t.ord)} title={`${t.number} ${t.title}`}>
-                {changed && <span className="dot" data-bv={t.last_changed!} />}
-                <span className="num">{t.number}</span> {t.title}
-                {bookmarks.has(t.key) && <span className="toc-star">★</span>}
-              </button>
-            </div>
-          );
-        })}
-      </nav>
+      <TocRows visible={visible} highlight={highlight} baseline={baseline} changedOnly={changedOnly}
+               bookmarks={bookmarks} bookmarkedOnly={bookmarkedOnly} hasChildren={hasChildren} collapsed={collapsed}
+               query={query} toggle={toggle} jump={jump} navRef={navRef} />
     </>
   );
 }
+
+const TocRows = memo(function TocRows({ visible, highlight, baseline, changedOnly, bookmarks, bookmarkedOnly,
+  hasChildren, collapsed, query, toggle, jump, navRef }: {
+  visible: TocEntry[]; highlight: boolean; baseline: string; changedOnly: boolean; bookmarks: Set<string>;
+  bookmarkedOnly: boolean; hasChildren: Set<string>; collapsed: Set<string>; query: string;
+  toggle: (key: string) => void; jump: (ord: number) => void; navRef: React.RefObject<HTMLElement>;
+}) {
+  return (
+    <nav className="toc" ref={navRef}>
+      {visible.map((t) => {
+        const changed = highlight && newer(t.last_changed, baseline);
+        if (changedOnly && !changed) return null;
+        if (bookmarkedOnly && !bookmarks.has(t.key)) return null;
+        return (
+          <div key={t.ord} className="toc-row" data-ord={t.ord} style={{ paddingLeft: (Math.max(t.level, 1) - 1) * 12 }}>
+            {hasChildren.has(t.key) && !query
+              ? <button className="twisty" onClick={() => toggle(t.key)}>{collapsed.has(t.key) ? "▸" : "▾"}</button>
+              : <span className="twisty" />}
+            <button className="toc-item" onClick={() => jump(t.ord)} title={`${t.number} ${t.title}`}>
+              {changed && <span className="dot" data-bv={t.last_changed!} />}
+              <span className="num">{t.number}</span> {t.title}
+              {bookmarks.has(t.key) && <span className="toc-star">★</span>}
+            </button>
+          </div>
+        );
+      })}
+    </nav>
+  );
+});
 
 /** Scrollbar-side overview: one tick per changed clause, like an editor's minimap markers. */
 export function ChangeRuler({ toc, baseline, onJump }: { toc: TocEntry[]; baseline: string; onJump: (ord: number) => void }) {
@@ -132,20 +157,22 @@ function CRItemView({ cr, hit, analysis }: { cr: CR; hit?: boolean; analysis?: C
 function CRList({ crs, clause }: { crs: CR[]; clause?: string }) {
   const analyses = useCRAnalyses(crs[0]?.spec ?? "");
   if (!crs.length) return <p className="muted small">Change history 에 CR 기록 없음</p>;
-  const CRItem = (p: { cr: CR; hit?: boolean }) => <CRItemView {...p} analysis={analyses.get(crKey(p.cr.cr, p.cr.tdoc))} />;
+  // a plain function, not a component made during render (that remounted every item and closed its details)
+  const CRItem = (p: { cr: CR; hit?: boolean; key: number }) =>
+    <CRItemView key={p.key} cr={p.cr} hit={p.hit} analysis={analyses.get(crKey(p.cr.cr, p.cr.tdoc))} />;
   const haveDetail = crs.some((c) => c.detail);
-  if (!clause || !haveDetail) return <ul className="cr-list">{crs.map((cr, i) => <CRItem key={i} cr={cr} />)}</ul>;
+  if (!clause || !haveDetail) return <ul className="cr-list">{crs.map((cr, i) => CRItem({ key: i, cr }))}</ul>;
   const hits = crs.filter((c) => crTouches(c, clause));
   const rest = crs.filter((c) => !crTouches(c, clause));
   return (
     <>
       {hits.length > 0
-        ? <ul className="cr-list">{hits.map((cr, i) => <CRItem key={i} cr={cr} hit />)}</ul>
+        ? <ul className="cr-list">{hits.map((cr, i) => CRItem({ key: i, cr, hit: true }))}</ul>
         : <p className="muted small">이 절을 “Clauses affected”에 적은 CR이 없습니다.</p>}
       {rest.length > 0 && (
         <details className="cr-rest">
           <summary className="muted small">이 버전의 다른 CR ({rest.length})</summary>
-          <ul className="cr-list">{rest.map((cr, i) => <CRItem key={i} cr={cr} />)}</ul>
+          <ul className="cr-list">{rest.map((cr, i) => CRItem({ key: i, cr }))}</ul>
         </details>
       )}
     </>
@@ -155,11 +182,15 @@ function CRList({ crs, clause }: { crs: CR[]; clause?: string }) {
 function NoteEditor({ initial, meta, onSave }: { initial: string; meta?: Note; onSave: (text: string) => void }) {
   const [text, setText] = useState(initial);
   const dirty = text !== initial;
+  const latest = useRef({ text, dirty, onSave });
+  latest.current = { text, dirty, onSave };
+  // closing the panel or picking another paragraph unmounts the editor without a blur: save what was typed
+  useEffect(() => () => { const l = latest.current; if (l.dirty) l.onSave(l.text); }, []);
   return (
     <section className="note-editor">
       <h4>내 메모 <span className="muted small">버전이 바뀌어도 이 절에 유지</span></h4>
       <textarea value={text} rows={3} placeholder="구현 메모, 확인할 점…" onChange={(e) => setText(e.target.value)}
-                onBlur={() => dirty && onSave(text)} />
+                onBlur={() => { if (dirty) { latest.current.dirty = false; onSave(text); } }} />
       <div className="tiny muted">{dirty ? "포커스를 옮기면 저장" : meta ? `저장됨 · ${meta.updated.replace("T", " ")}${meta.version ? ` (v${meta.version} 보던 중)` : ""}` : ""}</div>
     </section>
   );

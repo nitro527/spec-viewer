@@ -1,6 +1,7 @@
 // LLM API settings and change-intent generation (main screen). Uses the user's own key; optional.
 import { useEffect, useState } from "react";
 import { api, type AnalysisStatus, type Job, type LlmForm, type LlmSettings, type SpecInfo, type VersionInfo } from "../api";
+import { announceLlmChanged } from "./CRAnalysis";
 
 const PROVIDERS = [
   { id: "gemini", label: "Google Gemini" },
@@ -49,6 +50,7 @@ export function LlmPanel({ specs, onJob }: { specs: SpecInfo[]; onJob: (j: Job) 
 
   const save = () => run("저장 중…", async () => {
     load(await api.saveLlm(form()));
+    announceLlmChanged();
     setStatus({ kind: "ok", text: "저장했습니다" });
   });
   const test = () => run("연결 확인 중… (요청 1회 사용)", async () => {
@@ -62,6 +64,7 @@ export function LlmPanel({ specs, onJob }: { specs: SpecInfo[]; onJob: (j: Job) 
   });
   const clearKey = () => run("키 삭제 중…", async () => {
     load(await api.saveLlm({ provider, clear_key: true }));
+    announceLlmChanged();
     setStatus({ kind: "ok", text: "저장된 키를 지웠습니다" });
   });
 

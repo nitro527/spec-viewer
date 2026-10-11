@@ -211,6 +211,19 @@ export const api = {
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
   stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),
   jobs: () => get<Job[]>("/api/jobs"),
+  /** One job; a job the backend no longer knows (it restarted) comes back as an error instead of polling forever.
+   *  null when the backend could not be reached this time (keep polling). */
+  job: async (id: string): Promise<Job | null> => {
+    try {
+      const r = await fetch(`/api/jobs/${s(id)}`);
+      if (r.status === 404) {
+        return { id, state: "error", done: 0, total: 0, specs: [], message: "작업 정보가 없습니다 (백엔드가 다시 시작됨)" };
+      }
+      return r.ok ? await r.json() : null;
+    } catch {
+      return null;
+    }
+  },
   catalog: (series: string, refresh = false) => get<CatalogSpec[]>(`/api/catalog/${s(series)}${refresh ? "?refresh=true" : ""}`),
   notes: (spec: string) => get<Note[]>(`/api/specs/${s(spec)}/notes`),
   saveNote: async (spec: string, key: string, body: { bookmark?: boolean; text?: string; version?: string }) => {

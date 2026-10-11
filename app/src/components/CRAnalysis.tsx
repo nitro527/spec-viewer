@@ -6,19 +6,46 @@ import { findKey, openCRDoc, openMeetingDoc } from "./DocWindow";
 
 const CHANGED = "cr-analyses-changed";
 
+// one request per spec however many views show its analyses (side panel, CR list, history, CR window)
+const shared = new Map<string, { map: Map<string, CRAnalysis>; users: Set<(m: Map<string, CRAnalysis>) => void>; seq: number }>();
+
+function reload(spec: string) {
+  const e = shared.get(spec);
+  if (!e) return;
+  const n = ++e.seq;
+  api.crAnalyses(spec).then((rows) => {
+    if (n !== e.seq) return;  // an older answer arriving late
+    e.map = new Map(rows.map((a) => [crKey(a.cr, a.tdoc), a]));
+    e.users.forEach((f) => f(e.map));
+  }, () => undefined);
+}
+
+let listening = false;
+function listen() {
+  if (listening) return;
+  listening = true;
+  const all = () => shared.forEach((_, spec) => reload(spec));
+  window.addEventListener(CHANGED, all);
+  // the CR window is another browser window: it tells this one through storage events
+  window.addEventListener("storage", (e) => e.key === CHANGED && all());
+}
+
 /** Stored analyses of a spec, keyed by crKey(cr, tdoc); refreshed whenever any view makes a new one. */
 export function useCRAnalyses(spec: string): Map<string, CRAnalysis> {
-  const [map, setMap] = useState<Map<string, CRAnalysis>>(new Map());
+  const [map, setMap] = useState<Map<string, CRAnalysis>>(() => shared.get(spec)?.map ?? new Map());
   useEffect(() => {
-    let live = true;
-    const load = () => api.crAnalyses(spec).then(
-      (rows) => live && setMap(new Map(rows.map((a) => [crKey(a.cr, a.tdoc), a]))), () => undefined);
-    load();
-    window.addEventListener(CHANGED, load);
-    // the CR window is another browser window: it tells this one through storage events
-    const onStorage = (e: StorageEvent) => e.key === CHANGED && load();
-    window.addEventListener("storage", onStorage);
-    return () => { live = false; window.removeEventListener(CHANGED, load); window.removeEventListener("storage", onStorage); };
+    if (!spec) return setMap(new Map());
+    listen();
+    let e = shared.get(spec);
+    const first = !e;
+    if (!e) shared.set(spec, e = { map: new Map(), users: new Set(), seq: 0 });
+    e.users.add(setMap);
+    setMap(e.map);
+    if (first) reload(spec);
+    return () => {
+      e!.users.delete(setMap);
+      if (!e!.users.size) shared.delete(spec);  // load fresh next time nobody shows it
+    };
   }, [spec]);
   return map;
 }
@@ -29,12 +56,19 @@ export function announceAnalysesChanged() {
 }
 
 /** Whether AI requests can be made: Gemini needs a key, an OpenAI-compatible (in-house) server may not. */
+const LLM_EVENT = "specview:llm-changed";
+/** Tell every open view that the LLM settings were saved (the chat tab and viewers enable their AI buttons). */
+export const announceLlmChanged = () => window.dispatchEvent(new Event(LLM_EVENT));
+
 export function useLlmReady(): boolean {
   const [ready, setReady] = useState(false);
   useEffect(() => {
     let live = true;
-    api.llm().then((s) => live && setReady(s.has_key || s.provider !== "gemini"), () => live && setReady(false));
-    return () => { live = false; };
+    const load = () => api.llm().then((s) => live && setReady(s.has_key || s.provider !== "gemini"),
+                                      () => live && setReady(false));
+    load();
+    window.addEventListener(LLM_EVENT, load);
+    return () => { live = false; window.removeEventListener(LLM_EVENT, load); };
   }, []);
   return ready;
 }
@@ -46,7 +80,7 @@ export function useAiJob(done?: () => void) {
   useEffect(() => {
     if (!jobId) return;
     const t = setInterval(async () => {
-      const j = (await api.jobs()).find((x) => x.id === jobId);
+      const j = await api.job(jobId);
       if (!j) return;
       if (j.state === "running") return setMsg(j.message || "AI 작업 중…");
       setMsg(j.message);

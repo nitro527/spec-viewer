@@ -24,7 +24,7 @@ export function FeatureFinder({ onOpen }: { onOpen: (spec: string, clause?: stri
     const j = await api.fetchFeatures();
     setJob("38.822 받는 중…");
     const t = setInterval(async () => {
-      const cur = (await api.jobs()).find((x) => x.id === j.id);
+      const cur = await api.job(j.id);
       if (!cur || cur.state === "running") return setJob(`38.822: ${cur?.message ?? ""}`);
       clearInterval(t);
       setJob(cur.state === "error" ? `실패: ${cur.message}` : null);

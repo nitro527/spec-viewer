@@ -28,6 +28,8 @@ interface Props {
 
 const isNewer = (v: string | null | undefined, baseline: string) => !!v && cmpVersion(v, baseline) > 0;
 
+const KEEP = 1500;  // clauses kept in memory
+
 export const HistoryView = forwardRef<HistoryViewHandle, Props>(function HistoryView(
   { spec, version, citeLabel, baseline, toc, highlight, selected, onSelect, onVisible, onXref, bookmarks, onBookmark }, ref,
 ) {
@@ -58,13 +60,25 @@ export const HistoryView = forwardRef<HistoryViewHandle, Props>(function History
       if (loading.current.has(p) || cache.has(p * PAGE)) continue;
       loading.current.add(p);
       const key = `${spec}@${version}`;
+      const lo = items[0].index, hi = items[items.length - 1].index;
       api.clauses(spec, version, p * PAGE, PAGE).then((cs) => {
         if (key !== current.current) return;
         setCache((old) => {
           const next = new Map(old);
           for (const c of cs) next.set(c.ord, c);
+          if (next.size > KEEP) {  // a big conformance spec scrolled end to end: drop what is far from view
+            for (const ord of next.keys()) {
+              if (ord < lo - KEEP / 2 || ord > hi + KEEP / 2) {
+                next.delete(ord);
+                loading.current.delete(Math.floor(ord / PAGE));
+              }
+            }
+          }
           return next;
         });
+      }, () => {
+        // the backend was busy or restarting: allow another try instead of a skeleton for good
+        setTimeout(() => { if (key === current.current) { loading.current.delete(p); setCache((c) => new Map(c)); } }, 2000);
       });
     }
     if (items.length) onVisible(items[Math.min(1, items.length - 1)].index);
