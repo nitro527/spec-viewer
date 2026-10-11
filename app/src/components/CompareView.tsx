@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, cmpVersion, tdocUrl, type CompareResult, type DiffBlock, type DiffClause, type VersionInfo } from "../api";
 import { compareReport, download } from "../export";
+import { ReleaseNotes } from "./ReleaseNotes";
 import { openCRDoc } from "./DocWindow";
 import { Html } from "./Html";
 
@@ -18,6 +19,7 @@ export function CompareView({ spec, versions, oldV, newV, onChange, onXref }: Pr
   const [data, setData] = useState<CompareResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sideBySide, setSideBySide] = useState(false);
+  const [notes, setNotes] = useState(false);
 
   useEffect(() => {
     setData(null);
@@ -50,8 +52,13 @@ export function CompareView({ spec, versions, oldV, newV, onChange, onXref }: Pr
           <button onClick={async () => download(`TS${spec}_v${oldV}_to_v${newV}.html`, await compareReport(data))}
                   title="비교 결과를 하나의 HTML 파일로 저장 (메일·보고서용)">⤓ 보고서 내보내기</button>
         )}
+        {cmpVersion(oldV, newV) < 0 && (
+          <button className={notes ? "on" : ""} onClick={() => setNotes(!notes)}
+                  title="두 버전 사이 CR 을 WI 별로 묶어 AI 가 정리한 릴리즈 노트">✦ AI 릴리즈 노트</button>
+        )}
       </div>
       {cmpVersion(oldV, newV) >= 0 && <p className="empty">왼쪽 버전이 오른쪽보다 이전이어야 합니다.</p>}
+      {notes && cmpVersion(oldV, newV) < 0 && <ReleaseNotes spec={spec} oldV={oldV} newV={newV} />}
       {error && <p className="empty error">{error}</p>}
       {!data && !error && cmpVersion(oldV, newV) < 0 && <p className="empty">비교 중…</p>}
       {data && (

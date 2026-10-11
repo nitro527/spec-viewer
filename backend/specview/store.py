@@ -109,6 +109,9 @@ CREATE TABLE IF NOT EXISTS cr_analysis (     -- LLM analysis of one CR as a whol
 CREATE TABLE IF NOT EXISTS wi_summary (      -- LLM summary of one work item across every downloaded spec
   wi TEXT PRIMARY KEY, data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS release_note (    -- LLM summary of the CRs between two versions of a spec
+  spec TEXT NOT NULL, old TEXT NOT NULL, new TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (spec, old, new)
+);
 CREATE TABLE IF NOT EXISTS chat (            -- AI chat conversations (chat.py)
   id TEXT PRIMARY KEY, title TEXT NOT NULL, updated TEXT NOT NULL, data TEXT NOT NULL
 );
@@ -716,6 +719,74 @@ class Library:
     def save_wi_summary(self, wi: str, data: dict) -> None:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO wi_summary VALUES (?,?)", (wi, json.dumps(data, ensure_ascii=False)))
+
+    # ------------------------------------------------------------ analysis status / release notes
+
+    def analysis_status(self) -> dict:
+        """How far the AI analysis got: per spec and version the paragraphs that changed, how many a CR explains
+        (what the full analysis summarises by default) and how many have a summary; CR analyses; WI summaries."""
+        from .pack import _touches
+
+        out = []
+        for sp in self.specs():
+            spec = sp["number"]
+            vers = self.versions(spec)
+            crs = [c for c in self.crs(spec) if c["detail"] and c["cr"]]
+            done: dict[str, set[str]] = {}
+            for r in self.db.execute("SELECT version, raw_hash FROM annotation WHERE spec=? AND "
+                                     "json_extract(data, '$.intent.summary') IS NOT NULL", (spec,)):
+                done.setdefault(r["version"], set()).add(r["raw_hash"])
+            rows = []
+            for v in vers[1:]:
+                clauses = [x for c in crs if c["lib_version"] == v["version"] for x in c["detail"].get("clauses", [])]
+                changed = covered = summarised = 0
+                for r in self.db.execute(
+                        "SELECT b.raw_hash, c.number FROM block_ver b JOIN annot a ON a.hash=b.annot_hash "
+                        "JOIN clause_ver c ON c.version_id=b.version_id AND c.key=b.clause_key "
+                        "WHERE b.version_id=? AND a.changed=?", (v["id"], v["version"])):
+                    changed += 1
+                    covered += any(_touches(x, r["number"]) for x in clauses)
+                    summarised += r["raw_hash"] in done.get(v["version"], ())
+                rows.append({"version": v["version"], "changed": changed, "covered": covered, "summarised": summarised})
+            analysed = self.db.execute("SELECT count(*) FROM cr_analysis WHERE spec=?", (spec,)).fetchone()[0]
+            out.append({"spec": spec, "title": sp.get("title"), "versions": rows, "crs": len(crs),
+                        "cr_analyses": analysed,
+                        "changed": sum(r["changed"] for r in rows), "covered": sum(r["covered"] for r in rows),
+                        "summarised": sum(r["summarised"] for r in rows)})
+        wis = self.work_items()
+        last = self.get_setting("last_full_analysis")
+        return {"specs": out, "work_items": len(wis), "wi_summaries": sum(1 for w in wis if w["summary"]),
+                "last_full": json.loads(last) if last else None}
+
+    def release_input(self, spec: str, old: str, new: str) -> dict:
+        """What a release note between two versions is built from: the CRs in between (cover + stored analysis)
+        and the clauses that changed."""
+        lo, hi = Version.parse(old), Version.parse(new)
+        crs = []
+        for c in self.crs(spec):
+            if not c["cr"] or not (lo < Version.parse(c["new_version"]) <= hi):
+                continue
+            d = c["detail"] or {}
+            a = self.cr_analysis(spec, c["cr"], c["rev"], c["tdoc"]) if c["detail"] else None
+            crs.append({"cr": c["cr"], "tdoc": c["tdoc"], "version": c["new_version"], "meeting": c["meeting"],
+                        "cat": c["cat"], "title": d.get("title") or c["subject"], "wi": d.get("wi_code", ""),
+                        "clauses": d.get("clauses_raw", ""), "reason": d.get("reason", ""), "summary": d.get("summary", ""),
+                        "analysis": {k: a.get(k) for k in ("summary", "decision", "impact")} if a else None})
+        vid = self.version_id(spec, new)
+        changed = []
+        for r in self.db.execute("SELECT number, title, history FROM clause_ver WHERE version_id=? ORDER BY ord", (vid,)):
+            if any(lo < Version.parse(h[0]) <= hi for h in json.loads(r["history"] or "[]")):
+                changed.append(f"{r['number']} {r['title']}".strip())
+        return {"spec": spec, "old": old, "new": new, "crs": crs, "changed_clauses": changed}
+
+    def release_note(self, spec: str, old: str, new: str) -> dict | None:
+        r = self.db.execute("SELECT data FROM release_note WHERE spec=? AND old=? AND new=?", (spec, old, new)).fetchone()
+        return json.loads(r["data"]) if r else None
+
+    def save_release_note(self, spec: str, old: str, new: str, data: dict) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO release_note VALUES (?,?,?,?)",
+                            (spec, old, new, json.dumps(data, ensure_ascii=False)))
 
     # ------------------------------------------------------------ chat
 

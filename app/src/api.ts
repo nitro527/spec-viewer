@@ -130,6 +130,19 @@ export interface ChatMessage {
 }
 export interface ChatSummary { id: string; title: string; updated: string }
 export interface Chat extends ChatSummary { messages: ChatMessage[] }
+export interface VersionStatus { version: string; changed: number; covered: number; summarised: number }
+export interface AnalysisStatus {
+  specs: { spec: string; title: string | null; versions: VersionStatus[]; crs: number; cr_analyses: number;
+    changed: number; covered: number; summarised: number }[];
+  work_items: number; wi_summaries: number;
+  last_full: { started?: string; finished?: string; state?: string; message?: string; stopped?: boolean;
+    counts?: { intents: number; cr_analyses: number; wi_summaries: number; failed: number } } | null;
+}
+export interface ReleaseNote {
+  overview: string; features: { wi: string; what: string; crs: string; clauses: string }[];
+  corrections: { what: string; crs: string; clauses: string }[]; impact: string; confidence: string;
+  model?: string; generated?: string; crs: number; analysed: number;
+}
 export interface SearchHit { ord: number; key: string; number: string; title: string; block: number | null; snippet: string }
 export interface LlmProviderSettings {
   base_url: string; model: string; has_key: boolean; key_hint: string; key_source: "saved" | "env" | null;
@@ -182,6 +195,11 @@ export const api = {
   search: (spec: string, v: string, q: string) => get<SearchHit[]>(`/api/specs/${s(spec)}/${s(v)}/search?q=${s(q)}`),
   phraseHistory: (spec: string, q: string) => get<PhraseHistory>(`/api/specs/${s(spec)}/phrase-history?q=${s(q)}`),
   crs: (spec: string) => get<CR[]>(`/api/specs/${s(spec)}/crs`),
+  analysisStatus: () => get<AnalysisStatus>("/api/analysis-status"),
+  releaseNotes: (spec: string, oldV: string, newV: string) => get<{ note: ReleaseNote | null; crs: number; analysed: number;
+    changed_clauses: number }>(`/api/specs/${s(spec)}/release-notes?old=${s(oldV)}&new=${s(newV)}`),
+  makeReleaseNotes: (spec: string, oldV: string, newV: string, force = false) =>
+    send<Job>("POST", "/api/release-notes", { spec, old: oldV, new: newV, force }),
   chats: () => get<ChatSummary[]>("/api/chats"),
   chat: (id: string) => get<Chat>(`/api/chats/${s(id)}`),
   deleteChat: (id: string) => send<{ ok: boolean }>("DELETE", `/api/chats/${s(id)}`, {}),

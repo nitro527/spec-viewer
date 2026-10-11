@@ -131,6 +131,55 @@ def wi_prompt(wi: dict, max_chars: int = 60000) -> str:
     return f"Work item {wi['wi']}: {len(rows)} CRs.\n<crs>\n" + "\n".join(rows) + "\n</crs>"
 
 
+RN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "overview": {"type": "string", "description": "What changed between the two versions, 3-5 sentences."},
+        "features": {"type": "array", "description": "New or changed functionality (category B/C CRs), grouped by "
+                                                     "work item.",
+                     "items": {"type": "object",
+                               "properties": {"wi": {"type": "string"}, "what": {"type": "string"},
+                                              "crs": {"type": "string", "description": "CR numbers, e.g. 0023, 0031"},
+                                              "clauses": {"type": "string"}},
+                               "required": ["wi", "what", "crs", "clauses"], "additionalProperties": False}},
+        "corrections": {"type": "array", "description": "Corrections (category F/A) worth knowing, most important first.",
+                        "items": {"type": "object",
+                                  "properties": {"what": {"type": "string"}, "crs": {"type": "string"},
+                                                 "clauses": {"type": "string"}},
+                                  "required": ["what", "crs", "clauses"], "additionalProperties": False}},
+        "impact": {"type": "string", "description": "What a UE/modem implementer has to look at, across the CRs."},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    },
+    "required": ["overview", "features", "corrections", "impact", "confidence"],
+    "additionalProperties": False,
+}
+
+RN_SYSTEM = (
+    "You write release notes of a 3GPP specification between two versions for physical-layer modem engineers, "
+    "from the change requests (CRs) in between: their cover pages (category B/C = feature, F/A = correction, "
+    "D = editorial), the clauses they changed, and earlier analyses where available. Group features by work item, "
+    "list the corrections that matter (skip editorial ones), and say what an implementer has to check. Use only the "
+    "provided material and name the CRs you rely on. Write in {language}; keep 3GPP terms in English."
+)
+
+
+def rn_prompt(data: dict, max_chars: int = 60000) -> str:
+    rows, used = [], 0
+    for c in data["crs"]:
+        row = {k: c[k] for k in ("cr", "version", "meeting", "cat", "title", "wi", "clauses")}
+        row.update(reason=(c["reason"] or "")[:500], summary=(c["summary"] or "")[:700])
+        if c.get("analysis"):
+            row["analysis"] = {k: (v or "")[:500] for k, v in c["analysis"].items()}
+        text = json.dumps(row, ensure_ascii=False)
+        if used + len(text) > max_chars:
+            text = json.dumps({k: c[k] for k in ("cr", "version", "cat", "title", "wi", "clauses")}, ensure_ascii=False)
+        used += len(text)
+        rows.append(text)
+    return (f"TS {data['spec']} from v{data['old']} to v{data['new']}: {len(rows)} CRs, "
+            f"{len(data['changed_clauses'])} clauses changed.\n<crs>\n" + "\n".join(rows) + "\n</crs>\n"
+            "<changed_clauses>\n" + "\n".join(data["changed_clauses"][:300]) + "\n</changed_clauses>")
+
+
 SYSTEM = (
     "You explain changes in 3GPP specifications to physical-layer modem engineers. "
     "<changes> lists exactly which words were removed (-) and added (+) in the paragraph. "
@@ -394,6 +443,15 @@ class OpenAICompatIntentModel:
             return [{"role": "system", "content": system},
                     {"role": "user", "content": wi_prompt(wi) + f"\n\nWrite every field in {self.language}."}]
         return self._answer(self._structured(messages, ("wi_summary", WI_SCHEMA)))
+
+    def release_notes(self, data: dict) -> dict | None:
+        def messages():
+            system = RN_SYSTEM.format(language=self.language)
+            if self._schema_mode != "json_schema":
+                system += "\nReply with only a JSON object matching this schema:\n" + json.dumps(RN_SCHEMA)
+            return [{"role": "system", "content": system},
+                    {"role": "user", "content": rn_prompt(data) + f"\n\nWrite every field in {self.language}."}]
+        return self._answer(self._structured(messages, ("release_notes", RN_SCHEMA)))
 
     def _answer(self, data: dict) -> dict | None:
         choice = (data.get("choices") or [{}])[0]

@@ -1,6 +1,6 @@
 // LLM API settings and change-intent generation (main screen). Uses the user's own key; optional.
 import { useEffect, useState } from "react";
-import { api, type Job, type LlmForm, type LlmSettings, type SpecInfo, type VersionInfo } from "../api";
+import { api, type AnalysisStatus, type Job, type LlmForm, type LlmSettings, type SpecInfo, type VersionInfo } from "../api";
 
 const PROVIDERS = [
   { id: "gemini", label: "Google Gemini" },
@@ -271,6 +271,72 @@ function FullRunner({ specs, ready }: { specs: SpecInfo[]; ready: boolean }) {
           {running && <button onClick={() => api.cancelJob(job.id).then(setJob, () => undefined)}>중지</button>}
         </div>
       )}
+      <StatusBoard running={running} />
     </div>
+  );
+}
+
+/** How far the AI analysis got: per spec (and version) the changed paragraphs a CR explains and how many of them
+ *  have a summary, CR analyses, WI summaries, and the last full run. Refreshes while a full run is going. */
+function StatusBoard({ running }: { running: boolean }) {
+  const [st, setSt] = useState<AnalysisStatus | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [show, setShow] = useState(false);
+  const load = () => api.analysisStatus().then(setSt, () => undefined);
+  useEffect(() => {
+    if (!show) return;
+    load();
+    if (!running) return;
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, [show, running]);
+
+  const pct = (a: number, b: number) => (b ? Math.round((a / b) * 100) : 100);
+  const bar = (a: number, b: number) => !b ? (
+    <span className="muted small" title="CR 이 연결된 변경이 없습니다">{a ? `${a}개 (CR 없는 변경)` : "— CR 없음"}</span>
+  ) : (
+    <span className="bar-cell" title={`${a}/${b}`}>
+      <span className="bar-fill" style={{ width: `${pct(a, b)}%` }} /><span className="bar-text">{a}/{b} ({pct(a, b)}%)</span>
+    </span>
+  );
+  const last = st?.last_full;
+  return (
+    <details className="status-board" open={show} onToggle={(e) => setShow((e.target as HTMLDetailsElement).open)}>
+      <summary><b>분석 현황</b> <span className="muted small">스펙·버전별로 얼마나 분석됐는지</span></summary>
+      {!st ? <p className="muted small">계산 중…</p> : (
+        <>
+          {last && (
+            <p className="small">마지막 전체 분석: {last.started?.replace("T", " ").replace("+00:00", " UTC")}
+              {last.finished ? ` → ${last.finished.replace("T", " ").replace("+00:00", " UTC")}` : ""}
+              {" · "}<b>{last.state === "running" ? "진행 중" : last.stopped ? "멈춤" : last.state === "done" ? "끝남" : "멈춤"}</b>
+              {last.counts && ` · 문단 요약 ${last.counts.intents} · CR 분석 ${last.counts.cr_analyses} · WI 요약 ${last.counts.wi_summaries}`
+                + (last.counts.failed ? ` · 실패 ${last.counts.failed} (다시 시작하면 재시도)` : "")}</p>
+          )}
+          <table className="status-table">
+            <thead><tr><th>스펙</th><th>바뀐 문단 (CR 연결)</th><th>문단 요약</th><th>CR 분석</th></tr></thead>
+            <tbody>
+              {st.specs.map((s) => [
+                <tr key={s.spec} className="spec-row" onClick={() => setOpen(open === s.spec ? null : s.spec)}>
+                  <td>{open === s.spec ? "▾" : "▸"} TS {s.spec}</td>
+                  <td className="num">{s.changed} ({s.covered})</td>
+                  <td>{bar(s.summarised, s.covered)}</td>
+                  <td>{bar(s.cr_analyses, s.crs)}</td>
+                </tr>,
+                ...(open === s.spec ? [...s.versions].reverse().map((v) => (
+                  <tr key={`${s.spec}-${v.version}`} className="ver-row">
+                    <td>v{v.version}</td><td className="num">{v.changed} ({v.covered})</td>
+                    <td>{bar(v.summarised, v.covered)}</td><td />
+                  </tr>
+                )) : []),
+              ])}
+            </tbody>
+          </table>
+          <p className="small">WI 요약 {bar(st.wi_summaries, st.work_items)}</p>
+          <p className="muted tiny">문단 요약은 CR 이 연결된 변경 기준입니다("CR 이 연결되지 않은 변경 건너뛰기"를 끄고 돌리면 그 밖의
+            변경도 요약하므로 100% 를 넘을 수 있습니다). 스펙을 누르면 버전별로 펼칩니다.
+            {" "}<button className="link tiny" onClick={load}>새로 고침</button></p>
+        </>
+      )}
+    </details>
   );
 }

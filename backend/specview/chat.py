@@ -22,8 +22,9 @@ SYSTEM = (
     "and earlier AI analyses), meeting agreements and work item summaries - not your own memory of the specs. "
     "Search with English 3GPP terms (PUSCH, msgA, DM-RS, parameter names) even when the question is in another "
     "language; read the clauses you rely on; for 'when/why did this change' use clause_history, compare_clause, "
-    "get_cr and work_item. Cite every fact with the source tag exactly as a tool gave it, e.g. "
-    "[[38.211 §6.3.3.2 v19.5.0]], [[CR 38.211 0023]], [[WI NR_2step_RACH-Core]]. When the material does not "
+    "get_cr and work_item; for 'what changed between versions / in this release' use crs_between. Cite every fact with the source tag exactly as a tool gave it, e.g. "
+    "[[38.211 §6.3.3.2 v19.5.0]], [[CR 38.211 0023]], [[WI NR_2step_RACH-Core]] - one source per tag "
+    "([[CR 38.211 0042]] [[CR 38.211 0045]], not [[CR 38.211 0042, 0045]]). When the material does not "
     "answer the question, say so plainly. Answer in {language}; keep 3GPP terms and parameter names in English; "
     "use short markdown (headings, bullet lists)."
 )
@@ -58,6 +59,13 @@ TOOLS = [
             "old": {"type": "string", "description": "older version, e.g. 15.9.0"},
             "new": {"type": "string", "description": "newer version (default latest)"}},
             "required": ["spec", "clause", "old"]}}},
+    {"type": "function", "function": {
+        "name": "crs_between", "description": "What changed between two versions of a spec: the CRs in between "
+        "(title, category, work item, clauses, stored AI analysis), the changed clauses and stored release notes.",
+        "parameters": {"type": "object", "properties": {
+            "spec": {"type": "string"}, "old": {"type": "string", "description": "older version, e.g. 16.1.0"},
+            "new": {"type": "string", "description": "newer version (default latest)"}},
+            "required": ["spec", "old"]}}},
     {"type": "function", "function": {
         "name": "search_crs", "description": "Find change requests by words in their title, work item code, "
         "clauses or AI analysis.",
@@ -271,6 +279,22 @@ class SpecTools:
         return {"source": self._clause_tag(spec, e_new, new), "old": old, "new": new,
                 "changes": [c[:1500] for c in changed[:40]] or ["(no change)"]}
 
+    def t_crs_between(self, spec: str, old: str, new: str | None = None) -> dict:
+        spec = _norm_spec(spec)
+        vs = self._versions(spec)
+        old, new = old.lstrip("v"), self._version(spec, new)
+        if old not in vs:
+            raise KeyError(f"{spec} v{old} 는 받은 버전이 아닙니다: {', '.join(vs)}")
+        data = self.lib.release_input(spec, old, new)
+        rows = {(c["cr"], c["tdoc"]): c for c in self.lib.crs(spec)}
+        note = self.lib.release_note(spec, old, new)
+        return {"old": old, "new": new, "changed_clauses": data["changed_clauses"][:80],
+                "release_notes": {k: note.get(k) for k in ("overview", "features", "corrections", "impact")}
+                if note else None,
+                "crs": [{"source": self._cr_tag(spec, rows[(c["cr"], c["tdoc"])]), "version": c["version"],
+                         "category": c["cat"], "title": c["title"], "work_item": c["wi"], "clauses": c["clauses"],
+                         "analysis": (c["analysis"] or {}).get("summary")} for c in data["crs"][:60]]}
+
     def t_search_crs(self, query: str, spec: str | None = None) -> dict:
         words = [w.lower() for w in re.findall(r"[\w\-.]+", query) if len(w) > 1]
         specs = [_norm_spec(spec)] if spec else [s["number"] for s in self.lib.specs()]
@@ -331,6 +355,7 @@ def _step_label(name: str, args: dict) -> str:
         "clause_history": lambda: f"변경 이력: {a.get('spec', '')} §{a.get('clause', '')}",
         "compare_clause": lambda: f"비교: {a.get('spec', '')} §{a.get('clause', '')} v{a.get('old', '')}→{a.get('new', '최신')}",
         "search_crs": lambda: f"CR 찾기: {a.get('query', '')}",
+        "crs_between": lambda: f"버전 사이 CR: {a.get('spec', '')} v{a.get('old', '')}→{a.get('new', '최신')}",
         "get_cr": lambda: f"CR: {a.get('spec', '')} CR{a.get('cr', '')}",
         "work_item": lambda: f"WI: {a.get('wi', '')}",
         "list_specs": lambda: "받은 스펙 목록",

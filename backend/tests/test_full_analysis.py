@@ -107,3 +107,50 @@ def test_full_analysis_skips_paragraphs_that_fail_while_the_server_answers(libra
     j = _run(c, {"skip_uncovered": False, "cr_analyses": False, "wi_summaries": False})
     assert j["state"] == "done" and j["counts"]["failed"] == len(seen) > 0
     # each failing paragraph is asked once per version and then left for the next run (no endless retry)
+
+
+@needs_pandoc
+def test_status_board_and_last_run(library, tmp_path, monkeypatch):
+    monkeypatch.setattr(intent.OpenAICompatIntentModel, "intent", lambda self, ch: {
+        "summary": "p", "motivation": "m", "impact": "i", "cr": "", "confidence": "low"})
+    monkeypatch.setattr(intent.OpenAICompatIntentModel, "analyze_cr", lambda self, ev: {
+        "summary": "c", "background": "", "changes": [], "decision": "", "impact": "", "confidence": "low"})
+    monkeypatch.setattr(intent.OpenAICompatIntentModel, "summarize_wi", lambda self, wi: {
+        "overview": "o", "motivation": "", "spec_changes": [], "timeline": [], "impact": "", "open_points": "",
+        "confidence": "low"})
+    c = _client(library, tmp_path, monkeypatch)
+    before = c.get("/api/analysis-status").json()
+    s = before["specs"][0]
+    assert s["spec"] == "99.211" and s["changed"] > 0 and s["summarised"] == 0 and before["last_full"] is None
+    assert sum(v["changed"] for v in s["versions"]) == s["changed"]
+    _run(c, {"skip_uncovered": True})
+    after = c.get("/api/analysis-status").json()
+    s = after["specs"][0]
+    assert s["summarised"] == s["covered"] > 0 and s["cr_analyses"] == s["crs"] == 3
+    assert after["wi_summaries"] == after["work_items"] == 1
+    assert after["last_full"]["state"] == "done" and after["last_full"]["counts"]["intents"] == s["summarised"]
+
+
+@needs_pandoc
+def test_release_notes_between_versions(library, tmp_path, monkeypatch):
+    from specview.chat import SpecTools
+    from specview.store import Library
+
+    seen = []
+    monkeypatch.setattr(intent.OpenAICompatIntentModel, "release_notes", lambda self, data: seen.append(data) or {
+        "overview": "o", "features": [{"wi": "NR_X-Core", "what": "w", "crs": "0100", "clauses": "7.4"}],
+        "corrections": [], "impact": "i", "confidence": "medium"})
+    c = _client(library, tmp_path, monkeypatch)
+    vs = [v["version"] for v in c.get("/api/specs/99.211/versions").json()]
+    info = c.get("/api/specs/99.211/release-notes", params={"old": vs[0], "new": vs[-1]}).json()
+    assert info["note"] is None and info["crs"] > 0 and info["changed_clauses"] > 0
+    job = c.post("/api/release-notes", json={"spec": "99.211", "old": vs[0], "new": vs[-1]}).json()
+    while (j := next(x for x in c.get("/api/jobs").json() if x["id"] == job["id"]))["state"] == "running":
+        time.sleep(0.05)
+    assert j["state"] == "done" and len(seen) == 1 and "<crs>" in intent.rn_prompt(seen[0])
+    note = c.get("/api/specs/99.211/release-notes", params={"old": vs[0], "new": vs[-1]}).json()["note"]
+    assert note["features"][0]["wi"] == "NR_X-Core" and note["crs"] == info["crs"]
+    lib = Library(tmp_path / "library.sqlite")
+    out = json.loads(SpecTools(lib).call("crs_between", {"spec": "99.211", "old": vs[0]}))
+    assert out["release_notes"]["overview"] == "o" and out["crs"][0]["source"].startswith("CR 99.211 ")
+    assert c.post("/api/release-notes", json={"spec": "99.211", "old": vs[-1], "new": vs[-1]}).status_code == 404

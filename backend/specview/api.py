@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import threading
 import uuid
@@ -64,6 +65,13 @@ class ChatRequest(BaseModel):
     question: str
     chat_id: str | None = None  # None: a new conversation
     context: dict | None = None  # {"spec", "version", "clause", "text"} when asked from a paragraph
+
+
+class ReleaseNotesRequest(BaseModel):
+    spec: str
+    old: str
+    new: str
+    force: bool = False
 
 
 class FetchRequest(BaseModel):
@@ -695,6 +703,57 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             jobs[job_id]["message"] += " · 중지 요청됨 (지금 요청이 끝나면 멈춤)"
         return {k: v for k, v in jobs[job_id].items() if k != "cancel"}
 
+    @app.get("/api/analysis-status")
+    def analysis_status():
+        """How far the AI analysis got, per spec and version (the board under ④)."""
+        return _get(lib.analysis_status)
+
+    # ---- release notes between two versions ----
+
+    @app.get("/api/specs/{spec}/release-notes")
+    def release_notes(spec: str, old: str, new: str):
+        with lock:
+            data = lib.release_input(spec, old, new)
+            note = lib.release_note(spec, old, new)
+        return {"note": note, "crs": len(data["crs"]), "analysed": sum(1 for c in data["crs"] if c["analysis"]),
+                "changed_clauses": len(data["changed_clauses"])}
+
+    @app.post("/api/release-notes")
+    def make_release_notes(req: ReleaseNotesRequest):
+        """AI release notes of the CRs between two versions, in a background job."""
+        with lock:
+            data = lib.release_input(req.spec, req.old, req.new)
+        if not data["crs"]:
+            raise HTTPException(404, f"v{req.old} → v{req.new} 사이에 Change history 의 CR 이 없습니다")
+        model = _llm()
+        if not model.api_key and "googleapis.com" in model.base_url:
+            raise HTTPException(400, "Gemini API 키를 먼저 저장하세요")
+        if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
+            raise HTTPException(409, "AI 작업이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
+        job_id = uuid.uuid4().hex[:8]
+        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 1, "kind": "intent", "specs": [req.spec],
+                        "message": f"{req.spec} v{req.old} → v{req.new} 릴리즈 노트 (CR {len(data['crs'])}개, AI 요청)"}
+
+        def run():
+            job = jobs[job_id]
+            try:
+                res = model.release_notes(data)
+                if not res:
+                    job["state"], job["message"] = "error", "AI 응답이 비어 있습니다"
+                    return
+                note = {**res, "crs": len(data["crs"]), "analysed": sum(1 for c in data["crs"] if c["analysis"]),
+                        "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+                with lock:
+                    lib.save_release_note(req.spec, req.old, req.new, note)
+                job["state"], job["message"] = "done", f"릴리즈 노트 완료 ({model.name})"
+            except intent.LLMError as e:
+                job["state"], job["message"] = "error", str(e)
+            except Exception as e:
+                job["state"], job["message"] = "error", f"릴리즈 노트 실패: {e}"
+
+        threading.Thread(target=run, daemon=True).start()
+        return jobs[job_id]
+
     # ---- AI chat over the downloaded material ----
 
     @app.get("/api/chats")
@@ -916,6 +975,10 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             job["finished"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
             awake()
             reader.close()
+            with lock:  # kept for the status board: the job list is gone once the app restarts
+                lib.set_setting("last_full_analysis", json.dumps(
+                    {k: job.get(k) for k in ("started", "finished", "state", "message", "counts", "specs", "stopped")},
+                    ensure_ascii=False))
 
     @app.get("/api/version-of/{code}")
     def version_of(code: str):

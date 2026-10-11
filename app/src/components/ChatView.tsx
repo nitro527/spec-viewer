@@ -1,68 +1,20 @@
 // AI chat over the downloaded material. The model looks things up (search, clauses, history, CRs, work items)
 // and answers with source tags [[38.211 §6.3.3.2 v19.5.0]] / [[CR 38.211 0023]] that become links.
-import katex from "katex";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type Chat, type ChatContext, type ChatMessage, type ChatSource, type ChatSummary } from "../api";
+import { api, type Chat, type ChatContext, type ChatMessage, type ChatSummary } from "../api";
 import { useLlmReady } from "./CRAnalysis";
 import { openCRDoc } from "./DocWindow";
+import { answerMarkdown, chatHtml, download } from "../export";
+import { renderAnswer } from "../markdown";
 
-const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const fileName = (s: string) => s.replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 60) || "chat";
 
-function tex(src: string, display: boolean) {
-  try {
-    return katex.renderToString(src, { displayMode: display, throwOnError: false });
-  } catch {
-    return esc(src);
-  }
-}
-
-/** Inline markdown: code, math, bold, italics and source tags. */
-function inline(text: string, sources: Record<string, ChatSource>): string {
-  const keep: string[] = [];
-  const stash = (html: string) => `\u0000${keep.push(html) - 1}\u0000`;
-  let t = text
-    .replace(/`([^`]+)`/g, (_, c) => stash(`<code>${esc(c)}</code>`))
-    .replace(/\$\$([^$]+)\$\$/g, (_, m) => stash(tex(m, true)))
-    .replace(/\$([^$\n]+)\$/g, (_, m) => stash(tex(m, false)))
-    .replace(/\[\[([^\]]+)\]\]/g, (_, tag) => {
-      const s = sources[tag.trim()];
-      const kind = s ? s.type : "none";
-      const title = !s ? "답변이 근거로 든 자료 (목록에 없음)" : s.type === "clause" ? `${s.title} — 뷰어에서 열기`
-        : s.type === "cr" ? `${s.title} — CR 문서 열기` : "CR 모드에서 이 WI 를 고르면 요약을 볼 수 있습니다";
-      return stash(`<span class="src src-${kind}" data-src="${esc(tag.trim())}" title="${esc(title)}">${esc(tag.trim())}</span>`);
-    });
-  t = esc(t)
-    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
-    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<i>$2</i>");
-  return t.replace(/\u0000(\d+)\u0000/g, (_, i) => keep[Number(i)]);
-}
-
-/** Small markdown: headings, bullet/numbered lists, paragraphs, display math. */
-export function renderAnswer(md: string, sources: Record<string, ChatSource>): string {
-  const out: string[] = [];
-  let list: "ul" | "ol" | null = null;
-  const close = () => { if (list) { out.push(`</${list}>`); list = null; } };
-  for (const raw of md.replace(/\r/g, "").split("\n")) {
-    const line = raw.trimEnd();
-    let m: RegExpMatchArray | null;
-    if (!line.trim()) { close(); continue; }
-    if ((m = line.match(/^\s*(#{1,4})\s+(.*)$/))) {
-      close();
-      out.push(`<h${Math.min(m[1].length + 2, 6)}>${inline(m[2], sources)}</h${Math.min(m[1].length + 2, 6)}>`);
-    } else if ((m = line.match(/^(\s*)[-*•]\s+(.*)$/)) || (m = line.match(/^(\s*)\d+[.)]\s+(.*)$/))) {
-      const kind = /^\s*\d/.test(line) ? "ol" : "ul";
-      if (list !== kind) { close(); out.push(`<${kind}>`); list = kind; }
-      out.push(`<li class="${m[1].length >= 2 ? "sub" : ""}">${inline(m[2], sources)}</li>`);
-    } else if ((m = line.match(/^\s*\$\$(.+)\$\$\s*$/))) {
-      close();
-      out.push(tex(m[1], true));
-    } else {
-      close();
-      out.push(`<p>${inline(line, sources)}</p>`);
-    }
-  }
-  close();
-  return out.join("");
+function copyMd(button: HTMLElement, text: string) {
+  navigator.clipboard?.writeText(text).then(() => {
+    const old = button.textContent;
+    button.textContent = "✓ 복사됨";
+    setTimeout(() => { button.textContent = old; }, 1200);
+  });
 }
 
 export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
@@ -153,6 +105,14 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
         </ul>
       </aside>
       <main className="chat-main">
+        {chat && chat.messages.length > 1 && (
+          <div className="chat-head">
+            <b>{chat.title}</b>
+            <button className="link small" title="질문과 답, 출처를 HTML 파일로 저장합니다 (메일·위키 공유용)"
+                    onClick={() => download(`${fileName(chat.title)}.html`, chatHtml(chat.title, chat.messages))}>
+              ⬇ 대화 내보내기 (HTML)</button>
+          </div>
+        )}
         <div className="chat-msgs">
           {!chat && !job && (
             <div className="chat-empty">
@@ -186,8 +146,19 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
                   )}
                   <div className="answer" onClick={(e) => onAnswerClick(e, m)}
                        dangerouslySetInnerHTML={{ __html: renderAnswer(m.content, m.sources ?? {}) }} />
-                  {m.model && <p className="muted tiny">{m.model}{m.mode === "retrieval" ? " · 검색 결과 기반(도구 호출 미지원 서버)" : ""}
-                    {" · AI 답변은 출처의 원문으로 확인하세요"}</p>}
+                  <p className="muted tiny msg-foot">
+                    {m.model && <>{m.model}{m.mode === "retrieval" ? " · 검색 결과 기반(도구 호출 미지원 서버)" : ""}
+                      {" · AI 답변은 출처의 원문으로 확인하세요 · "}</>}
+                    {!m.error && <>
+                      <button className="link tiny" title="답변과 출처를 Markdown 으로 복사합니다"
+                              onClick={(e) => copyMd(e.currentTarget, answerMarkdown(chat.messages[i - 1]?.content, m))}>⧉ Markdown 복사</button>
+                      {" · "}
+                      <button className="link tiny" title="이 질문과 답을 HTML 파일로 저장합니다"
+                              onClick={() => download(`${fileName(chat.messages[i - 1]?.content ?? chat.title)}.html`,
+                                chatHtml(chat.messages[i - 1]?.content ?? chat.title, chat.messages.slice(Math.max(0, i - 1), i + 1)))}>
+                        ⬇ HTML</button>
+                    </>}
+                  </p>
                 </>
               )}
             </div>
