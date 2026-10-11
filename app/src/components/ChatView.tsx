@@ -1,7 +1,7 @@
 // AI chat over the downloaded material. The model looks things up (search, clauses, history, CRs, work items)
 // and answers with source tags [[38.211 §6.3.3.2 v19.5.0]] / [[CR 38.211 0023]] that become links.
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type Chat, type ChatContext, type ChatMessage, type ChatSummary } from "../api";
+import { api, type Chat, type ChatContext, type ChatMessage, type ChatSource, type ChatSummary } from "../api";
 import { useLlmReady } from "./CRAnalysis";
 import { openCRDoc } from "./DocWindow";
 import { answerMarkdown, chatHtml, download } from "../export";
@@ -23,6 +23,17 @@ const Answer = memo(function Answer({ m, onClick }: { m: ChatMessage; onClick: (
   return <div className="answer" onClick={(e) => onClick(e, m)} dangerouslySetInnerHTML={{ __html: html }} />;
 });
 
+/** The answer while it streams in: rendered at most every 150 ms (KaTeX on every token would be the slow part). */
+function Streaming({ text, sources }: { text: string; sources: Record<string, ChatSource> }) {
+  const [shown, setShown] = useState(text);
+  useEffect(() => {
+    const t = setTimeout(() => setShown(text), 150);
+    return () => clearTimeout(t);
+  }, [text]);
+  const html = useMemo(() => renderAnswer(shown, sources), [shown, sources]);
+  return <div className="answer streaming" dangerouslySetInnerHTML={{ __html: html + '<span class="caret"></span>' }} />;
+}
+
 export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
   active: boolean; pending: ChatContext | null; onPendingTaken: () => void;
   onOpenSpec: (spec: string, clause?: string, version?: string) => void;
@@ -32,7 +43,8 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
   const [chat, setChat] = useState<Chat | null>(null);
   const [question, setQuestion] = useState("");
   const [context, setContext] = useState<ChatContext | null>(null);
-  const [job, setJob] = useState<{ id: string; chatId: string; steps: string[]; stopping?: boolean } | null>(null);
+  const [job, setJob] = useState<{ id: string; chatId: string; steps: string[]; stopping?: boolean; partial?: string;
+    sources?: Record<string, ChatSource> } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
@@ -47,21 +59,40 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
     setTimeout(() => input.current?.focus(), 50);
   }, [pending, onPendingTaken]);
   useEffect(() => { bottom.current?.scrollIntoView({ block: "end" }); }, [chat, job?.steps.length]);
+  useEffect(() => {  // follow the streaming answer, unless the user scrolled up to read
+    const box = bottom.current?.parentElement;
+    if (box && box.scrollHeight - box.scrollTop - box.clientHeight < 120) bottom.current?.scrollIntoView({ block: "end" });
+  }, [job?.partial]);
 
+  // follow the job: steps while it looks things up, then the answer text as it streams in
+  const jobId = job?.id;
+  const jobChat = useRef("");
+  jobChat.current = job?.chatId ?? jobChat.current;
   useEffect(() => {
-    if (!job) return;
+    if (!jobId) return;
+    let busy = false;
     const t = setInterval(async () => {
-      const j = await api.job(job.id);
-      if (!j) return;
-      if (j.state === "running") return setJob((cur) => cur && { ...cur, steps: j.steps ?? [] });
-      setJob(null);
-      if (j.state === "error" && j.message.startsWith("작업 정보가 없습니다")) setError(j.message);  // other errors are in the chat
-      const done = await api.chat(job.chatId).catch(() => null);
-      if (done) setChat((cur) => (!cur || cur.id === done.id ? done : cur));  // the user may have opened another one
-      loadList();
-    }, 1000);
+      if (busy) return;
+      busy = true;
+      try {
+        const j = await api.job(jobId);
+        if (!j) return;
+        if (j.state === "running") {
+          return setJob((cur) => cur && cur.id === jobId
+            ? { ...cur, steps: j.steps ?? [], partial: j.partial, sources: j.sources } : cur);
+        }
+        clearInterval(t);
+        if (j.state === "error" && j.message.startsWith("작업 정보가 없습니다")) setError(j.message);  // other errors are in the chat
+        const done = await api.chat(jobChat.current).catch(() => null);
+        setJob(null);
+        if (done) setChat((cur) => (!cur || cur.id === done.id ? done : cur));  // the user may have opened another one
+        loadList();
+      } finally {
+        busy = false;
+      }
+    }, 350);
     return () => clearInterval(t);
-  }, [job, loadList]);
+  }, [jobId, loadList]);
 
   const opening = useRef("");
   const open = async (id: string) => {
@@ -180,7 +211,7 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
           {job && (
             <div className="msg msg-assistant">
               <div className="thinking">
-                <span className="spinner" /> {job.stopping ? "중지하는 중 (지금 요청이 끝나면 멈춤)…" : "자료를 찾아보는 중…"}
+                <span className="spinner" /> {job.stopping ? "중지하는 중 (지금 요청이 끝나면 멈춤)…" : job.partial ? "답을 쓰는 중…" : "자료를 찾아보는 중…"}
                 {!job.stopping && (
                   <button className="link small" title="지금 진행 중인 AI 요청이 끝나면 멈춥니다"
                           onClick={() => { setJob((j) => j && { ...j, stopping: true }); api.cancelJob(job.id).catch(() => undefined); }}>
@@ -188,6 +219,7 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
                 )}
                 <ol>{job.steps.map((s, k) => <li key={k}>{s}</li>)}</ol>
               </div>
+              {job.partial && <Streaming text={job.partial} sources={job.sources ?? {}} />}
             </div>
           )}
           <div ref={bottom} />

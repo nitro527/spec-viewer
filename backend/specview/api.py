@@ -1032,6 +1032,11 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             job["steps"].append(s)
             job["message"] = s
 
+        def partial(text: str, sources: dict):  # the answer as it streams in; the chat window polls it
+            job["partial"] = text
+            if text:
+                job["sources"] = sources
+
         try:
             history, known = [], {}
             for q, a in zip(conv["messages"][:-1:2], conv["messages"][1:-1:2]):  # (question, answer) turns
@@ -1040,7 +1045,8 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 history += [{"role": "user", "content": q["content"]}, {"role": "assistant", "content": a["content"]}]
                 known.update(a.get("sources") or {})
             res = chatmod.answer(model, reader, req.question.strip(), history, req.context, step=step,
-                                 known_sources=known, should_stop=lambda: bool(job.get("cancel")))
+                                 known_sources=known, should_stop=lambda: bool(job.get("cancel")),
+                                 on_partial=partial)
             reply = {"role": "assistant", "content": res["answer"] or "(빈 답변)", "sources": res["sources"],
                      "steps": res["steps"], "mode": res["mode"], "model": res.get("model") or model.name}
             job["state"], job["message"] = "done", "답변 완료"

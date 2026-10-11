@@ -525,3 +525,6 @@ input.num { width: 56px; margin: 0 4px; }
 .refby ul { margin: 2px 0 8px; padding-left: 16px; }
 .refby li { margin: 3px 0; line-height: 1.4; }
 .refby mark { background: var(--mark, #fff1a8); }
+.answer.streaming .caret { display: inline-block; width: 7px; height: 1em; margin-left: 2px; vertical-align: text-bottom;
+  background: var(--muted); animation: caret-blink 1s steps(2, start) infinite; }
+@keyframes caret-blink { to { visibility: hidden; } }

@@ -10,6 +10,7 @@ import json
 import os
 import re
 import time
+from typing import Callable
 
 import requests
 
@@ -346,6 +347,7 @@ class OpenAICompatIntentModel:
         self.timeout = timeout
         self.session = session or requests.Session()
         self._schema_mode = "json_schema"  # downgraded to json_object if the server rejects it
+        self._stream_ok = True  # set False when the server rejects "stream": answers then come in one piece
 
     @classmethod
     def from_preset(cls, preset: str, model: str | None = None, base_url: str | None = None,
@@ -362,10 +364,10 @@ class OpenAICompatIntentModel:
             h["Authorization"] = f"Bearer {self.api_key}"
         return h
 
-    def _post(self, body: dict):
+    def _post(self, body: dict, stream: bool = False):
         try:
             return self.session.post(f"{self.base_url}/chat/completions", json=body, headers=self._headers(),
-                                     timeout=(20, self.timeout))
+                                     timeout=(20, self.timeout), **({"stream": True} if stream else {}))
         except requests.ReadTimeout as e:
             raise LLMError(f"LLM 서버가 {int(self.timeout)}초 안에 답하지 않았습니다 (모델이 느리거나 입력이 김; "
                            "SPECVIEW_LLM_TIMEOUT 으로 늘릴 수 있음)") from e
@@ -401,15 +403,25 @@ class OpenAICompatIntentModel:
             return r.json()
         raise _http_error(r)
 
-    def complete(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
+    def complete(self, messages: list[dict], tools: list[dict] | None = None,
+                 on_text: Callable[[str], None] | None = None) -> dict:
         """One chat completion, optionally with function tools; returns the assistant message
-        (``content`` with any <think> block removed, ``tool_calls`` when the model asks for tools)."""
+        (``content`` with any <think> block removed, ``tool_calls`` when the model asks for tools).
+        With ``on_text`` the answer is streamed: it gets the visible text so far (reasoning hidden) as it grows."""
         body = {"model": self.model, "messages": messages, "temperature": 0.2}
         if tools:
             body["tools"], body["tool_choice"] = tools, "auto"
+        stream = bool(on_text) and self._stream_ok
         for attempt in range(4):
-            r = self._post(body)
+            if stream:
+                body["stream"] = True
+            else:
+                body.pop("stream", None)
+            r = self._post(body, stream=stream)
             msg400 = str(_error_body(r).get("message", "")) if r.status_code == 400 else ""
+            if stream and r.status_code == 400 and re.search(r"stream", msg400, re.I):
+                self._stream_ok = stream = False  # an older server: ask again in one piece
+                continue
             if tools and r.status_code == 400 and re.search(r"tool|function", msg400, re.I) \
                     and not re.search(r"context|token|length|maximum", msg400, re.I):
                 raise ToolsUnsupported(str(_http_error(r)))
@@ -425,12 +437,54 @@ class OpenAICompatIntentModel:
                 continue
             if r.status_code >= 400:
                 raise _http_error(r)
-            data = r.json()
+            if stream and "event-stream" in r.headers.get("Content-Type", ""):
+                return self._read_stream(r, on_text)
+            data = r.json()  # not streamed (or a server that ignores "stream")
             msg = dict((data.get("choices") or [{}])[0].get("message") or {})
             msg["content"] = strip_think(msg.get("content") or "")
             msg["model"] = data.get("model") or self.model
+            if on_text and msg["content"]:
+                on_text(msg["content"])
             return msg
         raise _http_error(r)
+
+    def _read_stream(self, r, on_text: Callable[[str], None]) -> dict:
+        """Server-sent events of a streamed completion, merged into one assistant message."""
+        text, model, calls = "", self.model, {}
+        r.encoding = "utf-8"  # SSE is UTF-8; without a charset requests would decode it as Latin-1 (broken Korean)
+        try:
+            for line in r.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except ValueError:
+                    continue
+                if chunk.get("error"):
+                    raise LLMError(f"LLM 오류: {chunk['error'].get('message', chunk['error'])}")
+                model = chunk.get("model") or model
+                delta = ((chunk.get("choices") or [{}])[0].get("delta")) or {}
+                if delta.get("content"):
+                    text += delta["content"]
+                    on_text(strip_think(text))
+                for tc in delta.get("tool_calls") or []:  # tool calls arrive in pieces, by index
+                    cur = calls.setdefault(tc.get("index", len(calls)),
+                                           {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                    cur["id"] = tc.get("id") or cur["id"]
+                    f = tc.get("function") or {}
+                    cur["function"]["name"] += f.get("name") or ""
+                    cur["function"]["arguments"] += f.get("arguments") or ""
+        except requests.RequestException as e:
+            raise LLMError(f"LLM 응답이 중간에 끊겼습니다: {e}") from e
+        finally:
+            r.close()
+        msg = {"role": "assistant", "content": strip_think(text), "model": model}
+        if calls:
+            msg["tool_calls"] = [calls[k] for k in sorted(calls)]
+        return msg
 
     def _intent_messages(self, change: dict) -> list[dict]:
         system = SYSTEM.format(language=self.language)

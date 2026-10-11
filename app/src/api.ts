@@ -162,6 +162,7 @@ export interface MeetingDoc { meeting: string; tdoc: string | null; title: strin
 export interface Job {
   id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[]; kind?: "intent";
   full?: boolean; started?: string; finished?: string; stopped?: boolean; chat_id?: string; steps?: string[];
+  partial?: string; sources?: Record<string, ChatSource>;
   counts?: { intents: number; cr_analyses: number; wi_summaries: number; failed: number };
 }
 export interface RefHit { spec: string; version: string; number: string; title: string; key: string; ord: number; snippet: string }

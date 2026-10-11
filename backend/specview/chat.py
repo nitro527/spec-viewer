@@ -449,7 +449,8 @@ class Stopped(Exception):
 
 def answer(model, lib, question: str, history: list[dict] | None = None, context: dict | None = None,
            language: str = "Korean", max_steps: int = 10, step: Callable[[str], None] | None = None,
-           known_sources: dict | None = None, should_stop: Callable[[], bool] | None = None) -> dict:
+           known_sources: dict | None = None, should_stop: Callable[[], bool] | None = None,
+           on_partial: Callable[[str, dict], None] | None = None) -> dict:
     """Answer one question; ``history`` is the earlier turns ({role, content}); ``known_sources`` the sources
     earlier answers cited (a follow-up may cite them again). Returns {"answer", "sources", "steps", "mode",
     "model"}."""
@@ -462,6 +463,12 @@ def answer(model, lib, question: str, history: list[dict] | None = None, context
     def check():
         if should_stop and should_stop():
             raise Stopped()
+
+    def ask(msgs, tools_=None):  # stream the answer text when someone is watching (the chat window)
+        if not on_partial:
+            return model.complete(msgs, tools_)
+        on_partial("", tools.sources)  # a new request: what streamed before was a tool-calling turn
+        return model.complete(msgs, tools_, on_text=lambda t: on_partial(t, tools.sources))
 
     def note(s: str):
         check()
@@ -478,7 +485,7 @@ def answer(model, lib, question: str, history: list[dict] | None = None, context
         for n in range(max_steps):
             check()
             try:
-                msg = model.complete(messages, TOOLS)
+                msg = ask(messages, TOOLS)
             except LLMError as e:  # context window: answer with what was found so far
                 if n == 0 or not re.search(r"context|token|length|too long|maximum", str(e), re.I):
                     raise
@@ -498,12 +505,13 @@ def answer(model, lib, question: str, history: list[dict] | None = None, context
         messages.append({"role": "user", "content": f"Answer now with the material above, in {language}."})
         _shrink(messages)
         check()
-        msg = model.complete(messages)
+        msg = ask(messages)
         return {"answer": msg["content"], "sources": tools.sources, "steps": steps, "mode": "tools",
                 "model": msg.get("model")}
     except ToolsUnsupported:
         note("이 LLM 서버는 도구 호출을 지원하지 않아 검색 결과를 한 번에 넘겨 답합니다")
-        return _answer_without_tools(model, tools, question, history, context, language, note, steps, tag)
+        return _answer_without_tools(model, tools, question, history, context, language, note, steps, tag,
+                                     final=lambda m: ask(m))
 
 
 _QUERY_PROMPT = (
@@ -514,7 +522,7 @@ _QUERY_PROMPT = (
 
 
 def _answer_without_tools(model, tools: SpecTools, question, history, context, language, note, steps,
-                          tag: str | None = None) -> dict:
+                          tag: str | None = None, final=None) -> dict:
     from .intent import _parse_json
 
     msg = model.complete([{"role": "system", "content": _QUERY_PROMPT},
@@ -555,6 +563,6 @@ def _answer_without_tools(model, tools: SpecTools, question, history, context, l
     for m in (history or [])[-6:]:
         messages.append({"role": m["role"], "content": m["content"][:3000]})
     messages.append({"role": "user", "content": f"<material>\n{body}\n</material>\n\n{_user_text(question, context, tag)}"})
-    out = model.complete(messages)
+    out = (final or model.complete)(messages)
     return {"answer": out["content"], "sources": tools.sources, "steps": steps, "mode": "retrieval",
             "model": out.get("model")}

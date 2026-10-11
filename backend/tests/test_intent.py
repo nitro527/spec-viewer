@@ -1,3 +1,4 @@
+import json
 import time
 
 import pytest
@@ -187,3 +188,62 @@ def test_change_evidence_helpers():
     assert crdocs.listed_tdocs(cover) == ["R1-1813585"]
     assert crdocs.wg_meetings("from RAN1#94bis and RAN1#95") == [
         "https://www.3gpp.org/ftp/tsg_ran/WG1_RL1/TSGR1_94b", "https://www.3gpp.org/ftp/tsg_ran/WG1_RL1/TSGR1_95"]
+
+
+class _Resp:
+    encoding = None
+
+    def __init__(self, status=200, lines=None, data=None, ctype="text/event-stream"):
+        self.status_code, self._lines, self._data = status, lines or [], data
+        self.headers = {"Content-Type": ctype}
+        self.content = json.dumps(data or {}).encode()
+        self.text = self.content.decode()
+
+    def iter_lines(self, decode_unicode=False):  # like requests: bytes decoded with .encoding (Latin-1 if unset)
+        for line in self._lines:
+            yield line.encode("utf-8").decode(self.encoding or "latin-1")
+
+    def json(self):
+        return self._data
+
+    def close(self):
+        pass
+
+
+def _sse(*chunks):
+    return [f"data: {json.dumps(c)}" for c in chunks] + ["data: [DONE]"]
+
+
+def test_streamed_answer_and_tool_calls_are_merged():
+    m = intent.OpenAICompatIntentModel("http://llm/v1", "glm")
+    seen = []
+    m.session.post = lambda url, **kw: _Resp(lines=_sse(
+        {"model": "glm-5", "choices": [{"delta": {"content": "<think>hmm"}}]},
+        {"choices": [{"delta": {"content": "</think>답은 "}}]},
+        {"choices": [{"delta": {"content": "42"}}]}))
+    msg = m.complete([{"role": "user", "content": "q"}], on_text=seen.append)
+    assert msg["content"] == "답은 42" and msg["model"] == "glm-5"
+    assert seen == ["", "답은", "답은 42"]  # the reasoning is never shown
+    m.session.post = lambda url, **kw: _Resp(lines=_sse(
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "search", "arguments": "{\"qu"}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "ery\": \"x\"}"}}]}}]}))
+    msg = m.complete([{"role": "user", "content": "q"}], tools=[{}], on_text=seen.append)
+    assert msg["tool_calls"] == [{"id": "c1", "type": "function", "function": {"name": "search", "arguments": '{"query": "x"}'}}]
+
+
+def test_server_without_streaming_answers_in_one_piece():
+    m = intent.OpenAICompatIntentModel("http://llm/v1", "glm")
+    bodies = []
+
+    def post(url, json=None, **kw):
+        bodies.append(dict(json))
+        if json.get("stream"):
+            return _Resp(400, data={"error": {"message": "stream is not supported"}}, ctype="application/json")
+        return _Resp(data={"choices": [{"message": {"content": "한 번에"}}]}, ctype="application/json")
+
+    m.session.post = post
+    seen = []
+    assert m.complete([{"role": "user", "content": "q"}], on_text=seen.append)["content"] == "한 번에"
+    assert seen == ["한 번에"] and [b.get("stream") for b in bodies] == [True, None]
+    m.complete([{"role": "user", "content": "q"}], on_text=seen.append)
+    assert bodies[-1].get("stream") is None  # remembered
