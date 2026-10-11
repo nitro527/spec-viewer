@@ -121,6 +121,7 @@ def test_tool_calls_from_loose_servers_are_normalised(library):
     assert tool_reply["tool_call_id"] == echoed["id"] and "error" in tool_reply["content"] or "text" in tool_reply["content"]
 
 
+@needs_pandoc
 def test_stop_ends_the_answer_between_requests(library):
     import pytest
 
