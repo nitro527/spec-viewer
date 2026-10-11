@@ -117,33 +117,56 @@ CREATE VIRTUAL TABLE IF NOT EXISTS blob_fts USING fts5(hash UNINDEXED, text, tok
 
 
 def _mark_moves(clauses: list[dict]) -> None:
-    """Pair deletions and insertions of (nearly) the same paragraph in different places as a move."""
-    from .diff import similarity, strip_tags
+    """Pair deletions and insertions of (nearly) the same paragraph in different places as a move.
+
+    Identical text is paired through a dict first; only what is left is compared word by word, and only
+    with deletions of a length that could still reach the similarity floor (a reorganised conformance
+    spec has thousands of each)."""
+    import bisect
+
+    from .diff import strip_tags, word_similarity
 
     dels = [(c, b) for c in clauses for b in c["blocks"] if b["op"] == "delete"]
     ins = [(c, b) for c in clauses for b in c["blocks"] if b["op"] == "insert"]
     text = {id(b): " ".join(strip_tags(b["old"] or b["new"] or "").split()) for _, b in dels + ins}
     used: set[int] = set()
-    for ic, ib in ins:
-        t = text[id(ib)]
-        if len(t) < 40:
-            continue
-        best, best_s = None, 0.8
-        for dc, db in dels:
-            if id(db) in used or dc is ic:
-                continue
-            sc = 1.0 if text[id(db)] == t else similarity(text[id(db)], t)
-            if sc >= best_s:
-                best, best_s = (dc, db), sc
-                if sc == 1.0:
-                    break
-        if best is None:
-            continue
-        dc, db = best
+
+    def pair(ic, ib, dc, db) -> None:
         used.add(id(db))
         db["op"], db["moved_to"] = "move-out", ic["number"] or ic["title"]
         ib["op"], ib["moved_from"] = "move-in", dc["number"] or dc["title"]
         ib["diff"] = render_diff(db["old"], ib["new"])
+
+    same: dict[str, list] = {}
+    for dc, db in dels:
+        same.setdefault(text[id(db)], []).append((dc, db))
+    fuzzy = []
+    for ic, ib in ins:
+        t = text[id(ib)]
+        if len(t) < 40:
+            continue
+        hit = next(((dc, db) for dc, db in same.get(t, ()) if id(db) not in used and dc is not ic), None)
+        if hit:
+            pair(ic, ib, *hit)
+        else:
+            fuzzy.append((ic, ib))
+    floor = 0.8
+    words = {id(b): text[id(b)].split() for _, b in dels}
+    by_len = sorted((len(words[id(b)]), i) for i, (_, b) in enumerate(dels) if id(b) not in used)
+    lens = [n for n, _ in by_len]
+    for ic, ib in fuzzy:
+        w = text[id(ib)].split()
+        lo, hi = len(w) * floor / (2 - floor), len(w) * (2 - floor) / floor  # 2·min/(a+b) ≥ floor
+        best, best_s = None, floor
+        for _, i in by_len[bisect.bisect_left(lens, lo):bisect.bisect_right(lens, hi)]:
+            dc, db = dels[i]
+            if id(db) in used or dc is ic:
+                continue
+            sc = word_similarity(words[id(db)], w, best_s)
+            if sc >= best_s:
+                best, best_s = (dc, db), sc
+        if best is not None:
+            pair(ic, ib, *best)
 
 
 def _feature_out(f: dict) -> dict:
