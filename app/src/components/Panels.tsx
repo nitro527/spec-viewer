@@ -1,6 +1,7 @@
 // Side panels: table of contents (left) and change information (right).
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cmpVersion, crTouches, tdocUrl, type CR, type Note, type TocEntry } from "../api";
+import { openCRDoc } from "./DocWindow";
 import type { VersionColor } from "../colors";
 import { AnnotationPanel } from "./AnnotationPanel";
 import { FeaturePanel } from "./FeaturePanel";
@@ -100,6 +101,10 @@ function CRItem({ cr, hit }: { cr: CR; hit?: boolean }) {
         {cr.tdoc && <a href={tdocUrl(cr.tdoc)} target="_blank" rel="noreferrer">{cr.tdoc}</a>}
         {d?.wg_tdoc && <a href={tdocUrl(d.wg_tdoc)} target="_blank" rel="noreferrer" className="muted">{d.wg_tdoc}</a>}
         <span className="muted">{cr.meeting} {cr.date}</span>
+        {cr.cr && cr.tdoc && (
+          <button className="link tiny" title="CR 문서(표지와 바뀐 절, 수정 표시 포함)를 별도 창으로 엽니다"
+                  onClick={() => openCRDoc(cr.spec, cr.cr, cr.tdoc)}>문서 보기</button>
+        )}
       </div>
       <div>{cr.subject}</div>
       {d && (

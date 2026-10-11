@@ -155,6 +155,8 @@ export const api = {
   makeIntents: (req: IntentRequest) => send<Job>("POST", "/api/intent", req),
   meetingDoc: (folder: string, tdoc?: string) =>
     get<MeetingDoc>(`/api/meeting-doc?folder=${s(folder)}${tdoc ? `&tdoc=${s(tdoc)}` : ""}`),
+  crDoc: (spec: string, cr: string, tdoc: string) =>
+    get<MeetingDoc>(`/api/cr-doc?spec=${s(spec)}&cr=${s(cr)}&tdoc=${s(tdoc)}`),
   featuresStatus: () => get<{ count: number; source: string | null }>("/api/features"),
   searchFeatures: (q: string) => get<UEFeature[]>(`/api/features/search?q=${s(q)}`),
   featureLinks: (section: string, index: string) => get<FeatureLinks>(`/api/features/${s(section)}/${s(index)}/links`),

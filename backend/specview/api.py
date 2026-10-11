@@ -335,6 +335,20 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         except FileNotFoundError as e:
             raise HTTPException(404, str(e))
 
+    @app.get("/api/cr-doc")
+    def cr_doc(spec: str, cr: str, tdoc: str):
+        """A CR of the spec's Change history rendered for the document viewer window."""
+        from . import crdocs
+
+        with lock:
+            row = next((c for c in lib.crs(spec) if c["cr"] == cr and c["tdoc"] == tdoc), None)
+        if row is None:
+            raise HTTPException(404, f"CR{cr} ({tdoc}) is not in the Change history of {spec}")
+        try:
+            return crdocs.cr_document_html(spec, cr, tdoc, row["meeting"], home / "cache")
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+
     @app.get("/api/catalog/{series}")
     def spec_catalog(series: str, refresh: bool = False):
         """Specs of a series with titles for the download picker. Fetched once, then kept on disk until the

@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, cmpVersion, tdocUrl, type CompareResult, type DiffBlock, type DiffClause, type VersionInfo } from "../api";
 import { compareReport, download } from "../export";
+import { openCRDoc } from "./DocWindow";
 import { Html } from "./Html";
 
 interface Props {
@@ -61,7 +62,8 @@ export function CompareView({ spec, versions, oldV, newV, onChange, onXref }: Pr
             ))}
             {data.crs.length > 0 && <h4>CRs in range</h4>}
             {data.crs.map((cr, i) => (
-              <a key={i} href={tdocUrl(cr.tdoc)} target="_blank" rel="noreferrer" className="cr-mini" title={cr.subject}>
+              <a key={i} href={tdocUrl(cr.tdoc)} target="_blank" rel="noreferrer" className="cr-mini" title={cr.subject}
+                 onClick={(e) => { if (cr.cr && cr.tdoc) { e.preventDefault(); openCRDoc(cr.spec, cr.cr, cr.tdoc); } }}>
                 <b>{cr.new_version}</b> CR{cr.cr || "—"} {cr.subject}
               </a>
             ))}

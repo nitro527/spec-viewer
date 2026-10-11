@@ -250,6 +250,22 @@ def find_cr_doc(pack: Path, spec: str, cr: str, out_dir: Path) -> Path | None:
     return out
 
 
+def cr_document_html(spec: str, cr: str, tdoc: str, meeting: str, cache_dir: Path) -> dict:
+    """A CR (cover page and changed clauses, revision marks shown) as HTML for the viewer window."""
+    from .parse_docx import docx_view_html
+
+    pack = fetch_pack(tdoc, meeting, cache_dir)
+    doc = pack and find_cr_doc(pack, spec, cr, Path(cache_dir) / "tdocs" / tdoc)
+    if not doc:
+        raise FileNotFoundError(f"CR{cr} ({tdoc}) not found")
+    cached = doc.with_suffix(".view.html")
+    if not cached.exists():
+        cached.write_text(docx_view_html(doc, track_changes=True), encoding="utf-8")
+    cover = parse_cover(doc)
+    return {"meeting": meeting, "tdoc": tdoc, "title": f"{spec} CR{cr} {cover.title}".strip(),
+            "html": cached.read_text(encoding="utf-8"), "url": None}
+
+
 # ---------------------------------------------------------------- individual draft CRs behind a combined CR
 
 _WG = {  # Tdoc prefix -> (FTP path, meeting folder prefix)
