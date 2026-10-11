@@ -43,6 +43,8 @@
 - 3GPP archive 에서 스펙 전 버전 자동 다운로드 (여러 스펙 동시 선택, 릴리즈 필터)
 - 구형 Equation Editor/MathType 수식(WMF)을 내장 변환기로 SVG 렌더링
 
+**사용 방법은 화면 캡처와 함께 [docs/GUIDE.md](docs/GUIDE.md)에 자세히 정리되어 있습니다.**
+
 설계와 로드맵은 [docs/DESIGN.md](docs/DESIGN.md) 참고.
 
 ## 구성
