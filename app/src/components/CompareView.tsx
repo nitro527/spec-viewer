@@ -1,5 +1,6 @@
 // Code-review style comparison of two arbitrary versions (inline or side by side).
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, cmpVersion, tdocUrl, type CompareResult, type DiffBlock, type DiffClause, type VersionInfo } from "../api";
 import { compareReport, download } from "../export";
 import { ReleaseNotes } from "./ReleaseNotes";
@@ -31,6 +32,17 @@ export function CompareView({ spec, versions, oldV, newV, onChange, onXref }: Pr
   }, [spec, oldV, newV]);
 
   const all = useMemo(() => (data ? [...data.clauses, ...data.removed] : []), [data]);
+  // A comparison of distant versions has thousands of changed clauses (38.211 15.0.0 -> 16.10.0: 170 000 DOM
+  // nodes, 18 s to show): only the clauses in view are rendered.
+  const listRef = useRef<HTMLDivElement>(null);
+  const virt = useVirtualizer({
+    count: all.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: (i) => 90 + 60 * Math.min(all[i]?.blocks.length ?? 1, 6),
+    overscan: 4,
+  });
+  useEffect(() => { listRef.current?.scrollTo(0, 0); setExpanded(new Set()); }, [data]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());  // kept here: a clause scrolled out unmounts
 
   const onClick = (e: React.MouseEvent) => {
     const x = (e.target as HTMLElement).closest<HTMLElement>(".xref");
@@ -64,8 +76,9 @@ export function CompareView({ spec, versions, oldV, newV, onChange, onXref }: Pr
       {data && (
         <div className="compare-body">
           <nav className="compare-nav">
-            {all.map((c) => (
-              <a key={c.key} href={`#cmp-${c.key}`} className={`st-${c.status}`}>
+            {all.map((c, i) => (
+              <a key={c.key} href={`#cmp-${c.key}`} className={`st-${c.status}`}
+                 onClick={(e) => { e.preventDefault(); virt.scrollToIndex(i, { align: "start" }); }}>
                 <span className="num">{c.number || "·"}</span> {c.title}
               </a>
             ))}
@@ -77,9 +90,17 @@ export function CompareView({ spec, versions, oldV, newV, onChange, onXref }: Pr
               </a>
             ))}
           </nav>
-          <div className={`compare-list ${sideBySide ? "sbs" : "inline"}`}>
+          <div ref={listRef} className={`compare-list ${sideBySide ? "sbs" : "inline"}`}>
             {all.length === 0 && <p className="empty">두 버전 사이에 변경 사항이 없습니다.</p>}
-            {all.map((c) => <DiffClauseView key={c.key} c={c} sideBySide={sideBySide} />)}
+            <div style={{ height: virt.getTotalSize(), position: "relative" }}>
+              {virt.getVirtualItems().map((it) => (
+                <div key={all[it.index].key} data-index={it.index} ref={virt.measureElement}
+                     style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${it.start}px)` }}>
+                  <DiffClauseView c={all[it.index]} sideBySide={sideBySide} showAll={expanded.has(all[it.index].key)}
+                                  onShowAll={(k) => setExpanded((x) => new Set(x).add(k))} />
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -87,8 +108,9 @@ export function CompareView({ spec, versions, oldV, newV, onChange, onXref }: Pr
   );
 }
 
-function DiffClauseView({ c, sideBySide }: { c: DiffClause; sideBySide: boolean }) {
-  const [showAll, setShowAll] = useState(false);
+const DiffClauseView = memo(function DiffClauseView({ c, sideBySide, showAll, onShowAll }: {
+  c: DiffClause; sideBySide: boolean; showAll: boolean; onShowAll: (key: string) => void;
+}) {
   const Tag = (`h${Math.min(Math.max(c.level, 1), 6)}`) as "h1";
   // Collapse runs of unchanged blocks, keeping one block of context around changes.
   const changed = (i: number) => !!c.blocks[i] && c.blocks[i].op !== "equal";
@@ -121,11 +143,11 @@ function DiffClauseView({ c, sideBySide }: { c: DiffClause; sideBySide: boolean 
         </div>
       ))}
       {hidden > 0 && (
-        <button className="link more" onClick={() => setShowAll(true)}>… 변경 없는 문단 {hidden}개 펼치기</button>
+        <button className="link more" onClick={() => onShowAll(c.key)}>… 변경 없는 문단 {hidden}개 펼치기</button>
       )}
     </section>
   );
-}
+});
 
 function MovedOut({ b }: { b: DiffBlock }) {
   const [open, setOpen] = useState(false);
