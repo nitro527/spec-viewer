@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import Iterator
 
-from . import changehistory, history
+from . import changehistory, history, secret
 from .diff import render_diff
 from .parse_docx import ParsedSpec, content_hash
 from .versions import Version
@@ -619,11 +619,25 @@ class Library:
 
     def get_setting(self, key: str, default: str | None = None) -> str | None:
         r = self.db.execute("SELECT value FROM setting WHERE key=?", (key,)).fetchone()
-        return r["value"] if r else default
+        if not r:
+            return default
+        return secret.unprotect(r["value"]) if key.endswith("api_key") else r["value"]
 
     def set_setting(self, key: str, value: str) -> None:
+        if key.endswith("api_key"):  # API keys are encrypted for the Windows user (secret.py)
+            value = secret.protect(value)
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO setting VALUES (?,?)", (key, value))
+
+    def protect_secrets(self) -> int:
+        """Encrypt API keys saved in plain text by earlier versions."""
+        if not secret.available():
+            return 0
+        rows = self.db.execute("SELECT key, value FROM setting WHERE key LIKE '%api_key'").fetchall()
+        todo = [(r["key"], r["value"]) for r in rows if r["value"] and not r["value"].startswith(secret.PREFIX)]
+        for k, v in todo:
+            self.set_setting(k, v)
+        return len(todo)
 
     def notes(self, spec: str) -> list[dict]:
         return [dict(r) for r in self.db.execute(

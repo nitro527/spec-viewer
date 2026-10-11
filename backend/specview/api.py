@@ -142,6 +142,10 @@ def _keep_awake():
 def create_app(home: Path | None = None, static_dir: Path | None = None) -> FastAPI:
     home = Path(home or default_home())
     lib = Library(home / "library.sqlite")
+    try:
+        lib.protect_secrets()
+    except Exception:  # never keep the app from starting over this
+        pass
     lock = threading.Lock()
     jobs: dict[str, dict] = {}
     jobs_lock = threading.Lock()
