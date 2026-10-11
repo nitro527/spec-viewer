@@ -71,6 +71,16 @@ class FetchRequest(BaseModel):
 FULL_RETRY_WAIT = 60  # seconds before the n-th retry waits n times this, when the LLM server fails every request
 
 
+def _short_error(e: Exception) -> str:
+    """'Read timed out' instead of the whole HTTPSConnectionPool(host=..., port=443): ... chain."""
+    text = str(e)
+    for key in ("Read timed out", "Connection reset", "Max retries exceeded", "Name or service not known",
+                "timed out", "404", "403", "500", "502", "503"):
+        if key in text:
+            return key
+    return text[:80]
+
+
 def _full_counts(c: dict) -> str:
     out = f"문단 요약 {c['intents']}개 · CR 분석 {c['cr_analyses']}개 · WI 요약 {c['wi_summaries']}개"
     return out + (f" · 실패 {c['failed']}개 (다음 실행 때 다시 시도)" if c["failed"] else "")
@@ -574,9 +584,13 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         return next((r["title"] for r in rows if r["number"] == spec), None)
 
     def _run_fetch(job_id: str, req: FetchRequest):
+        import requests
+
         job = jobs[job_id]
         skipped = []  # .doc-only versions with no converter on this PC
         drafts_only = []  # specs with no approved (3.x and later) version yet
+        failed = []  # versions (or whole specs) 3gpp.org did not deliver even after retries
+        have_count = 0
         try:
             for spec in req.specs:
                 if req.crs_only:
@@ -586,14 +600,24 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                     lib.fetch_cr_details(spec, cache_dir=home / "cache", progress=prog, refetch_missing=True, lock=lock)
                     continue
                 job["message"] = f"{spec}: listing versions"
-                remote_versions = download.select(download.list_remote(spec),
-                                                  set(req.releases) if req.releases else None,
-                                                  req.latest_per_release)
+                try:
+                    remote_versions = download.select(download.list_remote(spec),
+                                                      set(req.releases) if req.releases else None,
+                                                      req.latest_per_release)
+                except requests.RequestException as e:  # one spec's archive page: the others can still come
+                    failed.append(f"{spec} (버전 목록: {_short_error(e)})")
+                    continue
                 if not remote_versions:
                     drafts_only.append(spec)
                     continue
+                with lock:
+                    have = {v["version"] for v in lib.versions(spec)}
                 job["total"] += len(remote_versions)
                 for rv in remote_versions:
+                    if str(rv.version) in have:  # already in the library: an interrupted download goes on from here
+                        have_count += 1
+                        job["done"] += 1
+                        continue
                     job["message"] = f"{spec} v{rv.version}: downloading"
                     try:
                         path = download.fetch(rv, home / "cache")
@@ -601,11 +625,18 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                         skipped.append(f"{spec} v{rv.version}")
                         job["done"] += 1
                         continue
+                    except requests.RequestException as e:  # 3gpp.org timed out even after retries: next version
+                        failed.append(f"{spec} v{rv.version} ({_short_error(e)})")
+                        job["done"] += 1
+                        continue
                     job["message"] = f"{spec} v{rv.version}: converting"
                     parsed = parse_docx(path)
                     with lock:
                         lib.add_version(spec, rv.version, parsed, source=rv.url, recompute=False)
                     job["done"] += 1
+                with lock:
+                    if not lib.versions(spec):
+                        continue
                 title = _official_title(spec)  # cover pages of recent versions often defeat title detection
                 if title:
                     with lock:
@@ -616,9 +647,17 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 if req.with_crs:
                     def prog(i, n, c):
                         job["message"] = f"{spec}: CR 표지 {i}/{n} ({c['tdoc']})"
-                    lib.fetch_cr_details(spec, cache_dir=home / "cache", progress=prog, lock=lock)
+                    try:
+                        lib.fetch_cr_details(spec, cache_dir=home / "cache", progress=prog, lock=lock)
+                    except requests.RequestException as e:
+                        failed.append(f"{spec} CR 표지 ({_short_error(e)})")
             job["state"], job["message"] = "done", "finished"
             notes = []
+            if have_count:
+                notes.append(f"이미 받은 {have_count}개 버전은 건너뜀")
+            if failed:
+                notes.append(f"받지 못함 {len(failed)}개: {', '.join(failed[:8])}{' …' if len(failed) > 8 else ''}"
+                             " (3gpp.org 응답 없음 — 다시 다운로드하면 받은 것은 건너뛰고 이것만 다시 받습니다)")
             if skipped:
                 notes.append(f"건너뜀: {', '.join(skipped)} (옛 .doc 형식, LibreOffice 또는 Word 가 있어야 변환됨)")
             if drafts_only:
