@@ -25,7 +25,11 @@ export function ParagraphHistory({ spec, version, clauseKey, rawHash, colors }: 
 
   useEffect(() => {
     setError(null);
-    api.lineage(spec, version, clauseKey, rawHash).then(setSteps, (e) => { setSteps([]); setError(String(e)); });
+    let live = true;
+    api.lineage(spec, version, clauseKey, rawHash).then((x) => live && setSteps(x), (e) => {
+      if (live) { setSteps([]); setError(String(e)); }
+    });
+    return () => { live = false; };
   }, [spec, version, clauseKey, rawHash, reload]);
 
   if (steps === null) return <p className="muted small">변화 이력 불러오는 중…</p>;

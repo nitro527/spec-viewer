@@ -183,6 +183,7 @@ class Library:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
+        self._compared: dict[tuple, dict] = {}  # last few compare results; a big conformance spec takes seconds
 
     def close(self) -> None:
         self.db.close()
@@ -191,6 +192,7 @@ class Library:
 
     def add_version(self, spec: str, version: Version, parsed: ParsedSpec, source: str = "",
                     recompute: bool = True) -> int:
+        self._compared.clear()
         db = self.db
         with db:
             db.execute("INSERT INTO spec(number, title) VALUES (?, ?) ON CONFLICT(number) DO UPDATE SET "
@@ -232,6 +234,7 @@ class Library:
                 for r in self.db.execute("SELECT * FROM clause_ver WHERE version_id=? ORDER BY ord", (vid,))]
 
     def recompute_history(self, spec: str) -> None:
+        self._compared.clear()
         vers = self.versions(spec)
         if not vers:
             return
@@ -755,7 +758,16 @@ class Library:
             yield dict(c), blocks
 
     def compare(self, spec: str, old: str, new: str, changed_only: bool = True) -> dict:
-        """Clause-by-clause diff between two arbitrary versions."""
+        """Clause-by-clause diff between two arbitrary versions (the CRs are read fresh, the diff is cached)."""
+        k = (spec, self.version_id(spec, old), self.version_id(spec, new), changed_only)  # a re-import is a new id
+        if k not in self._compared:
+            if len(self._compared) >= 4:
+                self._compared.pop(next(iter(self._compared)))
+            self._compared[k] = self._compare(spec, old, new, changed_only)
+        return self._compared[k] | {
+            "crs": [r for r in self.crs(spec) if Version.parse(old) < Version.parse(r["new_version"]) <= Version.parse(new)]}
+
+    def _compare(self, spec: str, old: str, new: str, changed_only: bool) -> dict:
         from .diff import align
 
         a = {c["key"]: (c, bl) for c, bl in self._raw(self.version_id(spec, old))}
@@ -797,5 +809,4 @@ class Library:
                                 "diff": f"<del>{x['html']}</del>"} for x in bl]}
                    for k, (c, bl) in a.items() if k not in seen]
         _mark_moves(out + removed)
-        return {"spec": spec, "old": old, "new": new, "clauses": out, "removed": removed,
-                "crs": [r for r in self.crs(spec) if Version.parse(old) < Version.parse(r["new_version"]) <= Version.parse(new)]}
+        return {"spec": spec, "old": old, "new": new, "clauses": out, "removed": removed}

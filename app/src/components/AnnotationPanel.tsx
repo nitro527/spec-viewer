@@ -18,7 +18,9 @@ export function AnnotationPanel({ spec, version, clauseKey, rawHash }: {
   const analyses = useCRAnalyses(spec);
 
   useEffect(() => {
-    api.annotations(spec, version, clauseKey).then(setItems, () => setItems([]));
+    let live = true;  // a reply for the clause selected before must not land on this one
+    api.annotations(spec, version, clauseKey).then((x) => live && setItems(x), () => live && setItems([]));
+    return () => { live = false; };
   }, [spec, version, clauseKey, reload]);
   useEffect(() => {
     api.llm().then((s) => setLlmReady(s.has_key || s.provider !== "gemini"), () => setLlmReady(false));

@@ -14,8 +14,12 @@ export function FindBar({ spec, version, onGo, onClose }: {
   useEffect(() => input.current?.focus(), []);
   useEffect(() => {
     if (q.trim().length < 2) return setHits(null);
-    const t = setTimeout(() => api.search(spec, version, q).then((h) => { setHits(h); setIdx(0); jumped.current = false; }), 200);
-    return () => clearTimeout(t);
+    let live = true;  // a slow reply for an earlier query must not replace the hits of this one
+    const t = setTimeout(() => api.search(spec, version, q).then((h) => {
+      if (!live) return;
+      setHits(h); setIdx(0); jumped.current = false;
+    }), 200);
+    return () => { live = false; clearTimeout(t); };
   }, [q, spec, version]);
 
   const go = (i: number) => {
