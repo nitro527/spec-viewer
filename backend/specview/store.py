@@ -651,6 +651,8 @@ class Library:
             for n in self.notes(spec):
                 t = toc.get(n["clause_key"])
                 if t is None:
+                    if n["version"] == latest:  # already seen at the latest version ("확인함")
+                        continue
                     status = "removed"
                 else:
                     try:

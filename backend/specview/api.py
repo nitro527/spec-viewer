@@ -156,12 +156,19 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     jobs: dict[str, dict] = {}
     jobs_lock = threading.Lock()
 
+    def _jobs() -> list[dict]:
+        with jobs_lock:
+            return list(jobs.values())
+
     def _put(job: dict) -> None:
         """Register a job; AI jobs one at a time (the check above is repeated here so two clicks can't both pass)."""
         with jobs_lock:
             if job.get("kind") == "intent" and any(j.get("kind") == "intent" and j["state"] == "running"
                                                    for j in jobs.values()):
                 raise HTTPException(409, "AI 작업이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
+            if job.get("chat_id") and any(j.get("chat_id") == job["chat_id"] and j["state"] == "running"
+                                          for j in jobs.values()):
+                raise HTTPException(409, "이 대화의 답을 아직 만드는 중입니다")
             finished = [k for k, j in jobs.items() if j["state"] != "running"]
             for k in finished[:-50]:  # keep the last few finished jobs for the UI, not every one since start
                 del jobs[k]
@@ -610,7 +617,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         model = _llm()
         if not model.api_key and "googleapis.com" in model.base_url:
             raise HTTPException(400, "Gemini API 키를 먼저 저장하세요")
-        if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
+        if any(j.get("kind") == "intent" and j["state"] == "running" for j in _jobs()):
             raise HTTPException(409, "AI 요약이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
         job_id = uuid.uuid4().hex[:8]
         _put({"id": job_id, "state": "running", "done": 0, "total": 0, "message": "AI 요약 준비",
@@ -649,7 +656,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         model = _llm()
         if not model.api_key and "googleapis.com" in model.base_url:
             raise HTTPException(400, "Gemini API 키를 먼저 저장하세요")
-        if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
+        if any(j.get("kind") == "intent" and j["state"] == "running" for j in _jobs()):
             raise HTTPException(409, "AI 작업이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
         job_id = uuid.uuid4().hex[:8]
         _put({"id": job_id, "state": "running", "done": 0, "total": 1, "message": f"CR{req.cr} 분석 준비",
@@ -687,7 +694,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         model = _llm()
         if not model.api_key and "googleapis.com" in model.base_url:
             raise HTTPException(400, "Gemini API 키를 먼저 저장하세요")
-        if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
+        if any(j.get("kind") == "intent" and j["state"] == "running" for j in _jobs()):
             raise HTTPException(409, "AI 작업이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
         job_id = uuid.uuid4().hex[:8]
         _put({"id": job_id, "state": "running", "done": 0, "total": 1,
@@ -917,13 +924,24 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     @app.get("/api/jobs")
     def list_jobs():
-        return [{k: v for k, v in j.items() if k != "cancel"} for j in jobs.values()]
+        with jobs_lock:  # workers add keys to their job while it runs: copy while nothing else changes the dicts
+            return [_public_job(j) for j in list(jobs.values())]
+
+    def _public_job(j: dict) -> dict:
+        for _ in range(5):
+            try:
+                return {k: v for k, v in dict(j).items() if k != "cancel"}
+            except RuntimeError:  # a worker thread added a key mid-copy: try again
+                continue
+        return {k: v for k, v in dict(j).items() if k != "cancel"}
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
-        if job_id not in jobs:
+        with jobs_lock:
+            j = jobs.get(job_id)
+        if j is None:
             raise HTTPException(404, "no such job")
-        return {k: v for k, v in jobs[job_id].items() if k != "cancel"}
+        return _public_job(j)
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel_job(job_id: str):
@@ -960,7 +978,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         model = _llm()
         if not model.api_key and "googleapis.com" in model.base_url:
             raise HTTPException(400, "Gemini API 키를 먼저 저장하세요")
-        if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
+        if any(j.get("kind") == "intent" and j["state"] == "running" for j in _jobs()):
             raise HTTPException(409, "AI 작업이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
         job_id = uuid.uuid4().hex[:8]
         _put({"id": job_id, "state": "running", "done": 0, "total": 1, "kind": "intent", "specs": [req.spec],
@@ -1020,14 +1038,16 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                     raise HTTPException(404, "대화를 찾을 수 없습니다 (지워졌을 수 있음)")
             else:
                 conv = {"id": uuid.uuid4().hex[:10], "title": req.question.strip()[:60], "messages": []}
-            if any(j.get("chat_id") == conv["id"] and j["state"] == "running" for j in jobs.values()):
-                raise HTTPException(409, "이 대화의 답을 아직 만드는 중입니다")
-            conv["messages"].append({"role": "user", "content": req.question.strip(), "context": req.context,
-                                     "time": now})
-            lib.save_chat(conv["id"], conv["title"], conv["messages"], now)
-        job_id = uuid.uuid4().hex[:8]
-        _put({"id": job_id, "state": "running", "done": 0, "total": 0, "message": "질문 이해하는 중",
-                        "specs": [], "kind": "chat", "chat_id": conv["id"], "steps": []})
+            job_id = uuid.uuid4().hex[:8]
+            _put({"id": job_id, "state": "running", "done": 0, "total": 0, "message": "질문 이해하는 중",
+                  "specs": [], "kind": "chat", "chat_id": conv["id"], "steps": []})  # 409 if this chat is busy
+            try:
+                conv["messages"].append({"role": "user", "content": req.question.strip(), "context": req.context,
+                                         "time": now})
+                lib.save_chat(conv["id"], conv["title"], conv["messages"], now)
+            except Exception:
+                jobs[job_id]["state"] = "error"
+                raise
         threading.Thread(target=_run_chat, args=(job_id, conv, req, model), daemon=True).start()
         return {"job": jobs[job_id], "chat_id": conv["id"]}
 
@@ -1048,7 +1068,10 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
         try:
             history, known = [], {}
-            for q, a in zip(conv["messages"][:-1:2], conv["messages"][1:-1:2]):  # (question, answer) turns
+            msgs = conv["messages"][:-1]  # the last one is the question being answered
+            for q, a in zip(msgs, msgs[1:]):  # a question and the answer right after it; a question left
+                if q.get("role") != "user" or a.get("role") != "assistant":  # unanswered (app closed) is skipped
+                    continue
                 if a.get("error") or not a.get("content"):  # a failed turn is not something the model said
                     continue
                 history += [{"role": "user", "content": q["content"]}, {"role": "assistant", "content": a["content"]}]
@@ -1058,26 +1081,31 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                                  on_partial=partial)
             reply = {"role": "assistant", "content": res["answer"] or "(빈 답변)", "sources": res["sources"],
                      "steps": res["steps"], "mode": res["mode"], "model": res.get("model") or model.name}
-            job["state"], job["message"] = "done", "답변 완료"
+            final = ("done", "답변 완료")
         except chatmod.Stopped:  # kept in the conversation, left out of the next question's history like errors
             reply = {"role": "assistant", "content": "(답변 중지됨)", "error": True, "stopped": True,
                      "steps": job["steps"]}
-            job["state"], job["message"] = "done", "중지됨"
+            final = ("done", "중지됨")
         except intent.LLMError as e:
             reply = {"role": "assistant", "content": f"AI 요청 실패: {e}", "error": True, "steps": job["steps"]}
             log.warning("chat %s: %s", conv["id"], e, exc_info=not isinstance(e, intent.LLMError))
-            job["state"], job["message"] = "error", str(e)
+            final = ("error", str(e))
         except Exception as e:
             reply = {"role": "assistant", "content": f"답변 중 오류: {e}", "error": True, "steps": job["steps"]}
             log.warning("chat %s: %s", conv["id"], e, exc_info=not isinstance(e, intent.LLMError))
-            job["state"], job["message"] = "error", str(e)
+            final = ("error", str(e))
         finally:
             reader.close()
         reply["time"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-        with lock:
-            cur = lib.chat(conv["id"])
-            cur["messages"].append(reply)
-            lib.save_chat(conv["id"], cur["title"], cur["messages"], reply["time"])
+        try:
+            with lock:  # saved before the job reads as finished: the window loads the chat right then
+                cur = lib.chat(conv["id"])
+                cur["messages"].append(reply)
+                lib.save_chat(conv["id"], cur["title"], cur["messages"], reply["time"])
+        except KeyError:
+            pass  # the conversation was deleted while it was being answered
+        finally:
+            job["state"], job["message"] = final
 
     # ---- full AI analysis (left running overnight) ----
 
@@ -1089,7 +1117,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         model = _llm()
         if not model.api_key and "googleapis.com" in model.base_url:
             raise HTTPException(400, "Gemini API 키를 먼저 저장하세요")
-        if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
+        if any(j.get("kind") == "intent" and j["state"] == "running" for j in _jobs()):
             raise HTTPException(409, "AI 작업이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
         with lock:
             specs = req.specs or [s["number"] for s in lib.specs()]

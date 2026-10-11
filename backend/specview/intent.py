@@ -463,8 +463,8 @@ class OpenAICompatIntentModel:
                     chunk = json.loads(payload)
                 except ValueError:
                     continue
-                if chunk.get("error"):
-                    raise LLMError(f"LLM 오류: {chunk['error'].get('message', chunk['error'])}")
+                if err := chunk.get("error"):
+                    raise LLMError(f"LLM 오류: {err.get('message', err) if isinstance(err, dict) else err}")
                 model = chunk.get("model") or model
                 delta = ((chunk.get("choices") or [{}])[0].get("delta")) or {}
                 if delta.get("content"):
@@ -474,6 +474,9 @@ class OpenAICompatIntentModel:
                     cur = calls.setdefault(tc.get("index", len(calls)),
                                            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
                     cur["id"] = tc.get("id") or cur["id"]
+                    # anything else rides along unchanged: Gemini 3 sends extra_content.google.thought_signature
+                    # and rejects the next request (as "tools unsupported") if it is not sent back
+                    cur.update({k: v for k, v in tc.items() if k not in ("index", "id", "function") and v is not None})
                     f = tc.get("function") or {}
                     cur["function"]["name"] += f.get("name") or ""
                     cur["function"]["arguments"] += f.get("arguments") or ""

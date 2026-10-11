@@ -247,3 +247,16 @@ def test_server_without_streaming_answers_in_one_piece():
     assert seen == ["한 번에"] and [b.get("stream") for b in bodies] == [True, None]
     m.complete([{"role": "user", "content": "q"}], on_text=seen.append)
     assert bodies[-1].get("stream") is None  # remembered
+
+
+def test_streamed_tool_calls_keep_provider_fields_and_string_errors_are_llm_errors():
+    m = intent.OpenAICompatIntentModel("http://llm/v1", "gemini")
+    sig = {"google": {"thought_signature": "abc"}}
+    m.session.post = lambda url, **kw: _Resp(lines=_sse(
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "type": "function", "extra_content": sig,
+                                                "function": {"name": "search", "arguments": "{}"}}]}}]}))
+    msg = m.complete([{"role": "user", "content": "q"}], tools=[{}], on_text=lambda t: None)
+    assert msg["tool_calls"][0]["extra_content"] == sig  # Gemini 3 needs it back with the tool result
+    m.session.post = lambda url, **kw: _Resp(lines=["data: " + json.dumps({"error": "overloaded"})])
+    with pytest.raises(intent.LLMError, match="overloaded"):
+        m.complete([{"role": "user", "content": "q"}], on_text=lambda t: None)

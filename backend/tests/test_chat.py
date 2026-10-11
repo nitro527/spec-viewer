@@ -89,6 +89,14 @@ def test_chat_api_keeps_the_conversation(library, tmp_path, monkeypatch):
     assert [m["role"] for m in conv["messages"]] == ["user", "assistant", "user", "assistant"]
     assert conv["title"] == "Q1" and conv["messages"][0]["context"]["clause"] == "4.3.1"
     assert [x["id"] for x in c.get("/api/chats").json()] == [cid]
+    # a question left without an answer (the app closed meanwhile) does not shift the turns after it
+    from specview.store import Library
+    lib = Library(tmp_path / "library.sqlite")
+    msgs = c.get(f"/api/chats/{cid}").json()["messages"] + [{"role": "user", "content": "lost"}]
+    lib.save_chat(cid, "Q1", msgs, "2026-01-01T00:00:00")
+    ask({"question": "Q3", "chat_id": cid})
+    ask({"question": "Q4", "chat_id": cid})  # the old pairing sent ("lost", "Q3") as a turn here
+    assert seen[-1][1] == ["Q1", "A:Q1", "Q2", "A:Q2", "Q3", "A:Q3"]
     c.delete(f"/api/chats/{cid}")
     assert c.get("/api/chats").json() == []
 

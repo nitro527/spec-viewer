@@ -69,3 +69,12 @@ def test_citation_patterns():
     assert [m.groups() for m in tscl.finditer(t)] == [("38.213", "10.1")]
     assert "6.3.3.2" not in [m.group(1) for m in same.finditer(t)] and "7.4.1.1.2" in [m.group(1) for m in same.finditer(t)]
     assert {m.group(1) for m in specref.finditer(t)} == {"38.211", "38.212", "38.213"}
+
+
+@needs_pandoc
+def test_a_watched_clause_that_is_gone_can_be_dismissed(library, tmp_path, monkeypatch):
+    c, _ = _client(library, tmp_path, monkeypatch, [])
+    vers = [v["version"] for v in c.get("/api/specs/99.211/versions").json()]
+    c.put("/api/specs/99.211/notes/no-such-clause", json={"text": "renumbered?", "version": vers[0]})
+    assert [w["status"] for w in c.get("/api/watch").json()] == ["removed"]
+    assert c.post("/api/watch/seen", json={"spec": "99.211", "clause_key": "no-such-clause"}).json() == []
