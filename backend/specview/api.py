@@ -85,6 +85,16 @@ class FetchRequest(BaseModel):
 FULL_RETRY_WAIT = 60  # seconds before the n-th retry waits n times this, when the LLM server fails every request
 
 
+def _convert_workers() -> int:
+    """How many versions are downloaded and converted at once: SPECVIEW_CONVERT_WORKERS, else half the CPU cores
+    up to 4 (each pandoc on a big spec can take a gigabyte or more of memory; 4 at once is ~3x faster than one)."""
+    default = max(1, min(4, (os.cpu_count() or 2) // 2))
+    try:
+        return max(1, min(8, int(os.environ.get("SPECVIEW_CONVERT_WORKERS", default))))
+    except ValueError:
+        return default
+
+
 def _short_error(e: Exception) -> str:
     """'Read timed out' instead of the whole HTTPSConnectionPool(host=..., port=443): ... chain."""
     text = str(e)
@@ -597,6 +607,39 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             return None
         return next((r["title"] for r in rows if r["number"] == spec), None)
 
+    def _fetch_and_parse(todo: list, spec: str, job: dict):
+        """Download and convert versions a few at a time (pandoc takes ~10 s per version and runs in its own
+        process); yields (version, parsed, error) as each finishes. Only a small window is in flight, since a
+        parsed version holds the whole document."""
+        from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+        def work(rv):
+            return parse_docx(download.fetch(rv, home / "cache"))
+
+        workers = _convert_workers()
+        rest = iter(todo)
+        with ThreadPoolExecutor(workers) as ex:
+            pending = {}
+
+            def submit_next():
+                rv = next(rest, None)
+                if rv is not None:
+                    pending[ex.submit(work, rv)] = rv
+
+            for _ in range(workers):
+                submit_next()
+            while pending:
+                job["message"] = (f"{spec}: 받는 중·변환 중 v{', v'.join(str(rv.version) for rv in pending.values())}"
+                                  + (f" (동시 {workers}개)" if workers > 1 else ""))
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for f in done:
+                    rv = pending.pop(f)
+                    try:
+                        yield rv, f.result(), None
+                    except Exception as e:  # noqa: BLE001 - reported per version, the others go on
+                        yield rv, None, e
+                    submit_next()
+
     def _run_fetch(job_id: str, req: FetchRequest):
         import requests
 
@@ -627,26 +670,17 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 with lock:
                     have = {v["version"] for v in lib.versions(spec)}
                 job["total"] += len(remote_versions)
-                for rv in remote_versions:
-                    if str(rv.version) in have:  # already in the library: an interrupted download goes on from here
-                        have_count += 1
-                        job["done"] += 1
-                        continue
-                    job["message"] = f"{spec} v{rv.version}: downloading"
-                    try:
-                        path = download.fetch(rv, home / "cache")
-                    except download.LegacyDocError:
+                todo = [rv for rv in remote_versions if str(rv.version) not in have]  # an interrupted download
+                have_count += len(remote_versions) - len(todo)                       # goes on from here
+                job["done"] += len(remote_versions) - len(todo)
+                for rv, parsed, err in _fetch_and_parse(todo, spec, job):
+                    if isinstance(err, download.LegacyDocError):
                         skipped.append(f"{spec} v{rv.version}")
-                        job["done"] += 1
-                        continue
-                    except requests.RequestException as e:  # 3gpp.org timed out even after retries: next version
-                        failed.append(f"{spec} v{rv.version} ({_short_error(e)})")
-                        job["done"] += 1
-                        continue
-                    job["message"] = f"{spec} v{rv.version}: converting"
-                    parsed = parse_docx(path)
-                    with lock:
-                        lib.add_version(spec, rv.version, parsed, source=rv.url, recompute=False)
+                    elif err is not None:  # 3gpp.org timed out even after retries, or the conversion failed
+                        failed.append(f"{spec} v{rv.version} ({_short_error(err)})")
+                    else:
+                        with lock:
+                            lib.add_version(spec, rv.version, parsed, source=rv.url, recompute=False)
                     job["done"] += 1
                 with lock:
                     if not lib.versions(spec):

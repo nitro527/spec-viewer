@@ -175,6 +175,9 @@ try {
 """
 
 
+_WORD_LOCK = __import__("threading").Lock()
+
+
 def _convert_doc(src: Path) -> Path:
     """.doc -> .docx with LibreOffice, else Microsoft Word; raises LegacyDocError if neither works."""
     dst = src.with_suffix(".docx")
@@ -193,9 +196,10 @@ def _convert_doc(src: Path) -> Path:
     if os.name == "nt":
         env = {**os.environ, "SPECVIEW_DOC_SRC": str(src.resolve()), "SPECVIEW_DOC_DST": str(dst.resolve())}
         try:
-            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _WORD_PS],
-                           capture_output=True, check=True, timeout=600, env=env,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            with _WORD_LOCK:  # versions convert in parallel; Word automation does not like that
+                subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _WORD_PS],
+                               capture_output=True, check=True, timeout=600, env=env,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except (OSError, subprocess.SubprocessError):
             try:
                 dst.unlink(missing_ok=True)  # a half-written file would be picked up as cached
