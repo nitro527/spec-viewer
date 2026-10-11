@@ -59,20 +59,30 @@ CR_SYSTEM = (
 )
 
 
+def _cap(text: str, n: int) -> str:
+    """One prompt section at most ``n`` characters: a huge CR or a long agreement list must not push the
+    request past the model's context (the server then answers 400 and the whole item fails)."""
+    return text if len(text) <= n else text[:n] + f"\n… ({len(text) - n} more characters omitted)"
+
+
+def _js(x) -> str:
+    return json.dumps(x, ensure_ascii=False, indent=1)
+
+
 def cr_prompt(ev: dict) -> str:
     parts = [f"Spec {ev['spec']} CR{ev['cr']} ({ev.get('tdoc', '')}).",
-             f"<cover>\n{json.dumps(ev['cover'], ensure_ascii=False, indent=1)}\n</cover>"]
+             f"<cover>\n{_cap(_js(ev['cover']), 12000)}\n</cover>"]
     if ev.get("changes"):
-        parts.append("<cr_changes>\n" + "\n".join(
-            f"[{c['clause']}]\n" + "\n".join(c["lines"]) for c in ev["changes"]) + "\n</cr_changes>")
+        parts.append("<cr_changes>\n" + _cap("\n".join(
+            f"[{c['clause']}]\n" + "\n".join(c["lines"]) for c in ev["changes"]), 30000) + "\n</cr_changes>")
     if ev.get("drafts"):
-        parts.append(f"<draft_crs>\n{json.dumps(ev['drafts'], ensure_ascii=False, indent=1)}\n</draft_crs>")
+        parts.append(f"<draft_crs>\n{_cap(_js(ev['drafts']), 10000)}\n</draft_crs>")
     if ev.get("agreements"):
         ag = [{k: a.get(k) for k in ("meeting", "agenda", "kind", "text")} for a in ev["agreements"]]
-        parts.append(f"<wg_agreements>\n{json.dumps(ag, ensure_ascii=False, indent=1)}\n</wg_agreements>")
+        parts.append(f"<wg_agreements>\n{_cap(_js(ag), 10000)}\n</wg_agreements>")
     if ev.get("fl_summaries"):
         fl = [{k: f.get(k) for k in ("tdoc", "title", "meeting", "excerpt")} for f in ev["fl_summaries"]]
-        parts.append(f"<feature_lead_summaries>\n{json.dumps(fl, ensure_ascii=False, indent=1)}\n"
+        parts.append(f"<feature_lead_summaries>\n{_cap(_js(fl), 8000)}\n"
                      "</feature_lead_summaries>")
     return "\n\n".join(parts)
 
@@ -204,23 +214,23 @@ def user_prompt(ch: dict) -> str:
               for c in ch.get("draft_covers", [])]
     parts = [f"Spec clause {ch['clause']} ({ch['title']}), change type: {ch['change']}."]
     if ch.get("changes"):
-        parts.append("<changes>\n" + "\n".join(ch["changes"]) + "\n</changes>")
-    parts.append(f"<old_text>\n{ch.get('old_text') or '(none - newly added)'}\n</old_text>")
-    parts.append(f"<new_text>\n{ch['text']}\n</new_text>")
+        parts.append("<changes>\n" + _cap("\n".join(ch["changes"]), 20000) + "\n</changes>")
+    parts.append(f"<old_text>\n{_cap(ch.get('old_text') or '(none - newly added)', 15000)}\n</old_text>")
+    parts.append(f"<new_text>\n{_cap(ch['text'], 15000)}\n</new_text>")
     if drafts:
-        parts.append(f"<draft_crs>\n{json.dumps(drafts, ensure_ascii=False, indent=1)}\n</draft_crs>")
+        parts.append(f"<draft_crs>\n{_cap(_js(drafts), 10000)}\n</draft_crs>")
     if ch.get("agreements"):
         ag = [{k: a.get(k) for k in ("meeting", "agenda", "kind", "text")} for a in ch["agreements"]]
-        parts.append(f"<wg_agreements>\n{json.dumps(ag, ensure_ascii=False, indent=1)}\n</wg_agreements>")
+        parts.append(f"<wg_agreements>\n{_cap(_js(ag), 10000)}\n</wg_agreements>")
     if ch.get("fl_summaries"):
         fl = [{k: f.get(k) for k in ("tdoc", "title", "meeting", "excerpt")} for f in ch["fl_summaries"]]
-        parts.append(f"<feature_lead_summaries>\n{json.dumps(fl, ensure_ascii=False, indent=1)}\n</feature_lead_summaries>")
+        parts.append(f"<feature_lead_summaries>\n{_cap(_js(fl), 8000)}\n</feature_lead_summaries>")
     if ch.get("cr_analyses"):
         ca = [{k: a.get(k) for k in ("cr", "summary", "background", "changes", "decision")} for a in ch["cr_analyses"]]
-        parts.append(f"<cr_analysis>\n{json.dumps(ca, ensure_ascii=False, indent=1)}\n</cr_analysis>")
+        parts.append(f"<cr_analysis>\n{_cap(_js(ca), 10000)}\n</cr_analysis>")
     if ch.get("relevant_lines"):
-        parts.append("<relevant_cr_lines>\n" + "\n".join(ch["relevant_lines"]) + "\n</relevant_cr_lines>")
-    parts.append(f"<cr_cover_pages>\n{json.dumps(covers, ensure_ascii=False, indent=1)}\n</cr_cover_pages>")
+        parts.append("<relevant_cr_lines>\n" + _cap("\n".join(ch["relevant_lines"]), 10000) + "\n</relevant_cr_lines>")
+    parts.append(f"<cr_cover_pages>\n{_cap(_js(covers), 12000)}\n</cr_cover_pages>")
     return "\n\n".join(parts)
 
 
