@@ -104,7 +104,7 @@ export interface Note { clause_key: string; bookmark: number; text: string; vers
 
 export interface PhraseClause { key: string; number: string; title: string; ord?: number; block?: number; snippet?: string; count?: number }
 export interface PhraseHistory {
-  query: string; first: string | null; latest_clauses: number;
+  query: string; first: string | null; latest_clauses: number; truncated: boolean;
   versions: { version: string; paragraphs: number; clauses: number }[];
   events: { version: string; added: PhraseClause[]; removed: PhraseClause[]; more: number }[];
 }

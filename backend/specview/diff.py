@@ -65,15 +65,22 @@ def _patience(a: list[str], b: list[str]) -> list[tuple[int, int, int]]:
     from collections import Counter
 
     blocks: list[tuple[int, int, int]] = []
-
-    def gap(alo: int, ahi: int, blo: int, bhi: int) -> None:
+    # work items in document order, last first: ("gap", alo, ahi, blo, bhi) or ("match", i, j, size); a stack
+    # instead of recursion, since anchors can nest deeper than Python's recursion limit
+    todo: list[tuple] = [("gap", 0, len(a), 0, len(b))]
+    while todo:
+        kind, alo, ahi, blo, bhi = todo.pop()
+        if kind == "match":
+            blocks.append((alo, ahi, blo))
+            continue
         while alo < ahi and blo < bhi and a[alo] == b[blo]:
             blocks.append((alo, blo, 1))
             alo, blo = alo + 1, blo + 1
-        tail = []
-        while ahi > alo and bhi > blo and a[ahi - 1] == b[bhi - 1]:
-            ahi, bhi = ahi - 1, bhi - 1
-            tail.append((ahi, bhi, 1))
+        tail = 0
+        while ahi - tail > alo and bhi - tail > blo and a[ahi - tail - 1] == b[bhi - tail - 1]:
+            tail += 1
+        later: list[tuple] = []  # in document order
+        ahi, bhi = ahi - tail, bhi - tail
         if alo < ahi and blo < bhi:
             ca, cb = Counter(a[alo:ahi]), Counter(b[blo:bhi])
             at = {b[j]: j for j in range(blo, bhi) if cb[b[j]] == 1 and ca[b[j]] == 1}
@@ -98,16 +105,16 @@ def _patience(a: list[str], b: list[str]) -> list[tuple[int, int, int]]:
                     n = prev[n]
                 i0, j0 = alo, blo
                 for i, j in reversed(chain):
-                    gap(i0, i, j0, j)
-                    blocks.append((i, j, 1))
+                    later += [("gap", i0, i, j0, j), ("match", i, j, 1, 0)]
                     i0, j0 = i + 1, j + 1
-                gap(i0, ahi, j0, bhi)
+                later.append(("gap", i0, ahi, j0, bhi))
             elif (ahi - alo) * (bhi - blo) <= 250_000:
                 sm = SequenceMatcher(None, a[alo:ahi], b[blo:bhi], autojunk=False)
-                blocks.extend((i + alo, j + blo, k) for i, j, k in sm.get_matching_blocks() if k)
-        blocks.extend(reversed(tail))
+                later += [("match", i + alo, j + blo, k, 0) for i, j, k in sm.get_matching_blocks() if k]
+        if tail:
+            later.append(("match", ahi, bhi, tail, 0))
+        todo.extend(reversed(later))
 
-    gap(0, len(a), 0, len(b))
     merged: list[tuple[int, int, int]] = []
     for i, j, k in blocks:
         if merged and merged[-1][0] + merged[-1][2] == i and merged[-1][1] + merged[-1][2] == j:
@@ -134,7 +141,8 @@ def _diff(ka: list[str], kb: list[str], a0: int, a1: int, b0: int, b1: int) -> l
         sm = SequenceMatcher(None, ka[a0:a1], kb[b0:b1], autojunk=(a1 - a0) + (b1 - b0) > 3000)
         return [(t, i1 + a0, i2 + a0, j1 + b0, j2 + b0) for t, i1, i2, j1, j2 in sm.get_opcodes()]
     ca, cb = _chunks(ka, a0, a1), _chunks(kb, b0, b1)
-    rows_a, rows_b = ["".join(ka[i:j]) for i, j in ca], ["".join(kb[i:j]) for i, j in cb]
+    # NUL between tokens: rows whose words split differently ("Rel 15" / "Rel15") must not look equal
+    rows_a, rows_b = ["\0".join(ka[i:j]) for i, j in ca], ["\0".join(kb[i:j]) for i, j in cb]
     out = []
     for t, i1, i2, j1, j2 in _block_opcodes(_patience(rows_a, rows_b), len(rows_a), len(rows_b)):
         sa = (ca[i1][0], ca[i2 - 1][1]) if i2 > i1 else (ca[i1][0] if i1 < len(ca) else a1,) * 2
@@ -158,6 +166,12 @@ def opcodes(a: Sequence[Token], b: Sequence[Token]):
     """
     ia = [i for i, t in enumerate(a) if t.kind != "ws"]
     ib = [i for i, t in enumerate(b) if t.kind != "ws"]
+    if not ia or not ib:  # one side is only whitespace (or empty): nothing to align
+        if not a and not b:
+            return []
+        if not ia and not ib and len(a) == len(b):
+            return [("equal", 0, len(a), 0, len(b))]
+        return [("replace" if a and b else "delete" if a else "insert", 0, len(a), 0, len(b))]
     ka, kb = [a[i].text for i in ia], [b[i].text for i in ib]
     lo, hi_a, hi_b = 0, len(ka), len(kb)
     while lo < hi_a and lo < hi_b and ka[lo] == kb[lo]:
@@ -185,7 +199,7 @@ def opcodes(a: Sequence[Token], b: Sequence[Token]):
 
     for t, k1, k2, l1, l2 in ops:
         a1, a2, b1, b2 = pos(ia, len(a), k1), pos(ia, len(a), k2), pos(ib, len(b), l1), pos(ib, len(b), l2)
-        if t != "equal":
+        if t != "equal" or k2 - k1 != l2 - l1:
             emit(a1, a2, b1, b2, False)
             continue
         i, j = a1, b1
@@ -220,8 +234,8 @@ def word_similarity(wa: Sequence[str], wb: Sequence[str], floor: float = 0.0) ->
     sm = SequenceMatcher(None, wa[lo:hi_a], wb[lo:hi_b], autojunk=False)
     if floor and 2 * (same + sm.quick_ratio() * (hi_a - lo + hi_b - lo) / 2) < floor * n:
         return 0.0
-    if (hi_a - lo) + (hi_b - lo) > 4000:  # long tables: the multiset bound is close enough and linear
-        return 2 * same / n + sm.quick_ratio() * (hi_a - lo + hi_b - lo) / n
+    if (hi_a - lo) + (hi_b - lo) > 4000:  # long tables: words matched in order, anchored on unique ones
+        return (2 * same + 2 * sum(k for _, _, k in _patience(list(wa[lo:hi_a]), list(wb[lo:hi_b])))) / n
     return (2 * same + 2 * sum(m.size for m in sm.get_matching_blocks())) / n
 
 

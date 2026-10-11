@@ -87,6 +87,7 @@ function PhraseTimeline({ h, colors, onOpenAt }: {
       <p className="small">
         처음 나온 버전 <b>v{h.first}</b> · 최신 v{latest.version} 에는 {h.latest_clauses
           ? `${latest.clauses}개 절, ${latest.paragraphs}개 문단` : "없음 (삭제됨)"}
+        {h.truncated && <span className="muted"> · 너무 흔한 문구라 일부만 셌습니다</span>}
       </p>
       <div className="phrase-bars" title="버전별로 이 문구가 있는 절 수">
         {h.versions.map((v) => (

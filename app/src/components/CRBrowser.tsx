@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, crKey, tdocUrl, type CR, type CRAnalysis, type TocEntry } from "../api";
 import type { VersionColor } from "../colors";
-import { announceAnalysesChanged, useCRAnalyses } from "./CRAnalysis";
+import { announceAnalysesChanged, useCRAnalyses, useLlmReady } from "./CRAnalysis";
 import { openCRDoc } from "./DocWindow";
 import { CAT } from "./Panels";
 
@@ -21,10 +21,7 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onFetchCrs, fetching
   const [wi, setWi] = useState("");
   const [only, setOnly] = useState<"" | "analysed" | "not">("");
   const [open, setOpen] = useState<string | null>(null);
-  const [llmReady, setLlmReady] = useState(false);
-  useEffect(() => {
-    api.llm().then((s) => setLlmReady(s.has_key || s.provider !== "gemini"), () => setLlmReady(false));
-  }, []);
+  const llmReady = useLlmReady();
 
   const rows = useMemo(() => [...crs].filter((c) => c.cr)
     .sort((a, b) => b.new_version.localeCompare(a.new_version, undefined, { numeric: true }) || b.cr.localeCompare(a.cr)), [crs]);
@@ -56,6 +53,7 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onFetchCrs, fetching
   // analyse many CRs one after another (one job at a time: the LLM server is shared)
   const [batch, setBatch] = useState<{ done: number; total: number; current: string; failed: number } | null>(null);
   const stop = useRef(false);
+  useEffect(() => () => { stop.current = true; }, []);  // leaving CR mode ends the batch after the current CR
   const runBatch = async (list: CR[]) => {
     stop.current = false;
     let failed = 0;
@@ -137,8 +135,8 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onFetchCrs, fetching
         </thead>
         <tbody>
           {shown.map((c) => {
-            const k = crKey(c.cr, c.tdoc);
-            const a = analyses.get(k);
+            const k = `${c.new_version}/${c.tdoc}/${c.cr}/${c.rev}`;  // the same CR can be listed twice
+            const a = analyses.get(crKey(c.cr, c.tdoc));
             const isOpen = open === k;
             return [
               <tr key={k} className={isOpen ? "open" : ""} onClick={() => setOpen(isOpen ? null : k)}>

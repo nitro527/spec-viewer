@@ -748,12 +748,12 @@ class Library:
         hits.sort(key=lambda h: (h["ord"], -1 if h["block"] is None else h["block"]))
         return hits
 
-    def phrase_history(self, spec: str, query: str, per_event: int = 60) -> dict:
+    def phrase_history(self, spec: str, query: str, per_event: int = 60, max_rows: int = 20000) -> dict:
         """Where an exact phrase occurs in every version: how many paragraphs and clauses, the first version that
         has it, and per version the clauses where it appeared or disappeared (with a snippet)."""
         words = query.replace('"', " ").split()
         vers = self.versions(spec)
-        out = {"query": query, "versions": [], "events": [], "first": None, "latest_clauses": 0}
+        out = {"query": query, "versions": [], "events": [], "first": None, "latest_clauses": 0, "truncated": False}
         if not words or not vers:
             return out
         rows = self.db.execute(
@@ -761,7 +761,11 @@ class Library:
             "snippet(blob_fts, 1, '[[', ']]', '…', 12) AS snip FROM blob_fts f "
             "JOIN block_ver b ON b.raw_hash = f.hash JOIN version v ON v.id = b.version_id AND v.spec = ? "
             "JOIN clause_ver c ON c.version_id = b.version_id AND c.key = b.clause_key "
-            "WHERE blob_fts MATCH ? ORDER BY c.ord, b.ord", (spec, '"' + " ".join(words) + '"')).fetchall()
+            "WHERE blob_fts MATCH ? LIMIT ?", (spec, '"' + " ".join(words) + '"', max_rows + 1)).fetchall()
+        if len(rows) > max_rows:  # a very common phrase: counts would be partial, so say so
+            out["truncated"] = True
+            rows = rows[:max_rows]
+        rows.sort(key=lambda r: (r["ord"], r["block"]))
         by_vid: dict[int, dict[str, dict]] = {}
         for r in rows:
             cl = by_vid.setdefault(r["version_id"], {}).setdefault(r["clause_key"], {
@@ -795,7 +799,10 @@ class Library:
 
     def compare(self, spec: str, old: str, new: str, changed_only: bool = True) -> dict:
         """Clause-by-clause diff between two arbitrary versions (the CRs are read fresh, the diff is cached)."""
-        k = (spec, self.version_id(spec, old), self.version_id(spec, new), changed_only)  # a re-import is a new id
+        # data_version changes when another connection (the CLI, an LLM job) commits: a re-import there can
+        # reuse the version's rowid, so the ids alone do not prove the cached diff is current
+        k = (spec, self.version_id(spec, old), self.version_id(spec, new), changed_only,
+             self.db.execute("PRAGMA data_version").fetchone()[0])
         if k not in self._compared:
             if len(self._compared) >= 4:
                 self._compared.pop(next(iter(self._compared)))

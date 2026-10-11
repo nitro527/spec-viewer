@@ -3,7 +3,7 @@
 // or /#/doc?spec=...&cr=...&tdoc=... (a CR, with its revision marks).
 import { useEffect, useRef, useState } from "react";
 import { api, crKey, tdocUrl, type MeetingDoc } from "../api";
-import { CRAnalysisFull, useAiJob, useCRAnalyses } from "./CRAnalysis";
+import { CRAnalysisFull, useAiJob, useCRAnalyses, useLlmReady } from "./CRAnalysis";
 import { Html } from "./Html";
 
 const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
@@ -104,10 +104,7 @@ export function DocWindow() {
 function CRAnalysisSection({ spec, cr, tdoc }: { spec: string; cr: string; tdoc: string }) {
   const analyses = useCRAnalyses(spec);
   const job = useAiJob();
-  const [llmReady, setLlmReady] = useState(false);
-  useEffect(() => {
-    api.llm().then((s) => setLlmReady(s.has_key || s.provider !== "gemini"), () => setLlmReady(false));
-  }, []);
+  const llmReady = useLlmReady();
   const a = analyses.get(crKey(cr, tdoc));
   const run = (force: boolean) => job.start(() => api.analyzeCR(spec, cr, tdoc, force),
                                             force ? "CR 다시 분석 요청…" : "CR 분석 요청…");

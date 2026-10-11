@@ -94,3 +94,29 @@ def test_whitespace_only_differences_keep_tokens_aligned():
             norm = lambda toks: [" " if x.kind == "ws" else x.text for x in toks]  # noqa: E731
             assert norm(a[i1:i2]) == norm(b[j1:j2])
     assert ops[0][1] == 0 and ops[-1][2] == len(a) and ops[-1][4] == len(b)
+
+
+def test_big_table_rows_that_only_split_words_differently_are_changes():
+    from specview.diff import opcodes, render_diff, tokenize
+
+    rows = [f"<tr><td>row {i} value</td></tr>" for i in range(1500)]
+    old = "<table>" + "".join(rows) + "</table>"
+    rows[700] = "<tr><td>row700 value</td></tr>"
+    new = "<table>" + "".join(rows) + "</table>"
+    out = render_diff(old, new)
+    assert "<ins>row700</ins>" in out
+    a, b = tokenize(old), tokenize(new)
+    for tag, i1, i2, j1, j2 in opcodes(a, b):
+        if tag == "equal":
+            assert [x.text.strip() for x in a[i1:i2]] == [x.text.strip() for x in b[j1:j2]]
+
+
+def test_whitespace_only_blocks_and_deep_anchor_nesting():
+    from specview.diff import _patience, opcodes, render_diff, tokenize
+
+    assert render_diff("abc", "  ") == "<del>abc</del>  "
+    assert opcodes(tokenize(" "), tokenize(" ")) == [("equal", 0, 1, 0, 1)]
+    # anchors found one per level: recursion used to hit the limit
+    a = [f"u{i}" if i % 2 else "x" for i in range(6000)]
+    b = list(reversed(a))
+    assert _patience(a, b) is not None
