@@ -31,9 +31,21 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 
 def new_session() -> requests.Session:
+    """A session for 3gpp.org that retries what is usually momentary there: timeouts, dropped connections,
+    429 and 5xx (with back-off, honouring Retry-After)."""
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
     s = requests.Session()
     s.headers["User-Agent"] = USER_AGENT
+    retry = Retry(total=4, connect=4, read=4, status=4, backoff_factor=2, allowed_methods={"GET", "HEAD"},
+                  status_forcelist=(429, 500, 502, 503, 504), respect_retry_after_header=True)
+    s.mount("https://", HTTPAdapter(max_retries=retry))
+    s.mount("http://", HTTPAdapter(max_retries=retry))
     return s
+
+
+DOWNLOAD_RETRY_WAIT = 5  # seconds, times the attempt number, between tries of a download cut off midway
 
 
 @dataclass
@@ -209,16 +221,30 @@ def fetch(remote: RemoteVersion, cache_dir: Path, session: requests.Session | No
     if cached := _cached_parts(zip_path, d):
         return cached
     if not zip_path.exists():
-        with s.get(remote.url, stream=True, timeout=120) as r:
-            r.raise_for_status()
-            total = int(r.headers.get("content-length") or 0)
-            done = 0
-            tmp = zip_path.with_suffix(".part")
-            with open(tmp, "wb") as f:
-                for chunk in r.iter_content(1 << 16):
-                    f.write(chunk)
-                    done += len(chunk)
-                    if progress:
-                        progress(done, total)
-            tmp.rename(zip_path)
+        for attempt in range(1, 4):  # the session retries the request; this also covers a body cut off midway
+            try:
+                _download(s, remote.url, zip_path, progress)
+                break
+            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError):
+                if attempt == 3:
+                    raise
+                import time
+                time.sleep(DOWNLOAD_RETRY_WAIT * attempt)
     return _extract_docx(zip_path, d)
+
+
+def _download(s: requests.Session, url: str, dest: Path, progress: Callable[[int, int], None] | None) -> None:
+    with s.get(url, stream=True, timeout=120) as r:
+        r.raise_for_status()
+        total = int(r.headers.get("content-length") or 0)
+        done = 0
+        tmp = dest.with_suffix(".part")
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(1 << 16):
+                f.write(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, total)
+        if total and done < total:  # the server closed early without an error
+            raise requests.exceptions.ChunkedEncodingError(f"{url}: {done}/{total} bytes")
+        tmp.replace(dest)

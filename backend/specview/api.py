@@ -53,12 +53,53 @@ class WISummaryRequest(BaseModel):
     force: bool = False
 
 
+class FullAnalysisRequest(BaseModel):
+    specs: list[str] | None = None  # None: every downloaded spec
+    skip_uncovered: bool = True  # changes no CR explains (front matter, years) are left out
+    cr_analyses: bool = True  # then the CRs no summarised paragraph pulled in
+    wi_summaries: bool = True  # then every work item
+
+
 class FetchRequest(BaseModel):
     specs: list[str]
     releases: list[int] | None = None
     latest_per_release: bool = False
     with_crs: bool = True
     crs_only: bool = False
+
+
+FULL_RETRY_WAIT = 60  # seconds before the n-th retry waits n times this, when the LLM server fails every request
+
+
+def _short_error(e: Exception) -> str:
+    """'Read timed out' instead of the whole HTTPSConnectionPool(host=..., port=443): ... chain."""
+    text = str(e)
+    for key in ("Read timed out", "Connection reset", "Max retries exceeded", "Name or service not known",
+                "timed out", "404", "403", "500", "502", "503"):
+        if key in text:
+            return key
+    return text[:80]
+
+
+def _full_counts(c: dict) -> str:
+    out = f"문단 요약 {c['intents']}개 · CR 분석 {c['cr_analyses']}개 · WI 요약 {c['wi_summaries']}개"
+    return out + (f" · 실패 {c['failed']}개 (다음 실행 때 다시 시도)" if c["failed"] else "")
+
+
+def _keep_awake():
+    """Keep Windows from sleeping while the full analysis runs; returns the function that lets it sleep again."""
+    import sys
+
+    if sys.platform != "win32":
+        return lambda: None
+    import ctypes
+
+    es_continuous, es_system_required = 0x80000000, 0x00000001
+    try:
+        ctypes.windll.kernel32.SetThreadExecutionState(es_continuous | es_system_required)
+    except Exception:
+        return lambda: None
+    return lambda: ctypes.windll.kernel32.SetThreadExecutionState(es_continuous)
 
 
 def create_app(home: Path | None = None, static_dir: Path | None = None) -> FastAPI:
@@ -420,6 +461,16 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         threading.Thread(target=_run_cr_analysis, args=(job_id, req, row, model), daemon=True).start()
         return jobs[job_id]
 
+    def _summarize_wi(model: intent.OpenAICompatIntentModel, wi: dict) -> bool:
+        res = model.summarize_wi(wi)
+        if not res:
+            return False
+        data = {**res, "wi": wi["wi"], "crs": len(wi["crs"]), "analysed": sum(1 for c in wi["crs"] if c["analysis"]),
+                "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+        with lock:
+            lib.save_wi_summary(wi["wi"], data)
+        return True
+
     @app.get("/api/work-items")
     def work_items():
         """Work item codes of the CR covers of every downloaded spec."""
@@ -450,15 +501,9 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         def run():
             job = jobs[job_id]
             try:
-                res = model.summarize_wi(wi)
-                if not res:
+                if not _summarize_wi(model, wi):
                     job["state"], job["message"] = "error", "AI 응답이 비어 있습니다"
                     return
-                analysed = sum(1 for c in wi["crs"] if c["analysis"])
-                data = {**res, "wi": req.wi, "crs": len(wi["crs"]), "analysed": analysed,
-                        "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
-                with lock:
-                    lib.save_wi_summary(req.wi, data)
                 job["state"], job["message"] = "done", f"{req.wi} 요약 완료 ({model.name})"
             except intent.LLMError as e:
                 job["state"], job["message"] = "error", str(e)
@@ -539,9 +584,13 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         return next((r["title"] for r in rows if r["number"] == spec), None)
 
     def _run_fetch(job_id: str, req: FetchRequest):
+        import requests
+
         job = jobs[job_id]
         skipped = []  # .doc-only versions with no converter on this PC
         drafts_only = []  # specs with no approved (3.x and later) version yet
+        failed = []  # versions (or whole specs) 3gpp.org did not deliver even after retries
+        have_count = 0
         try:
             for spec in req.specs:
                 if req.crs_only:
@@ -551,14 +600,24 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                     lib.fetch_cr_details(spec, cache_dir=home / "cache", progress=prog, refetch_missing=True, lock=lock)
                     continue
                 job["message"] = f"{spec}: listing versions"
-                remote_versions = download.select(download.list_remote(spec),
-                                                  set(req.releases) if req.releases else None,
-                                                  req.latest_per_release)
+                try:
+                    remote_versions = download.select(download.list_remote(spec),
+                                                      set(req.releases) if req.releases else None,
+                                                      req.latest_per_release)
+                except requests.RequestException as e:  # one spec's archive page: the others can still come
+                    failed.append(f"{spec} (버전 목록: {_short_error(e)})")
+                    continue
                 if not remote_versions:
                     drafts_only.append(spec)
                     continue
+                with lock:
+                    have = {v["version"] for v in lib.versions(spec)}
                 job["total"] += len(remote_versions)
                 for rv in remote_versions:
+                    if str(rv.version) in have:  # already in the library: an interrupted download goes on from here
+                        have_count += 1
+                        job["done"] += 1
+                        continue
                     job["message"] = f"{spec} v{rv.version}: downloading"
                     try:
                         path = download.fetch(rv, home / "cache")
@@ -566,11 +625,18 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                         skipped.append(f"{spec} v{rv.version}")
                         job["done"] += 1
                         continue
+                    except requests.RequestException as e:  # 3gpp.org timed out even after retries: next version
+                        failed.append(f"{spec} v{rv.version} ({_short_error(e)})")
+                        job["done"] += 1
+                        continue
                     job["message"] = f"{spec} v{rv.version}: converting"
                     parsed = parse_docx(path)
                     with lock:
                         lib.add_version(spec, rv.version, parsed, source=rv.url, recompute=False)
                     job["done"] += 1
+                with lock:
+                    if not lib.versions(spec):
+                        continue
                 title = _official_title(spec)  # cover pages of recent versions often defeat title detection
                 if title:
                     with lock:
@@ -581,9 +647,17 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 if req.with_crs:
                     def prog(i, n, c):
                         job["message"] = f"{spec}: CR 표지 {i}/{n} ({c['tdoc']})"
-                    lib.fetch_cr_details(spec, cache_dir=home / "cache", progress=prog, lock=lock)
+                    try:
+                        lib.fetch_cr_details(spec, cache_dir=home / "cache", progress=prog, lock=lock)
+                    except requests.RequestException as e:
+                        failed.append(f"{spec} CR 표지 ({_short_error(e)})")
             job["state"], job["message"] = "done", "finished"
             notes = []
+            if have_count:
+                notes.append(f"이미 받은 {have_count}개 버전은 건너뜀")
+            if failed:
+                notes.append(f"받지 못함 {len(failed)}개: {', '.join(failed[:8])}{' …' if len(failed) > 8 else ''}"
+                             " (3gpp.org 응답 없음 — 다시 다운로드하면 받은 것은 건너뛰고 이것만 다시 받습니다)")
             if skipped:
                 notes.append(f"건너뜀: {', '.join(skipped)} (옛 .doc 형식, LibreOffice 또는 Word 가 있어야 변환됨)")
             if drafts_only:
@@ -603,7 +677,168 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     @app.get("/api/jobs")
     def list_jobs():
-        return list(jobs.values())
+        return [{k: v for k, v in j.items() if k != "cancel"} for j in jobs.values()]
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str):
+        """Ask a long job (the full AI analysis) to stop after the request in flight; what is done stays saved."""
+        if job_id not in jobs:
+            raise HTTPException(404, "no such job")
+        jobs[job_id]["cancel"] = True
+        if jobs[job_id]["state"] == "running":
+            jobs[job_id]["message"] += " · 중지 요청됨 (지금 요청이 끝나면 멈춤)"
+        return {k: v for k, v in jobs[job_id].items() if k != "cancel"}
+
+    # ---- full AI analysis (left running overnight) ----
+
+    @app.post("/api/full-analysis")
+    def full_analysis(req: FullAnalysisRequest):
+        """Summarise every changed paragraph of every version of every downloaded spec (newest versions first),
+        then analyse the CRs left, then summarise every work item. Work is saved as it goes and what is already
+        done is skipped, so it can be stopped and started again at any time."""
+        model = _llm()
+        if not model.api_key and "googleapis.com" in model.base_url:
+            raise HTTPException(400, "Gemini API 키를 먼저 저장하세요")
+        if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
+            raise HTTPException(409, "AI 작업이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
+        with lock:
+            specs = req.specs or [s["number"] for s in lib.specs()]
+        job_id = uuid.uuid4().hex[:8]
+        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 0, "message": "전체 AI 분석 준비",
+                        "specs": specs, "kind": "intent", "full": True,
+                        "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                        "counts": {"intents": 0, "cr_analyses": 0, "wi_summaries": 0, "failed": 0}}
+        threading.Thread(target=_run_full, args=(job_id, req, specs, model), daemon=True).start()
+        return jobs[job_id]
+
+    def _run_full(job_id: str, req: FullAnalysisRequest, specs: list[str], model: intent.OpenAICompatIntentModel):
+        import time
+
+        from .pack import build_pack
+
+        job = jobs[job_id]
+        counts = job["counts"]
+        reader = Library(home / "library.sqlite")
+        awake = _keep_awake()
+        chunk, max_strikes = 10, 8  # waits 1+2+...+7 minutes (about half an hour) before giving up
+
+        class Stop(Exception):
+            pass
+
+        def check():
+            if job.get("cancel"):
+                raise Stop("사용자가 중지함")
+
+        def wait_after_failure(strikes: int, what: str):
+            """The LLM server failing every request (restart, network): wait and try again a few times."""
+            if strikes >= max_strikes:
+                raise Stop(f"LLM 요청이 계속 실패해 멈춤: {what}")
+            end = time.monotonic() + FULL_RETRY_WAIT * strikes
+            while time.monotonic() < end:
+                check()
+                time.sleep(min(1, FULL_RETRY_WAIT))
+
+        try:
+            # 1) paragraph summaries, newest versions first; CR analyses are made along the way
+            plan = []
+            with lock:
+                for spec in specs:
+                    plan += [(spec, v["version"]) for v in reversed(lib.versions(spec)[1:])]
+            strikes = 0  # chunks in a row where every request failed, across versions: the server is down
+            for i, (spec, v) in enumerate(plan, 1):
+                analyzer = _cr_analyzer(reader, spec, model, job)
+                failed: set[str] = set()
+                while True:
+                    check()
+                    before = job.get("cr_made", 0)
+
+                    def prog(n, total, spec=spec, v=v, i=i):
+                        job["done"], job["total"] = n, total
+                        job["message"] = (f"[1/3 문단 요약] {spec} v{v} ({i}/{len(plan)}번째 버전) {n}/{total}")
+                    pack = build_pack(reader, spec, v, model, progress=prog, limit=chunk,
+                                      skip_uncovered=req.skip_uncovered,
+                                      skip_hashes=reader.intent_hashes(spec, v) | failed, cr_analyzer=analyzer)
+                    with lock:
+                        made = lib.merge_pack(pack)  # saved every chunk: closing the app loses little
+                    counts["intents"] += made
+                    counts["cr_analyses"] += job.get("cr_made", 0) - before
+                    errs = [c for c in pack["changes"] if c.get("intent_error")]
+                    gen = pack["generator"]
+                    if gen.get("stopped"):  # quota: every later request fails the same way
+                        raise Stop(gen["stopped"])
+                    if errs and not made:
+                        try:  # the server answers: these paragraphs fail on their own, leave them for next run
+                            model.ping()
+                            failed |= {c["raw_hash"] for c in errs}
+                            counts["failed"] += len(errs)
+                        except intent.QuotaExceeded as e:
+                            raise Stop(str(e))
+                        except Exception:  # the server is down (restart, network): wait and try again
+                            strikes += 1
+                            wait_after_failure(strikes, errs[0]["intent_error"])
+                        continue
+                    if made:
+                        strikes = 0
+                    if errs:  # the server answers, these paragraphs fail on their own (e.g. bad JSON)
+                        failed |= {c["raw_hash"] for c in errs}
+                        counts["failed"] += len(errs)
+                    if not gen["over_limit"]:
+                        break
+            # 2) CRs no paragraph summary needed (e.g. clauses not downloaded), when they have a cover
+            if req.cr_analyses:
+                for spec in specs:
+                    check()
+                    with lock:
+                        rows = [c for c in lib.crs(spec) if c["detail"] and c["cr"]
+                                and not lib.cr_analysis(spec, c["cr"], c["rev"], c["tdoc"])]
+                    analyzer = _cr_analyzer(reader, spec, model, job)
+                    for n, row in enumerate(rows, 1):
+                        check()
+                        job["done"], job["total"] = n, len(rows)
+                        before = job.get("cr_made", 0)
+                        for strikes in range(1, max_strikes + 1):
+                            try:
+                                analyzer([row])
+                                break
+                            except intent.QuotaExceeded as e:
+                                raise Stop(str(e))
+                            except Exception as e:
+                                wait_after_failure(strikes, str(e))
+                        else:
+                            counts["failed"] += 1
+                        counts["cr_analyses"] += job.get("cr_made", 0) - before
+                        job["message"] = f"[2/3 CR 분석] {spec} CR{row['cr']} {n}/{len(rows)}"
+            # 3) work item summaries (after the CR analyses they are built from)
+            if req.wi_summaries:
+                with lock:
+                    wis = [w["wi"] for w in lib.work_items() if not w["summary"]]
+                for n, w in enumerate(wis, 1):
+                    check()
+                    job["done"], job["total"] = n, len(wis)
+                    job["message"] = f"[3/3 WI 요약] {w} {n}/{len(wis)}"
+                    with lock:
+                        wi = lib.work_item(w)
+                    for strikes in range(1, max_strikes + 1):
+                        try:
+                            counts["wi_summaries"] += 1 if _summarize_wi(model, wi) else 0
+                            break
+                        except intent.QuotaExceeded as e:
+                            raise Stop(str(e))
+                        except Exception as e:
+                            wait_after_failure(strikes, str(e))
+                    else:
+                        counts["failed"] += 1
+            job["state"] = "done"
+            job["message"] = "전체 AI 분석 완료 · " + _full_counts(counts)
+        except Stop as e:
+            job["state"], job["stopped"] = ("done" if job.get("cancel") else "error"), True
+            job["message"] = f"전체 AI 분석 멈춤 ({e}) · " + _full_counts(counts) + " · 다시 시작하면 이어서 합니다"
+        except Exception as e:
+            job["state"], job["message"] = "error", f"전체 AI 분석 실패: {e} · " + _full_counts(counts)
+        finally:
+            job["finished"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+            awake()
+            reader.close()
 
     @app.get("/api/version-of/{code}")
     def version_of(code: str):

@@ -435,3 +435,9 @@ input.num { width: 56px; margin: 0 4px; }
 .wi-summary ul, .wi-summary ol { margin: 2px 0; padding-left: 20px; }
 .wi-summary li { margin: 2px 0; }
 .wi-summary .lead { font-size: 13.5px; }
+
+/* full AI analysis (main tab, LLM panel ④) */
+.full-run .full-specs { flex-wrap: wrap; gap: 4px 12px; }
+.full-status { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); }
+.full-status.running { border-color: var(--accent); }
+.full-status p { margin: 2px 0; }

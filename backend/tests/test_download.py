@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from specview import download
+from tests.conftest import needs_pandoc
 
 
 def test_legacy_doc_without_converter_is_skippable(tmp_path, monkeypatch):
@@ -159,3 +160,64 @@ def test_split_part_name_variants(tmp_path, names, want):
     with zipfile.ZipFile(zp) as z:
         got = download._word_parts(z)
     assert got == (want or sorted(names, key=download._natural))
+
+
+@needs_pandoc
+def test_fetch_job_goes_on_after_a_timeout_and_a_second_run_fetches_only_what_failed(tmp_path, monkeypatch, fixture_docs):
+    import time
+
+    import requests
+    from fastapi.testclient import TestClient
+
+    from specview.api import create_app
+    from specview.versions import parse_archive_name
+
+    docs = {str(parse_archive_name(p.name)[1]): p for p in fixture_docs}
+    remote = [download.RemoteVersion("99.211", parse_archive_name(p.name)[1], f"https://x/{p.name}") for p in fixture_docs]
+    flaky = sorted(docs)[1]
+    asked, timeouts = [], [1]  # the flaky version times out once
+
+    def fetch(rv, cache_dir, *a, **k):
+        asked.append(str(rv.version))
+        if str(rv.version) == flaky and timeouts:
+            timeouts.pop()
+            raise requests.ReadTimeout("HTTPSConnectionPool(host='www.3gpp.org', port=443): Read timed out.")
+        return docs[str(rv.version)]
+
+    monkeypatch.setattr(download, "list_remote", lambda spec, *a: remote)
+    monkeypatch.setattr(download, "fetch", fetch)
+    monkeypatch.setattr(download, "catalog", lambda series: [])
+    c = TestClient(create_app(tmp_path))
+
+    def run():
+        job = c.post("/api/fetch", json={"specs": ["99.211"], "with_crs": False}).json()
+        while (j := next(x for x in c.get("/api/jobs").json() if x["id"] == job["id"]))["state"] == "running":
+            time.sleep(0.05)
+        return j
+
+    j = run()
+    assert j["state"] == "done" and f"99.211 v{flaky} (Read timed out)" in j["message"]
+    have = [v["version"] for v in c.get("/api/specs/99.211/versions").json()]
+    assert flaky not in have and len(have) == len(docs) - 1  # the others were stored and their history computed
+    asked.clear()
+    j = run()
+    assert asked == [flaky] and "받지 못함" not in j["message"] and f"이미 받은 {len(docs) - 1}개" in j["message"]
+    assert len(c.get("/api/specs/99.211/versions").json()) == len(docs)
+
+
+def test_download_retries_a_body_cut_off_midway(tmp_path, monkeypatch):
+    import requests
+
+    monkeypatch.setattr(download, "DOWNLOAD_RETRY_WAIT", 0)
+    calls = []
+
+    def flaky(s, url, dest, progress):
+        calls.append(url)
+        if len(calls) < 3:
+            raise requests.exceptions.ChunkedEncodingError("cut")
+        with zipfile.ZipFile(dest, "w") as z:
+            z.writestr("38211-h00.docx", b"x")
+
+    monkeypatch.setattr(download, "_download", flaky)
+    rv = download.RemoteVersion("38.211", download.Version.parse("17.0.0"), "https://x/38211-h00.zip")
+    assert [p.name for p in download.fetch(rv, tmp_path)] == ["38211-h00.docx"] and len(calls) == 3
