@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -170,6 +170,27 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     # Local API: only for this machine. A web page that re-binds its DNS name to 127.0.0.1 must not reach it.
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
+
+    # Pages served here may show text from documents anyone can write (CRs): no inline script, no javascript:
+    # links, nothing loaded from elsewhere. KaTeX needs inline styles and its bundled fonts only.
+    CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+           "font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; "
+           "frame-ancestors 'none'")
+
+    @app.middleware("http")
+    async def guard(request, call_next):
+        # Another web site open in a browser can send requests to this port. Reading answers is already blocked
+        # (no CORS); changes are refused unless they come from this app's own pages.
+        origin = request.headers.get("origin")
+        if request.method not in ("GET", "HEAD", "OPTIONS") and origin:  # "null": a sandboxed frame, refused too
+            from urllib.parse import urlsplit
+            if urlsplit(origin).netloc != request.headers.get("host"):
+                return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
+        response = await call_next(request)
+        if not request.url.path.startswith("/api/"):
+            response.headers["Content-Security-Policy"] = CSP
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
     def _get(fn, *a):
         try:

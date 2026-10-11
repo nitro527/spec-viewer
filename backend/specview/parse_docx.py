@@ -137,6 +137,26 @@ def _run_pandoc(docx: Path, media_dir: Path, track_changes: bool = False) -> str
     return proc.stdout.decode("utf-8")
 
 
+_SAFE_URL = re.compile(r"^\s*(https?:|mailto:|#|/api/asset/|data:image/(png|jpe?g|gif|webp|bmp);)", re.I)
+_UNSAFE_TAGS = ("script", "iframe", "frame", "object", "embed", "form", "base", "meta", "link", "style")
+
+
+def _make_safe(root) -> None:
+    """Documents come from 3gpp.org but CRs are written by anyone: a Word hyperlink to ``javascript:...`` comes
+    through pandoc as is. Keep only plain links and images; no scripts, frames or event handlers."""
+    for el in root.xpath("|".join(f"//{t}" for t in _UNSAFE_TAGS)):
+        el.drop_tree()
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        for a in list(el.attrib):
+            v = el.attrib[a]
+            if a.lower().startswith("on") or a.lower() in ("srcdoc", "formaction", "xlink:href"):
+                del el.attrib[a]
+            elif a.lower() in ("href", "src", "action", "poster", "background") and v and not _SAFE_URL.match(v):
+                del el.attrib[a]
+
+
 def docx_view_html(docx: Path, track_changes: bool = False) -> str:
     """A whole document as one HTML page for the viewer window: images inlined, equations as KaTeX spans.
     With ``track_changes`` (CRs), Word's revision marks become <ins>/<del> like the app's own diffs."""
@@ -146,6 +166,7 @@ def docx_view_html(docx: Path, track_changes: bool = False) -> str:
         media = Path(tmp) / "media"
         root = html.fragment_fromstring(_run_pandoc(Path(docx), media, track_changes), create_parent="div")
         assets = _rewrite_images(root, media)
+        _make_safe(root)  # after the images got their /api/asset/ addresses
         _fix_multiline_math(root)
         for img in root.xpath("//img[starts-with(@src, '/api/asset/')]"):
             a = assets.get(img.get("src").rsplit("/", 1)[-1])
@@ -347,6 +368,7 @@ def _parse_one(docx: Path) -> ParsedSpec:
         doc_html = _run_pandoc(Path(docx), media)
         root = html.fragment_fromstring(doc_html, create_parent="div")
         assets = _rewrite_images(root, media)
+        _make_safe(root)  # after the images got their /api/asset/ addresses
         _fix_multiline_math(root)
         doc_html = "".join(_serialize(el) for el in root)
     clauses = html_to_clauses(doc_html)

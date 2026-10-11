@@ -270,3 +270,35 @@ def test_history_missing_after_an_interrupted_import_is_repaired(tmp_path, fixtu
     lib.recompute_history("99.211", lock=threading.Lock())  # computed on its own connection, written under the lock
     assert lib.specs_missing_history() == []
     assert any(c["status"] for c in lib.toc("99.211", lib.versions("99.211")[-1]["version"]))
+
+
+def test_other_sites_cannot_change_settings_and_pages_get_a_csp(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from specview.api import create_app
+
+    ui = tmp_path / "ui"
+    (ui / "assets").mkdir(parents=True)
+    (ui / "index.html").write_text("INDEX")
+    c = TestClient(create_app(tmp_path / "home", ui))
+    body = {"provider": "openai", "base_url": "http://attacker.example/v1", "model": "x"}
+    for origin in ("http://evil.example", "null"):
+        assert c.put("/api/llm", json=body, headers={"Origin": origin}).status_code == 403
+    assert c.put("/api/llm", json=body, headers={"Origin": "http://testserver"}).status_code == 200  # the app itself
+    assert c.put("/api/llm", json=body).status_code == 200  # no Origin: not a browser page
+    csp = c.get("/").headers["content-security-policy"]
+    assert "script-src 'self'" in csp and "unsafe-inline" not in csp.split("script-src")[1].split(";")[0]
+
+
+@needs_pandoc
+def test_script_links_in_documents_are_removed(tmp_path):
+    import subprocess
+
+    from specview.parse_docx import docx_view_html, parse_docx
+
+    md = tmp_path / "x.md"
+    md.write_text("# 1 Scope\n\n[bad](javascript:alert(1)) [good](https://www.3gpp.org) [mail](mailto:a@b.c)\n")
+    docx = tmp_path / "x.docx"
+    subprocess.run(["pandoc", str(md), "-o", str(docx)], check=True)
+    for h in (docx_view_html(docx), "".join(b.html for c in parse_docx(docx).clauses for b in c.blocks)):
+        assert "javascript:" not in h and 'href="https://www.3gpp.org"' in h and "mailto:a@b.c" in h

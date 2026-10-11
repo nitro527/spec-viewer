@@ -1,6 +1,7 @@
 // Renders a spec HTML fragment: KaTeX for equations and clickable cross-references.
 import katex from "katex";
 import { memo, useLayoutEffect, useRef } from "react";
+import { safeHtml } from "../safe";
 
 const XREF = new RegExp(
   String.raw`\b([Cc]lauses?|[Ss]ubclauses?|[Aa]nnex)\s+((?:[A-Z]\.)?\d+(?:\.\d+[A-Z]{0,2})*|[A-Z])` +
@@ -60,5 +61,5 @@ export const Html = memo(function Html({ html, className }: { html: string; clas
     linkify(ref.current);
     renderMath(ref.current);
   }, [html]);
-  return <div ref={ref} className={className} dangerouslySetInnerHTML={{ __html: html }} />;
+  return <div ref={ref} className={className} dangerouslySetInnerHTML={{ __html: safeHtml(html) }} />;
 });

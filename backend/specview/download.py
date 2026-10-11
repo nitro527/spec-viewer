@@ -174,6 +174,7 @@ $ErrorActionPreference = 'Stop'
 $w = New-Object -ComObject Word.Application
 try {
     $w.Visible = $false; $w.DisplayAlerts = 0
+    $w.AutomationSecurity = 3  # msoAutomationSecurityForceDisable: never run a document's macros
     $d = $w.Documents.Open($env:SPECVIEW_DOC_SRC, $false, $true, $false)
     try { $d.SaveAs2($env:SPECVIEW_DOC_DST, 16) } finally { $d.Close($false) }
 } finally { $w.Quit() }
