@@ -90,7 +90,33 @@ def cmd_serve(args):
     from .api import create_app
 
     static = Path(args.static) if args.static else None
-    uvicorn.run(create_app(Path(args.home), static), host="127.0.0.1", port=args.port, log_level="warning")
+    _log_to_file(Path(args.home))
+    uvicorn.run(create_app(Path(args.home), static), host="127.0.0.1", port=args.port, log_level="warning",
+                log_config=None)  # keep the handlers set up here
+
+
+def _log_to_file(home: Path) -> None:
+    """Errors go to <home>/logs/specview.log: the installed app has no console to print them on."""
+    import logging
+    import sys
+    from logging.handlers import RotatingFileHandler
+
+    from . import __version__
+
+    d = home / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    fh = RotatingFileHandler(d / "specview.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(fh)
+    if sys.stderr:  # a console when run by hand (None in the windowed build)
+        root.addHandler(logging.StreamHandler())
+    for noisy in ("httpx", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("specview").info("specview %s starting, home %s", __version__, home)
+
 
 
 def main(argv=None):

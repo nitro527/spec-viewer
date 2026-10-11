@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 import threading
 import uuid
 from pathlib import Path
 
+import requests
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +19,9 @@ from . import download, intent
 from .parse_docx import parse_docx
 from .store import Library
 from .versions import Version
+
+
+log = logging.getLogger("specview")
 
 
 def default_home() -> Path:
@@ -267,6 +272,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             job["state"], job["message"], job["done"], job["total"] = "done", f"{n} features", 1, 1
         except Exception as e:
             job["state"], job["message"] = "error", str(e)
+            log.exception("job %s (%s) failed", job.get("id"), job.get("kind") or job.get("specs"))
 
     @app.post("/api/fetch-features")
     def fetch_features():
@@ -516,6 +522,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             job["message"] = msg
         except Exception as e:
             job["state"], job["message"] = "error", str(e)
+            log.exception("job %s (%s) failed", job.get("id"), job.get("kind") or job.get("specs"))
         finally:
             reader.close()
 
@@ -549,6 +556,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             job["state"], job["message"] = "error", str(e)
         except Exception as e:
             job["state"], job["message"] = "error", f"CR 분석 실패: {e}"
+            log.exception("job %s (%s) failed", job.get("id"), job.get("kind") or job.get("specs"))
         finally:
             reader.close()
 
@@ -618,6 +626,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 job["state"], job["message"] = "error", str(e)
             except Exception as e:
                 job["state"], job["message"] = "error", f"WI 요약 실패: {e}"
+                log.exception("job %s (%s) failed", job.get("id"), job.get("kind") or job.get("specs"))
 
         threading.Thread(target=run, daemon=True).start()
         return jobs[job_id]
@@ -724,6 +733,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                     try:
                         yield rv, f.result(), None
                     except Exception as e:  # noqa: BLE001 - reported per version, the others go on
+                        log.warning("%s v%s: %s", spec, rv.version, e, exc_info=not isinstance(e, requests.RequestException))
                         yield rv, None, e
                     submit_next()
 
@@ -803,6 +813,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 job["message"] = "finished — " + " · ".join(notes)
         except Exception as e:
             job["state"], job["message"] = "error", str(e)
+            log.exception("job %s (%s) failed", job.get("id"), job.get("kind") or job.get("specs"))
         finally:  # versions stored before an error still get their history
             for spec in pending:
                 try:
@@ -885,6 +896,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 job["state"], job["message"] = "error", str(e)
             except Exception as e:
                 job["state"], job["message"] = "error", f"릴리즈 노트 실패: {e}"
+                log.exception("job %s (%s) failed", job.get("id"), job.get("kind") or job.get("specs"))
 
         threading.Thread(target=run, daemon=True).start()
         return jobs[job_id]
@@ -951,15 +963,21 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 history += [{"role": "user", "content": q["content"]}, {"role": "assistant", "content": a["content"]}]
                 known.update(a.get("sources") or {})
             res = chatmod.answer(model, reader, req.question.strip(), history, req.context, step=step,
-                                 known_sources=known)
+                                 known_sources=known, should_stop=lambda: bool(job.get("cancel")))
             reply = {"role": "assistant", "content": res["answer"] or "(빈 답변)", "sources": res["sources"],
                      "steps": res["steps"], "mode": res["mode"], "model": res.get("model") or model.name}
             job["state"], job["message"] = "done", "답변 완료"
+        except chatmod.Stopped:  # kept in the conversation, left out of the next question's history like errors
+            reply = {"role": "assistant", "content": "(답변 중지됨)", "error": True, "stopped": True,
+                     "steps": job["steps"]}
+            job["state"], job["message"] = "done", "중지됨"
         except intent.LLMError as e:
             reply = {"role": "assistant", "content": f"AI 요청 실패: {e}", "error": True, "steps": job["steps"]}
+            log.warning("chat %s: %s", conv["id"], e, exc_info=not isinstance(e, intent.LLMError))
             job["state"], job["message"] = "error", str(e)
         except Exception as e:
             reply = {"role": "assistant", "content": f"답변 중 오류: {e}", "error": True, "steps": job["steps"]}
+            log.warning("chat %s: %s", conv["id"], e, exc_info=not isinstance(e, intent.LLMError))
             job["state"], job["message"] = "error", str(e)
         finally:
             reader.close()
@@ -1022,6 +1040,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             """After a failed request: True when the server answers (the item fails on its own: count it and
             go on), False after waiting when it does not (try the item again). Quota stops the run."""
             nonlocal strikes
+            log.warning("full analysis: %s", err, exc_info=not isinstance(err, intent.LLMError))
             if isinstance(err, intent.QuotaExceeded):
                 raise Stop(str(err))
             try:
@@ -1114,6 +1133,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             job["message"] = f"전체 AI 분석 멈춤 ({e}) · " + _full_counts(counts) + " · 다시 시작하면 이어서 합니다"
         except Exception as e:
             job["state"], job["message"] = "error", f"전체 AI 분석 실패: {e} · " + _full_counts(counts)
+            log.exception("job %s (%s) failed", job.get("id"), job.get("kind") or job.get("specs"))
         finally:
             job["finished"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
             awake()

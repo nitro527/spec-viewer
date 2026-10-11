@@ -32,7 +32,7 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
   const [chat, setChat] = useState<Chat | null>(null);
   const [question, setQuestion] = useState("");
   const [context, setContext] = useState<ChatContext | null>(null);
-  const [job, setJob] = useState<{ id: string; chatId: string; steps: string[] } | null>(null);
+  const [job, setJob] = useState<{ id: string; chatId: string; steps: string[]; stopping?: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
@@ -147,7 +147,7 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
             </div>
           )}
           {chat?.messages.map((m, i) => (
-            <div key={i} className={`msg msg-${m.role} ${m.error ? "msg-error" : ""}`}>
+            <div key={i} className={`msg msg-${m.role} ${m.stopped ? "msg-stopped" : m.error ? "msg-error" : ""}`}>
               {m.role === "user" ? (
                 <>
                   {m.context && <div className="ctx">TS {m.context.spec} §{m.context.clause}{m.context.version ? ` v${m.context.version}` : ""} 에 대해</div>}
@@ -180,7 +180,12 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
           {job && (
             <div className="msg msg-assistant">
               <div className="thinking">
-                <span className="spinner" /> 자료를 찾아보는 중…
+                <span className="spinner" /> {job.stopping ? "중지하는 중 (지금 요청이 끝나면 멈춤)…" : "자료를 찾아보는 중…"}
+                {!job.stopping && (
+                  <button className="link small" title="지금 진행 중인 AI 요청이 끝나면 멈춥니다"
+                          onClick={() => { setJob((j) => j && { ...j, stopping: true }); api.cancelJob(job.id).catch(() => undefined); }}>
+                    ■ 중지</button>
+                )}
                 <ol>{job.steps.map((s, k) => <li key={k}>{s}</li>)}</ol>
               </div>
             </div>

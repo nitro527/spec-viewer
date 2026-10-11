@@ -126,7 +126,7 @@ export type ChatSource =
 export interface ChatContext { spec: string; version?: string; clause?: string; text?: string }
 export interface ChatMessage {
   role: "user" | "assistant"; content: string; time?: string; context?: ChatContext | null;
-  sources?: Record<string, ChatSource>; steps?: string[]; mode?: "tools" | "retrieval"; model?: string; error?: boolean;
+  sources?: Record<string, ChatSource>; steps?: string[]; mode?: "tools" | "retrieval"; model?: string; error?: boolean; stopped?: boolean;
 }
 export interface ChatSummary { id: string; title: string; updated: string }
 export interface Chat extends ChatSummary { messages: ChatMessage[] }

@@ -119,3 +119,13 @@ def test_tool_calls_from_loose_servers_are_normalised(library):
     assert echoed["id"] and echoed["type"] == "function" and isinstance(echoed["function"]["arguments"], str)
     tool_reply = [m for m in sent[1] if m["role"] == "tool"][0]
     assert tool_reply["tool_call_id"] == echoed["id"] and "error" in tool_reply["content"] or "text" in tool_reply["content"]
+
+
+def test_stop_ends_the_answer_between_requests(library):
+    import pytest
+
+    m = FakeModel([("list_specs", {}), ("list_specs", {}), ("list_specs", {})])
+    asked = []
+    with pytest.raises(chat.Stopped):
+        chat.answer(m, library, "스펙 목록?", should_stop=lambda: len(m.seen) >= 2, step=asked.append)
+    assert len(m.seen) == 2  # no request after the stop

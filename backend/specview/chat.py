@@ -429,9 +429,13 @@ def _shrink(messages: list[dict]) -> None:
                                                   "if you still need it"})
 
 
+class Stopped(Exception):
+    """The user pressed stop: raised between model requests (the one in flight is not cut off)."""
+
+
 def answer(model, lib, question: str, history: list[dict] | None = None, context: dict | None = None,
            language: str = "Korean", max_steps: int = 10, step: Callable[[str], None] | None = None,
-           known_sources: dict | None = None) -> dict:
+           known_sources: dict | None = None, should_stop: Callable[[], bool] | None = None) -> dict:
     """Answer one question; ``history`` is the earlier turns ({role, content}); ``known_sources`` the sources
     earlier answers cited (a follow-up may cite them again). Returns {"answer", "sources", "steps", "mode",
     "model"}."""
@@ -441,7 +445,12 @@ def answer(model, lib, question: str, history: list[dict] | None = None, context
     tools.sources.update(known_sources or {})
     steps: list[str] = []
 
+    def check():
+        if should_stop and should_stop():
+            raise Stopped()
+
     def note(s: str):
+        check()
         steps.append(s)
         if step:
             step(s)
@@ -453,6 +462,7 @@ def answer(model, lib, question: str, history: list[dict] | None = None, context
     messages.append({"role": "user", "content": _user_text(question, context, tag)})
     try:
         for n in range(max_steps):
+            check()
             try:
                 msg = model.complete(messages, TOOLS)
             except LLMError as e:  # context window: answer with what was found so far
@@ -473,6 +483,7 @@ def answer(model, lib, question: str, history: list[dict] | None = None, context
             _shrink(messages)
         messages.append({"role": "user", "content": f"Answer now with the material above, in {language}."})
         _shrink(messages)
+        check()
         msg = model.complete(messages)
         return {"answer": msg["content"], "sources": tools.sources, "steps": steps, "mode": "tools",
                 "model": msg.get("model")}

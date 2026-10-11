@@ -472,6 +472,8 @@ input.num { width: 56px; margin: 0 4px; }
 .msg-assistant .answer li.sub { margin-left: 18px; }
 .msg-assistant .answer code { background: var(--panel); padding: 0 4px; border-radius: 3px; font-size: 12.5px; }
 .msg-error .answer { color: var(--del-text); }
+.msg-stopped .answer { color: var(--muted); font-style: italic; }
+.thinking > .link { margin-left: 10px; }
 .src { display: inline-block; font-size: 11px; line-height: 1.5; padding: 0 6px; margin: 0 1px; border-radius: 9px; border: 1px solid var(--border); background: var(--panel); white-space: nowrap; vertical-align: 1px; }
 .src-clause, .src-cr { cursor: pointer; color: var(--accent); }
 .src-clause:hover, .src-cr:hover { border-color: var(--accent); }
