@@ -156,3 +156,35 @@ def test_e_meeting_folder_tried_when_change_history_drops_the_e(tmp_path):
     ran = f"{crdocs.FTP}/tsg_ran/TSG_RAN"
     site = _Site({f"{ran}/TSGR_88e/Docs/RP-201167.zip": b"PK\x03\x04"})
     assert crdocs.fetch_pack("RP-201167", "RP-88", tmp_path, site).name == "RP-201167.zip"  # 36.302
+
+
+def test_cr_document_shows_revision_marks(tmp_path, monkeypatch):
+    from specview import parse_docx
+
+    doc = tmp_path / "38211_CR0123_(Rel-16)_ R1-2001234.docx"
+    _cr_docx(doc)
+    pack = tmp_path / "tdocs" / "RP-200186.zip"
+    pack.parent.mkdir()
+    with zipfile.ZipFile(pack, "w") as z:
+        z.write(doc, doc.name)
+    seen = {}
+
+    def pandoc(path, media, track_changes=False):
+        seen["track"] = track_changes
+        return ('<p>DM-RS <span class="deletion" data-author="x">old</span><span class="insertion" data-author="x">'
+                'new</span><span class="paragraph-insertion" data-author="x"></span></p>')
+
+    monkeypatch.setattr(parse_docx, "_run_pandoc", pandoc)
+    got = crdocs.cr_document_html("38.211", "0123", "RP-200186", "RAN#87-e", tmp_path)
+    assert seen["track"] and got["title"] == "38.211 CR0123 Corrections to NR-U"
+    assert got["html"] == "<p>DM-RS <del>old</del><ins>new</ins></p>"
+
+
+def test_cr_doc_endpoint_only_serves_crs_of_the_change_history(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from specview.api import create_app
+
+    c = TestClient(create_app(tmp_path))
+    r = c.get("/api/cr-doc", params={"spec": "38.211", "cr": "0001", "tdoc": "RP-999999"})
+    assert r.status_code == 404

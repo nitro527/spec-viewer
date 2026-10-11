@@ -115,17 +115,43 @@ def _level_for(tag: str, number: str) -> int:
     return int(tag[1]) if tag in HEADING_TAGS else 1
 
 
-def _run_pandoc(docx: Path, media_dir: Path) -> str:
+def _run_pandoc(docx: Path, media_dir: Path, track_changes: bool = False) -> str:
     if not shutil.which("pandoc"):
         raise RuntimeError("pandoc is required to convert .docx files (https://pandoc.org)")
     proc = subprocess.run(
         [
             "pandoc", "-f", "docx+styles", "-t", "html", "--katex",
-            f"--extract-media={media_dir}", "--wrap=none", str(docx),
+            f"--extract-media={media_dir}", "--wrap=none", *(["--track-changes=all"] if track_changes else []),
+            str(docx),
         ],
         capture_output=True, check=True,
     )
     return proc.stdout.decode("utf-8")
+
+
+def docx_view_html(docx: Path, track_changes: bool = False) -> str:
+    """A whole document as one HTML page for the viewer window: images inlined, equations as KaTeX spans.
+    With ``track_changes`` (CRs), Word's revision marks become <ins>/<del> like the app's own diffs."""
+    import base64
+
+    with tempfile.TemporaryDirectory() as tmp:
+        media = Path(tmp) / "media"
+        root = html.fragment_fromstring(_run_pandoc(Path(docx), media, track_changes), create_parent="div")
+        assets = _rewrite_images(root, media)
+        _fix_multiline_math(root)
+        for img in root.xpath("//img[starts-with(@src, '/api/asset/')]"):
+            a = assets.get(img.get("src").rsplit("/", 1)[-1])
+            if a:
+                img.set("src", f"data:{a.mime};base64,{base64.b64encode(a.data).decode()}")
+        for span in root.xpath("//span[@class]"):
+            kind = span.get("class")
+            if kind in ("insertion", "deletion"):
+                span.tag = "ins" if kind == "insertion" else "del"
+                for k in list(span.attrib):
+                    del span.attrib[k]
+            elif kind in ("paragraph-insertion", "paragraph-deletion"):
+                span.drop_tag()
+        return "".join(_serialize(el) for el in root)
 
 
 def _convert_vector_images(paths: list[Path]) -> dict[Path, Path]:

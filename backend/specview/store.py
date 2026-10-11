@@ -102,6 +102,10 @@ CREATE TABLE IF NOT EXISTS annotation (
   spec TEXT NOT NULL, version TEXT NOT NULL, raw_hash TEXT NOT NULL, clause TEXT, data TEXT NOT NULL,
   PRIMARY KEY (spec, version, raw_hash)
 );
+CREATE TABLE IF NOT EXISTS cr_analysis (     -- LLM analysis of one CR as a whole (cranalysis.py)
+  spec TEXT NOT NULL, cr TEXT NOT NULL, rev TEXT NOT NULL, tdoc TEXT NOT NULL, data TEXT NOT NULL,
+  PRIMARY KEY (spec, cr, rev, tdoc)
+);
 CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS note (          -- user bookmarks/notes, keyed by clause so they survive versions
   spec TEXT NOT NULL, clause_key TEXT NOT NULL, bookmark INTEGER NOT NULL DEFAULT 0, text TEXT NOT NULL DEFAULT '',
@@ -622,6 +626,76 @@ class Library:
         out = [{**json.loads(r["data"]), "version": r["version"]} for r in rows]
         out.sort(key=lambda a: (hashes.index(a["raw_hash"]), Version.parse(a["version"]).sort_key))
         return out
+
+    def cr_analysis(self, spec: str, cr: str, rev: str, tdoc: str) -> dict | None:
+        r = self.db.execute("SELECT data FROM cr_analysis WHERE spec=? AND cr=? AND rev=? AND tdoc=?",
+                            (spec, cr, rev, tdoc)).fetchone()
+        return json.loads(r["data"]) if r else None
+
+    def cr_analyses(self, spec: str) -> list[dict]:
+        return [json.loads(r["data"]) for r in self.db.execute("SELECT data FROM cr_analysis WHERE spec=?", (spec,))]
+
+    def save_cr_analysis(self, spec: str, cr: str, rev: str, tdoc: str, data: dict) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO cr_analysis VALUES (?,?,?,?,?)",
+                            (spec, cr, rev, tdoc, json.dumps(data, ensure_ascii=False)))
+
+    def block_lineage(self, spec: str, version: str, key: str, raw_hash: str) -> list[dict]:
+        """Every text a paragraph had, oldest first: the version that wrote it, the change ("base", "added",
+        "modified", "moved"), the clause it sat in, its HTML and the diff from the step before, with the CRs of
+        that version that name the clause and any summary stored for that step."""
+        from .diff import strip_tags
+
+        vid = self.version_id(spec, version)
+        row = self.db.execute(
+            "SELECT b.clause_key, b.raw_hash, a.introduced, a.history FROM block_ver b JOIN annot a "
+            "ON a.hash=b.annot_hash WHERE b.version_id=? AND b.clause_key=? AND b.raw_hash=?",
+            (vid, key, raw_hash)).fetchone()
+        if row is None:
+            raise KeyError(f"no such paragraph in {spec} v{version} {key}")
+        hist = json.loads(row["history"])
+        intro = row["introduced"]
+        vids = {v["version"]: v["id"] for v in self.versions(spec)}
+        # a step is the block of that version with the same origin and the history up to that step
+        wanted = ([] if hist and hist[0][0] == intro and hist[0][1] == "added" else [(intro, "base", 0)])
+        wanted += [(h[0], h[1], i + 1) for i, h in enumerate(hist)]
+        steps, near = [], key
+        for ver, change, n in wanted:
+            cands = self.db.execute(
+                "SELECT b.clause_key, b.raw_hash, x.html, x.text FROM block_ver b JOIN annot a ON a.hash=b.annot_hash "
+                "JOIN blob x ON x.hash=b.raw_hash WHERE b.version_id=? AND a.introduced=? AND a.history=?",
+                (vids[ver], intro, json.dumps(hist[:n]))).fetchall()
+            if not cands:
+                continue
+            pick = next((c for c in cands if c["clause_key"] == near), cands[0])
+            near = pick["clause_key"]
+            steps.append({"version": ver, "change": change, "clause_key": pick["clause_key"],
+                          "raw_hash": pick["raw_hash"], "html": pick["html"]})
+        if not steps or steps[-1]["raw_hash"] != raw_hash:  # the shown text itself, whatever was matched before
+            steps.append({"version": version, "change": hist[-1][1] if hist else "base", "clause_key": key,
+                          "raw_hash": raw_hash, "html": self.db.execute(
+                              "SELECT html FROM blob WHERE hash=?", (raw_hash,)).fetchone()["html"]})
+        numbers = {}
+        crs = self.crs(spec)
+        for i, st in enumerate(steps):
+            if st["clause_key"] not in numbers:
+                r = self.db.execute("SELECT number FROM clause_ver WHERE version_id=? AND key=?",
+                                    (vids[st["version"]], st["clause_key"])).fetchone()
+                numbers[st["clause_key"]] = (r["number"] if r else "") or st["clause_key"]
+            num = numbers[st["clause_key"]]
+            st["clause"] = num
+            prev = steps[i - 1]["html"] if i else None
+            st["diff"] = render_diff(prev, st["html"]) if prev is not None else st["html"]
+            st["text"] = " ".join(strip_tags(st["html"]).split())
+            st["crs"] = [{"cr": c["cr"], "rev": c["rev"], "tdoc": c["tdoc"], "subject": c["subject"],
+                          "cat": c["cat"], "meeting": c["meeting"]}
+                         for c in crs if c["lib_version"] == st["version"] and c["detail"]
+                         and any(x == num or num.startswith(x + ".") or x.startswith(num + ".")
+                                 for x in c["detail"]["clauses"])]
+            a = self.db.execute("SELECT data FROM annotation WHERE spec=? AND version=? AND raw_hash=?",
+                                (spec, st["version"], st["raw_hash"])).fetchone()
+            st["annotation"] = json.loads(a["data"]) if a else None
+        return steps
 
     def asset(self, h: str) -> tuple[str, bytes] | None:
         r = self.db.execute("SELECT mime, data FROM asset WHERE hash=?", (h,)).fetchone()

@@ -27,6 +27,56 @@ INTENT_SCHEMA = {
     "additionalProperties": False,
 }
 
+CR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string", "description": "What the CR does, two or three sentences."},
+        "background": {"type": "string", "description": "The problem or motivation behind it, with the meeting/"
+                                                          "Tdoc that raised it where the material shows it."},
+        "changes": {"type": "array", "description": "One entry per changed clause.",
+                    "items": {"type": "object",
+                              "properties": {"clause": {"type": "string"}, "what": {"type": "string"}},
+                              "required": ["clause", "what"], "additionalProperties": False}},
+        "decision": {"type": "string", "description": "What the working group agreed and the alternatives that were "
+                                                        "discussed (from the agreements and moderator summaries); "
+                                                        "empty if the material does not say."},
+        "impact": {"type": "string", "description": "What a UE/modem implementer has to do differently."},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    },
+    "required": ["summary", "background", "changes", "decision", "impact", "confidence"],
+    "additionalProperties": False,
+}
+
+CR_SYSTEM = (
+    "You analyse one 3GPP change request (CR) for physical-layer modem engineers. <cover> is its cover page. "
+    "<cr_changes> are the revision marks of the CR itself, by clause: [+added+] and [-removed-] text. "
+    "<draft_crs> are the working-group draft CRs a combined CR merges; <wg_agreements> are the decisions in the "
+    "meeting reports; <feature_lead_summaries> are excerpts of the moderator's summary: issues, proposals and "
+    "company views. Explain what the CR changes, why, what was decided and what alternatives were discussed. "
+    "Use only the provided material; name the meeting or Tdoc you rely on; when something is not in the material, "
+    "leave that field empty and lower the confidence. "
+    "Write in {language}; keep 3GPP terms (PDSCH, DM-RS, parameter names) in English."
+)
+
+
+def cr_prompt(ev: dict) -> str:
+    parts = [f"Spec {ev['spec']} CR{ev['cr']} ({ev.get('tdoc', '')}).",
+             f"<cover>\n{json.dumps(ev['cover'], ensure_ascii=False, indent=1)}\n</cover>"]
+    if ev.get("changes"):
+        parts.append("<cr_changes>\n" + "\n".join(
+            f"[{c['clause']}]\n" + "\n".join(c["lines"]) for c in ev["changes"]) + "\n</cr_changes>")
+    if ev.get("drafts"):
+        parts.append(f"<draft_crs>\n{json.dumps(ev['drafts'], ensure_ascii=False, indent=1)}\n</draft_crs>")
+    if ev.get("agreements"):
+        ag = [{k: a.get(k) for k in ("meeting", "agenda", "kind", "text")} for a in ev["agreements"]]
+        parts.append(f"<wg_agreements>\n{json.dumps(ag, ensure_ascii=False, indent=1)}\n</wg_agreements>")
+    if ev.get("fl_summaries"):
+        fl = [{k: f.get(k) for k in ("tdoc", "title", "meeting", "excerpt")} for f in ev["fl_summaries"]]
+        parts.append(f"<feature_lead_summaries>\n{json.dumps(fl, ensure_ascii=False, indent=1)}\n"
+                     "</feature_lead_summaries>")
+    return "\n\n".join(parts)
+
+
 SYSTEM = (
     "You explain changes in 3GPP specifications to physical-layer modem engineers. "
     "<changes> lists exactly which words were removed (-) and added (+) in the paragraph. "
@@ -37,6 +87,8 @@ SYSTEM = (
     "background and name the meeting when you rely on one. <feature_lead_summaries> are excerpts of the moderator's "
     "summary of that agenda item: issues, proposals and company views - use them to explain why this option was "
     "chosen and what the alternatives were. "
+    "<cr_analysis> is an earlier, detailed analysis of the CR(s) behind it: keep the summary consistent with it "
+    "and say which part of the CR this paragraph belongs to. "
     "Use only the provided material; when nothing in it explains the change, say so and set confidence to low. "
     "Write in {language}; keep 3GPP terms (PDSCH, DM-RS, parameter names) in English."
 )
@@ -60,6 +112,9 @@ def user_prompt(ch: dict) -> str:
     if ch.get("fl_summaries"):
         fl = [{k: f.get(k) for k in ("tdoc", "title", "meeting", "excerpt")} for f in ch["fl_summaries"]]
         parts.append(f"<feature_lead_summaries>\n{json.dumps(fl, ensure_ascii=False, indent=1)}\n</feature_lead_summaries>")
+    if ch.get("cr_analyses"):
+        ca = [{k: a.get(k) for k in ("cr", "summary", "background", "changes", "decision")} for a in ch["cr_analyses"]]
+        parts.append(f"<cr_analysis>\n{json.dumps(ca, ensure_ascii=False, indent=1)}\n</cr_analysis>")
     if ch.get("relevant_lines"):
         parts.append("<relevant_cr_lines>\n" + "\n".join(ch["relevant_lines"]) + "\n</relevant_cr_lines>")
     parts.append(f"<cr_cover_pages>\n{json.dumps(covers, ensure_ascii=False, indent=1)}\n</cr_cover_pages>")
@@ -181,11 +236,12 @@ class OpenAICompatIntentModel:
         except requests.RequestException as e:
             raise LLMError(f"LLM 서버에 연결할 수 없습니다 (주소·네트워크·프록시 확인): {e}") from e
 
-    def _request(self, messages: list[dict], structured: bool = True) -> dict:
+    def _request(self, messages: list[dict], structured: bool = True, schema: tuple[str, dict] | None = None) -> dict:
         body = {"model": self.model, "messages": messages, "temperature": 0.2}
+        name, sch = schema or ("change_intent", INTENT_SCHEMA)
         if structured and self._schema_mode == "json_schema":
             body["response_format"] = {"type": "json_schema",
-                                       "json_schema": {"name": "change_intent", "schema": INTENT_SCHEMA, "strict": True}}
+                                       "json_schema": {"name": name, "schema": sch, "strict": True}}
         elif structured:
             body["response_format"] = {"type": "json_object"}
         for attempt in range(4):
@@ -216,18 +272,33 @@ class OpenAICompatIntentModel:
         return [{"role": "system", "content": system},
                 {"role": "user", "content": user_prompt(change) + f"\n\nWrite summary, motivation and impact in {self.language}."}]
 
-    def intent(self, change: dict) -> dict | None:
+    def _structured(self, messages, schema: tuple[str, dict]) -> dict:
         try:
-            data = self._request(self._intent_messages(change))
+            return self._request(messages(), schema=schema)
         except _NoJsonSchema as first:
             # Older servers reject json_schema: retry in JSON mode (schema in the prompt). If that fails as
             # well, the 400 was about something else - keep json_schema and report the original error.
             self._schema_mode = "json_object"
             try:
-                data = self._request(self._intent_messages(change))
+                return self._request(messages(), schema=schema)
             except LLMError:
                 self._schema_mode = "json_schema"
                 raise first.error from None
+
+    def intent(self, change: dict) -> dict | None:
+        data = self._structured(lambda: self._intent_messages(change), ("change_intent", INTENT_SCHEMA))
+        return self._answer(data)
+
+    def analyze_cr(self, evidence: dict) -> dict | None:
+        def messages():
+            system = CR_SYSTEM.format(language=self.language)
+            if self._schema_mode != "json_schema":
+                system += "\nReply with only a JSON object matching this schema:\n" + json.dumps(CR_SCHEMA)
+            return [{"role": "system", "content": system},
+                    {"role": "user", "content": cr_prompt(evidence) + f"\n\nWrite every field in {self.language}."}]
+        return self._answer(self._structured(messages, ("cr_analysis", CR_SCHEMA)))
+
+    def _answer(self, data: dict) -> dict | None:
         choice = (data.get("choices") or [{}])[0]
         text = (choice.get("message") or {}).get("content")
         if not text:

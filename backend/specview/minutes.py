@@ -467,12 +467,7 @@ def _doc_file(folder: str, tdoc: str | None, cache_dir: Path) -> Path | None:
 
 def document_html(folder: str, tdoc: str | None, cache_dir: Path) -> dict:
     """A meeting report or Tdoc as HTML for the viewer window (images inlined, equations as KaTeX spans)."""
-    import base64
-    import tempfile
-
-    from lxml import html as lhtml
-
-    from .parse_docx import _fix_multiline_math, _rewrite_images, _run_pandoc, _serialize
+    from .parse_docx import docx_view_html
 
     if not _FOLDER_URL.match(folder) or (tdoc is not None and not _TDOC_ID.match(tdoc)):
         raise ValueError("not a 3GPP working-group meeting document")
@@ -481,16 +476,7 @@ def document_html(folder: str, tdoc: str | None, cache_dir: Path) -> dict:
         raise FileNotFoundError(f"{tdoc or 'report'} not found in {folder_name(folder)}")
     cached = doc.with_suffix(".html")
     if not cached.exists():
-        with tempfile.TemporaryDirectory() as tmp:
-            media = Path(tmp) / "media"
-            root = lhtml.fragment_fromstring(_run_pandoc(doc, media), create_parent="div")
-            assets = _rewrite_images(root, media)
-            _fix_multiline_math(root)
-            for img in root.xpath("//img[starts-with(@src, '/api/asset/')]"):
-                a = assets.get(img.get("src").rsplit("/", 1)[-1])
-                if a:
-                    img.set("src", f"data:{a.mime};base64,{base64.b64encode(a.data).decode()}")
-            cached.write_text("".join(_serialize(el) for el in root), encoding="utf-8")
+        cached.write_text(docx_view_html(doc), encoding="utf-8")
     title = ""
     if tdoc:
         rep = fetch_report(folder, cache_dir) or {}

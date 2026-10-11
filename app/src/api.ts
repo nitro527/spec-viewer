@@ -76,8 +76,29 @@ export interface Annotation {
   crs: { cr: string; tdoc: string; subject: string }[]; features: string[];
   agreements: { meeting?: string; agenda?: string; kind?: string; text: string; source?: string; folder?: string; via?: "tdoc" | "clause" | "terms" }[]; intent: Intent | null; intent_error?: string;
   draft_crs?: { tdoc: string; title: string; parent_cr: string; meeting: string; folder?: string }[];
+  cr_analyses?: { cr: string; rev: string; tdoc: string }[];
   fl_summaries?: { tdoc: string; title: string; source: string; meeting: string; agenda: string; url: string; excerpt: string }[];
 }
+
+export interface CRAnalysis {
+  spec: string; cr: string; rev: string; tdoc: string; meeting: string; title: string; version: string | null;
+  summary: string; background: string; changes: { clause: string; what: string }[]; decision: string; impact: string;
+  confidence: string; model?: string; generated?: string;
+  evidence?: {
+    changes: { clause: string; lines: string[] }[]; drafts: { tdoc: string; title: string }[];
+    agreements: { meeting?: string; agenda?: string; kind?: string; text: string; folder?: string }[];
+    fl_summaries: { tdoc: string; title: string; meeting: string; url: string; excerpt: string }[];
+  };
+}
+
+/** One text a paragraph had (Library.block_lineage), oldest first. */
+export interface LineageStep {
+  version: string; change: string; clause_key: string; clause: string; raw_hash: string; html: string; diff: string;
+  text: string; crs: { cr: string; rev: string; tdoc: string; subject: string; cat: string; meeting: string }[];
+  annotation: Annotation | null;
+}
+
+export const crKey = (cr: string, tdoc: string) => `${cr}|${tdoc}`;
 
 export interface Note { clause_key: string; bookmark: number; text: string; version: string | null; updated: string }
 
@@ -90,7 +111,10 @@ export interface LlmSettings extends LlmProviderSettings {
   presets: Record<string, { base_url: string; model: string }>;
 }
 export interface LlmForm { provider?: string; base_url?: string; model?: string; api_key?: string; clear_key?: boolean }
-export interface IntentRequest { spec: string; version: string; clause_key?: string; limit?: number | null; skip_uncovered?: boolean; force?: boolean }
+export interface IntentRequest {
+  spec: string; version: string; clause_key?: string; limit?: number | null; skip_uncovered?: boolean; force?: boolean;
+  targets?: { version: string; clause_key: string; raw_hash: string }[];
+}
 
 export interface MeetingDoc { meeting: string; tdoc: string | null; title: string; html: string; url: string | null }
 
@@ -153,8 +177,15 @@ export const api = {
   testLlm: (form: LlmForm) => send<{ model: string; reply: string; seconds: number }>("POST", "/api/llm/test", form),
   llmModels: (form: LlmForm) => send<{ models: string[] }>("POST", "/api/llm/models", form),
   makeIntents: (req: IntentRequest) => send<Job>("POST", "/api/intent", req),
+  lineage: (spec: string, v: string, key: string, hash: string) =>
+    get<LineageStep[]>(`/api/specs/${s(spec)}/${s(v)}/clause/${s(key)}/lineage?hash=${s(hash)}`),
+  crAnalyses: (spec: string) => get<CRAnalysis[]>(`/api/specs/${s(spec)}/cr-analyses`),
+  analyzeCR: (spec: string, cr: string, tdoc: string, force = false) =>
+    send<Job>("POST", "/api/cr-analysis", { spec, cr, tdoc, force }),
   meetingDoc: (folder: string, tdoc?: string) =>
     get<MeetingDoc>(`/api/meeting-doc?folder=${s(folder)}${tdoc ? `&tdoc=${s(tdoc)}` : ""}`),
+  crDoc: (spec: string, cr: string, tdoc: string) =>
+    get<MeetingDoc>(`/api/cr-doc?spec=${s(spec)}&cr=${s(cr)}&tdoc=${s(tdoc)}`),
   featuresStatus: () => get<{ count: number; source: string | null }>("/api/features"),
   searchFeatures: (q: string) => get<UEFeature[]>(`/api/features/search?q=${s(q)}`),
   featureLinks: (section: string, index: string) => get<FeatureLinks>(`/api/features/${s(section)}/${s(index)}/links`),

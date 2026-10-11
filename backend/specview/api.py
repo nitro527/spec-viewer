@@ -1,6 +1,7 @@
 """Local HTTP API consumed by the viewer UI (served on 127.0.0.1 only)."""
 from __future__ import annotations
 
+import datetime as dt
 import os
 import threading
 import uuid
@@ -36,6 +37,15 @@ class IntentRequest(BaseModel):
     limit: int | None = 20
     skip_uncovered: bool = True
     force: bool = False  # summarize again even where a summary exists (e.g. after better evidence is available)
+    # single paragraph texts, e.g. the steps of a paragraph's history: {"version", "clause_key", "raw_hash"}
+    targets: list[dict] | None = None
+
+
+class CRAnalysisRequest(BaseModel):
+    spec: str
+    cr: str
+    tdoc: str
+    force: bool = False  # analyse again (e.g. after a better model is set up)
 
 
 class FetchRequest(BaseModel):
@@ -167,6 +177,11 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             raise HTTPException(502, f"annotation server: {e}")
         return {"packs": n}
 
+    @app.get("/api/specs/{spec}/{version}/clause/{key}/lineage")
+    def clause_lineage(spec: str, version: str, key: str, hash: str):
+        """Every text one paragraph had, with diffs, CRs and stored summaries per step."""
+        return _get(lib.block_lineage, spec, version, key, hash)
+
     @app.get("/api/specs/{spec}/{version}/clause/{key}/annotations")
     def clause_annotations(spec: str, version: str, key: str):
         return _get(lib.clause_annotations, spec, version, key)
@@ -256,30 +271,65 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         except intent.LLMError as e:
             raise HTTPException(400, str(e))
 
+    def _cr_analyzer(reader: Library, spec: str, model: intent.OpenAICompatIntentModel, job: dict,
+                     force: set[tuple] = frozenset()):
+        """Analyses of CR rows, stored ones as they are, missing ones made now (one LLM request each)."""
+        from . import cranalysis
+        from .pack import AgreementFinder
+
+        finder = AgreementFinder(home / "cache")
+
+        def run(rows: list[dict]) -> list[dict]:
+            out = []
+            for row in rows:
+                key = (row["cr"], row["rev"], row["tdoc"])
+                have = None if key in force else reader.cr_analysis(spec, *key)
+                if have is None:
+                    job["message"] = f"{spec} CR{row['cr']} 분석 중 (CR 문서·회의 자료 모으는 중)"
+                    ev = cranalysis.evidence(reader, spec, row, home / "cache", finder)
+                    job["message"] = f"{spec} CR{row['cr']} 분석 중 (AI 요청)"
+                    res = model.analyze_cr(ev)
+                    if not res:
+                        continue
+                    have = {**res, "spec": spec, "cr": row["cr"], "rev": row["rev"], "tdoc": row["tdoc"],
+                            "meeting": row["meeting"], "title": row["detail"].get("title") or row["subject"],
+                            "version": row["lib_version"], "evidence": cranalysis.brief(ev),
+                            "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+                    with lock:
+                        lib.save_cr_analysis(spec, *key, have)
+                    job["cr_made"] = job.get("cr_made", 0) + 1
+                out.append(have)
+            return out
+        return run
+
     def _run_intent(job_id: str, req: IntentRequest, model: intent.OpenAICompatIntentModel):
         from .pack import build_pack
 
         job = jobs[job_id]
         reader = Library(home / "library.sqlite")  # own connection: LLM calls are slow, don't hold the lock
         try:
-            if req.clause_key:  # blocks of the clause as shown, each under the version that introduced it
+            analyzer = _cr_analyzer(reader, req.spec, model, job)
+            if req.targets:
+                plan = [(t["version"], t["clause_key"], {t["raw_hash"]}) for t in req.targets]
+            elif req.clause_key:  # blocks of the clause as shown, each under the version that introduced it
                 clause = next((c for c in reader.clauses(req.spec, req.version, 0, 100000)
                                if c["key"] == req.clause_key), None)
                 blocks = clause["blocks"] if clause else []
                 versions = sorted({b["changed"] for b in blocks if b["changed"]}, key=lambda v: Version.parse(v).sort_key)
                 current = {b["raw_hash"] for b in blocks}  # not texts the clause replaced again later
+                plan = [(v, req.clause_key, current) for v in versions]
             else:
-                versions, current = [req.version], None
+                plan = [(req.version, None, None)]
             made, errors, stopped, uncovered, capped, asked = 0, [], None, 0, 0, 0
-            for v in versions:
+            for v, clause_key, only in plan:
                 def prog(i, n):
                     job["done"], job["total"] = i, n
                     job["message"] = f"{req.spec} v{v}: AI 요약 {i}/{n}"
                 left = None if req.limit is None else max(req.limit - asked, 0)  # the limit is per job
                 pack = build_pack(reader, req.spec, v, model, progress=prog, limit=left,
-                                  clause_key=req.clause_key, skip_uncovered=req.skip_uncovered,
+                                  clause_key=clause_key, skip_uncovered=req.skip_uncovered,
                                   skip_hashes=set() if req.force else reader.intent_hashes(req.spec, v),
-                                  only_hashes=current)
+                                  only_hashes=only, cr_analyzer=analyzer)
                 with lock:
                     made += lib.merge_pack(pack)
                 errors += [c["intent_error"] for c in pack["changes"] if c.get("intent_error")]
@@ -289,11 +339,13 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 if stopped := pack["generator"].get("stopped"):
                     break
             msg = f"AI 요약 {made}개 만듦 ({model.name})"
+            if job.get("cr_made"):
+                msg += f" · CR 분석 {job['cr_made']}개 새로 만듦"
             if stopped:
                 msg += f" · 중단: {stopped}"
             elif errors:
                 msg += f" · 실패 {len(errors)}개: {errors[0]}"
-            elif not versions:
+            elif not plan:
                 msg = "이 절에는 변경된 문단이 없습니다"
             if capped:
                 msg += f" · 최대 요청 수에 걸려 {capped}개 남음 (다시 시작하면 이어서 함)"
@@ -321,6 +373,44 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         threading.Thread(target=_run_intent, args=(job_id, req, model), daemon=True).start()
         return jobs[job_id]
 
+    @app.get("/api/specs/{spec}/cr-analyses")
+    def cr_analyses(spec: str):
+        """Stored CR analyses of a spec (the panel shows them for every paragraph their CR touched)."""
+        with lock:
+            return lib.cr_analyses(spec)
+
+    def _run_cr_analysis(job_id: str, req: CRAnalysisRequest, row: dict, model: intent.OpenAICompatIntentModel):
+        job = jobs[job_id]
+        reader = Library(home / "library.sqlite")
+        try:
+            got = _cr_analyzer(reader, req.spec, model, job, force={(row["cr"], row["rev"], row["tdoc"])})([row])
+            job["state"] = "done" if got else "error"
+            job["message"] = f"{req.spec} CR{req.cr} 분석 완료 ({model.name})" if got else "AI 응답이 비어 있습니다"
+        except intent.LLMError as e:
+            job["state"], job["message"] = "error", str(e)
+        except Exception as e:
+            job["state"], job["message"] = "error", f"CR 분석 실패: {e}"
+        finally:
+            reader.close()
+
+    @app.post("/api/cr-analysis")
+    def make_cr_analysis(req: CRAnalysisRequest):
+        """Analyse one CR of a downloaded spec's Change history (cover page needed) in a background job."""
+        with lock:
+            row = next((c for c in lib.crs(req.spec) if c["cr"] == req.cr and c["tdoc"] == req.tdoc), None)
+        if row is None or not row["detail"]:
+            raise HTTPException(404, f"CR{req.cr} ({req.tdoc}) 의 표지가 없습니다. 스펙을 CR 정보와 함께 받으세요")
+        model = _llm()
+        if not model.api_key and "googleapis.com" in model.base_url:
+            raise HTTPException(400, "Gemini API 키를 먼저 저장하세요")
+        if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
+            raise HTTPException(409, "AI 작업이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
+        job_id = uuid.uuid4().hex[:8]
+        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 1, "message": f"CR{req.cr} 분석 준비",
+                        "specs": [req.spec], "kind": "intent"}
+        threading.Thread(target=_run_cr_analysis, args=(job_id, req, row, model), daemon=True).start()
+        return jobs[job_id]
+
     # ---- downloads (background jobs) ----
 
     @app.get("/api/meeting-doc")
@@ -332,6 +422,20 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             return minutes.document_html(folder, tdoc, home / "cache")
         except ValueError as e:
             raise HTTPException(400, str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e))
+
+    @app.get("/api/cr-doc")
+    def cr_doc(spec: str, cr: str, tdoc: str):
+        """A CR of the spec's Change history rendered for the document viewer window."""
+        from . import crdocs
+
+        with lock:
+            row = next((c for c in lib.crs(spec) if c["cr"] == cr and c["tdoc"] == tdoc), None)
+        if row is None:
+            raise HTTPException(404, f"CR{cr} ({tdoc}) is not in the Change history of {spec}")
+        try:
+            return crdocs.cr_document_html(spec, cr, tdoc, row["meeting"], home / "cache")
         except FileNotFoundError as e:
             raise HTTPException(404, str(e))
 
