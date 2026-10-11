@@ -4,13 +4,14 @@ import { api, type CR, type Note, type SearchHit, type TocEntry, type VersionInf
 import { highlightCss, highlighted, versionColors } from "../colors";
 import { CommandPalette } from "./CommandPalette";
 import { CompareView, VersionSelect } from "./CompareView";
+import { CRBrowser } from "./CRBrowser";
 import { FindBar } from "./FindBar";
 import { HistoryView, type HistoryViewHandle, type Selection } from "./HistoryView";
 import { ChangeRuler, InfoPanel, Toc } from "./Panels";
 import { StatsView } from "./StatsView";
 import { Timeline } from "./Timeline";
 
-export type Mode = "history" | "compare" | "clean" | "stats";
+export type Mode = "history" | "compare" | "clean" | "stats" | "crs";
 
 export interface TabState {
   id: string;
@@ -117,7 +118,7 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
   }, [crs]);
 
   const jump = useCallback((ord: number, block: number | null = null) => {
-    const away = mode === "compare" || mode === "stats";
+    const away = mode === "compare" || mode === "stats" || mode === "crs";
     if (away) setMode("history");
     setTimeout(() => view.current?.scrollToOrd(ord, block), away ? 80 : 0);
   }, [mode]);
@@ -170,9 +171,9 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
                          onChange={setBaseline} label="이후 변경 표시" />
         )}
         <div className="seg">
-          {(["history", "compare", "clean", "stats"] as Mode[]).map((m) => (
+          {(["history", "compare", "clean", "stats", "crs"] as Mode[]).map((m) => (
             <button key={m} className={mode === m ? "on" : ""} onClick={() => setMode(m)}>
-              {{ history: "History", compare: "Compare", clean: "Clean", stats: "Statistics" }[m]}
+              {{ history: "History", compare: "Compare", clean: "Clean", stats: "Statistics", crs: "CR" }[m]}
             </button>
           ))}
         </div>
@@ -204,7 +205,10 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
 
         <main className="center">
           {findOpen && <FindBar spec={spec} version={version} onGo={onFind} onClose={() => setFindOpen(false)} />}
-          {mode === "stats" ? (
+          {mode === "crs" ? (
+            <CRBrowser spec={spec} crs={crs} toc={toc} colors={colors} onJump={(o) => jump(o)}
+                       onFetchCrs={fetchCrs} fetching={crJob} />
+          ) : mode === "stats" ? (
             <StatsView spec={spec} colors={colors}
                        onJump={(key) => { const e = toc.find((t) => t.key === key); if (e) jump(e.ord); }}
                        onCompare={(v) => {
