@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -116,19 +117,44 @@ def _level_for(tag: str, number: str) -> int:
     return int(tag[1]) if tag in HEADING_TAGS else 1
 
 
+def convert_workers() -> int:
+    """How many pandoc conversions run at once: SPECVIEW_CONVERT_WORKERS, else half the CPU cores up to 4 (each
+    pandoc on a big spec can take a gigabyte or more of memory; 4 at once is ~3x faster than one)."""
+    default = max(1, min(4, (os.cpu_count() or 2) // 2))
+    try:
+        return max(1, min(8, int(os.environ.get("SPECVIEW_CONVERT_WORKERS", default))))
+    except ValueError:
+        return default
+
+
+_SLOTS: threading.BoundedSemaphore | None = None
+_SLOTS_LOCK = threading.Lock()
+
+
+def _pandoc_slot() -> threading.BoundedSemaphore:
+    """One limit for every pandoc in the process: versions converted in parallel, and the parts of a split
+    spec converted in parallel within each, never run more than convert_workers() at a time."""
+    global _SLOTS
+    with _SLOTS_LOCK:
+        if _SLOTS is None:
+            _SLOTS = threading.BoundedSemaphore(convert_workers())
+        return _SLOTS
+
+
 def _run_pandoc(docx: Path, media_dir: Path, track_changes: bool = False) -> str:
     if not shutil.which("pandoc"):
         raise RuntimeError("pandoc is required to convert .docx files (https://pandoc.org)")
     timeout = float(os.environ.get("SPECVIEW_PANDOC_TIMEOUT") or 1800)  # the biggest specs take a few minutes
     try:
-        proc = subprocess.run(
-            [
-                "pandoc", "-f", "docx+styles", "-t", "html", "--katex",
-                f"--extract-media={media_dir}", "--wrap=none", *(["--track-changes=all"] if track_changes else []),
-                str(docx),
-            ],
-            capture_output=True, check=True, timeout=timeout,
-        )
+        with _pandoc_slot():
+            proc = subprocess.run(
+                [
+                    "pandoc", "-f", "docx+styles", "-t", "html", "--katex",
+                    f"--extract-media={media_dir}", "--wrap=none", *(["--track-changes=all"] if track_changes else []),
+                    str(docx),
+                ],
+                capture_output=True, check=True, timeout=timeout,
+            )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"pandoc took more than {timeout:.0f} s on {Path(docx).name} (SPECVIEW_PANDOC_TIMEOUT)")
     except subprocess.CalledProcessError as e:
@@ -357,7 +383,13 @@ def guess_title(clauses: list[Clause]) -> str | None:
 def parse_docx(docx: Path | list[Path]) -> ParsedSpec:
     """One spec from a .docx, or from the parts a large spec is split into (cover, s00-s05, s06-s08 ...)."""
     if isinstance(docx, (list, tuple)):
-        parts = [_parse_one(Path(p)) for p in docx]
+        if len(docx) > 1:  # each part is its own pandoc run: convert them side by side (38.101-1: 5 parts)
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(len(docx)) as ex:
+                parts = list(ex.map(lambda p: _parse_one(Path(p)), docx))
+        else:
+            parts = [_parse_one(Path(p)) for p in docx]
         return merge_parts(sorted(parts, key=_part_order)) if len(parts) > 1 else parts[0]
     return _parse_one(Path(docx))
 

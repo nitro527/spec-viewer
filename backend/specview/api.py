@@ -105,13 +105,9 @@ def _llm_timeout() -> float:
 
 
 def _convert_workers() -> int:
-    """How many versions are downloaded and converted at once: SPECVIEW_CONVERT_WORKERS, else half the CPU cores
-    up to 4 (each pandoc on a big spec can take a gigabyte or more of memory; 4 at once is ~3x faster than one)."""
-    default = max(1, min(4, (os.cpu_count() or 2) // 2))
-    try:
-        return max(1, min(8, int(os.environ.get("SPECVIEW_CONVERT_WORKERS", default))))
-    except ValueError:
-        return default
+    from .parse_docx import convert_workers
+
+    return convert_workers()
 
 
 def _short_error(e: Exception) -> str:
