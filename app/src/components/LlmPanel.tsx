@@ -121,6 +121,7 @@ export function LlmPanel({ specs, onJob }: { specs: SpecInfo[]; onJob: (j: Job) 
       </div>
 
       <IntentRunner specs={specs} ready={!!saved && (saved.has_key || !isGemini) && !dirty} onJob={onJob} />
+      <FullRunner specs={specs} ready={!!saved && (saved.has_key || !isGemini) && !dirty} />
     </section>
   );
 }
@@ -178,6 +179,97 @@ function IntentRunner({ specs, ready, onJob }: { specs: SpecInfo[]; ready: boole
             오른쪽 “변경 의도”의 <b>AI 로 요약</b>을 누르세요. 진행 상황은 바로 아래에 나옵니다.
           </p>
         </>
+      )}
+    </div>
+  );
+}
+
+/** "④ 전체 분석": every changed paragraph of every version of every spec, then the CRs left, then every work item.
+ *  Meant to run unattended (overnight); it saves as it goes, skips what is done and can be stopped any time. */
+function FullRunner({ specs, ready }: { specs: SpecInfo[]; ready: boolean }) {
+  const [job, setJob] = useState<Job | null>(null);
+  const [chosen, setChosen] = useState<Set<string> | null>(null);  // null: every spec
+  const [skipUncovered, setSkipUncovered] = useState(true);
+  const [crs, setCrs] = useState(true);
+  const [wis, setWis] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {  // pick up a run started earlier (the app tab was reopened)
+    const load = () => api.jobs().then((js) => {
+      const full = js.filter((j) => j.full);
+      setJob(full.find((j) => j.state === "running") ?? full[full.length - 1] ?? null);
+    }, () => undefined);
+    load();
+    const t = setInterval(() => { load(); setNow(Date.now()); }, 3000);
+    return () => clearInterval(t);
+  }, []);
+
+  const running = job?.state === "running";
+  const picked = chosen ?? new Set(specs.map((x) => x.number));
+  const start = async () => {
+    setError(null);
+    const list = specs.map((x) => x.number).filter((n) => picked.has(n));
+    if (!confirm(`스펙 ${list.length}개의 모든 버전을 AI 로 분석합니다. 요청 수가 많아 몇 시간 걸릴 수 있습니다.\n`
+      + "이미 분석한 것은 건너뛰고, 중간에 멈추거나 앱을 꺼도 다시 시작하면 이어서 합니다. 시작할까요?")) return;
+    try {
+      setJob(await api.fullAnalysis({ specs: chosen ? list : null, skip_uncovered: skipUncovered, cr_analyses: crs, wi_summaries: wis }));
+    } catch (e) {
+      setError(errText(e));
+    }
+  };
+  const elapsed = (j: Job) => {
+    if (!j.started) return "";
+    const ms = (j.finished ? Date.parse(j.finished) : now) - Date.parse(j.started);
+    const m = Math.max(0, Math.round(ms / 60000));
+    return m >= 60 ? `${Math.floor(m / 60)}시간 ${m % 60}분` : `${m}분`;
+  };
+
+  return (
+    <div className="step full-run">
+      <h3>④ 전체 분석 <span className="muted small">(퇴근할 때 걸어 두기)</span></h3>
+      <p className="small muted">
+        받은 스펙의 <b>모든 버전</b>에서 바뀐 문단을 최신 버전부터 요약하고(관련 CR 분석 포함), 이어서 남은 CR 분석과
+        모든 WI 요약을 만듭니다. 조금씩 바로 저장하므로 중간에 멈추거나 앱을 꺼도 다시 시작하면 이어서 합니다.
+        LLM 서버가 잠시 끊기면 기다렸다가 다시 시도하고, 도는 동안 PC 절전을 막습니다(Windows).
+      </p>
+      {!running && (
+        <>
+          <div className="row full-specs">
+            {specs.map((x) => (
+              <label key={x.number} className="small">
+                <input type="checkbox" checked={picked.has(x.number)} onChange={(e) => {
+                  const n = new Set(picked);
+                  if (e.target.checked) n.add(x.number); else n.delete(x.number);
+                  setChosen(n.size === specs.length ? null : n);
+                }} /> {x.number}
+              </label>
+            ))}
+          </div>
+          <label className="small"><input type="checkbox" checked={skipUncovered} onChange={(e) => setSkipUncovered(e.target.checked)} />
+            {" "}CR 이 연결되지 않은 변경 건너뛰기 (표지·저작권 연도 등)</label>
+          <label className="small"><input type="checkbox" checked={crs} onChange={(e) => setCrs(e.target.checked)} />
+            {" "}남은 CR 도 모두 분석 (표지가 있는 CR)</label>
+          <label className="small"><input type="checkbox" checked={wis} onChange={(e) => setWis(e.target.checked)} />
+            {" "}마지막에 모든 WI 요약</label>
+          <div className="row actions">
+            <button className="primary" onClick={start} disabled={!ready || !picked.size}>전체 분석 시작</button>
+            {!ready && <span className="small muted">①에서 설정을 저장하면 시작할 수 있습니다</span>}
+          </div>
+        </>
+      )}
+      {error && <p className="small status-error">{error}</p>}
+      {job && (
+        <div className={`full-status ${job.state}`}>
+          <p className="small"><b>{running ? "진행 중" : job.state === "done" && !job.stopped ? "끝남" : "멈춤"}</b>
+            {" · "}{elapsed(job)}{running && job.total > 0 && ` · 이 버전 ${job.done}/${job.total}`}</p>
+          <p className="small">{job.message}</p>
+          {job.counts && (
+            <p className="small muted">새로 만든 것: 문단 요약 {job.counts.intents} · CR 분석 {job.counts.cr_analyses}
+              {" · "}WI 요약 {job.counts.wi_summaries}{job.counts.failed ? ` · 실패 ${job.counts.failed}` : ""}</p>
+          )}
+          {running && <button onClick={() => api.cancelJob(job.id).then(setJob, () => undefined)}>중지</button>}
+        </div>
       )}
     </div>
   );

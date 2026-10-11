@@ -135,7 +135,12 @@ export interface IntentRequest {
 
 export interface MeetingDoc { meeting: string; tdoc: string | null; title: string; html: string; url: string | null }
 
-export interface Job { id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[]; kind?: "intent" }
+export interface Job {
+  id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[]; kind?: "intent";
+  full?: boolean; started?: string; finished?: string; stopped?: boolean;
+  counts?: { intents: number; cr_analyses: number; wi_summaries: number; failed: number };
+}
+export interface FullAnalysisRequest { specs: string[] | null; skip_uncovered: boolean; cr_analyses: boolean; wi_summaries: boolean }
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
@@ -197,6 +202,8 @@ export const api = {
   testLlm: (form: LlmForm) => send<{ model: string; reply: string; seconds: number }>("POST", "/api/llm/test", form),
   llmModels: (form: LlmForm) => send<{ models: string[] }>("POST", "/api/llm/models", form),
   makeIntents: (req: IntentRequest) => send<Job>("POST", "/api/intent", req),
+  fullAnalysis: (req: FullAnalysisRequest) => send<Job>("POST", "/api/full-analysis", req),
+  cancelJob: (id: string) => send<Job>("POST", `/api/jobs/${s(id)}/cancel`, {}),
   lineage: (spec: string, v: string, key: string, hash: string) =>
     get<LineageStep[]>(`/api/specs/${s(spec)}/${s(v)}/clause/${s(key)}/lineage?hash=${s(hash)}`),
   crAnalyses: (spec: string) => get<CRAnalysis[]>(`/api/specs/${s(spec)}/cr-analyses`),
