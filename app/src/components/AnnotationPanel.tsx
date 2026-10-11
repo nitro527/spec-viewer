@@ -1,7 +1,8 @@
 // Change intent: AI summaries made with the user's own LLM API, or synced from the annotation server
 // (both optional; the viewer works without them).
 import { useEffect, useState } from "react";
-import { api, tdocUrl, type Annotation } from "../api";
+import { api, crKey, tdocUrl, type Annotation } from "../api";
+import { CRAnalysisCard, useCRAnalyses } from "./CRAnalysis";
 import { findKey, openMeetingDoc } from "./DocWindow";
 
 const VIA = { tdoc: "이 CR 의 Tdoc 이 나오는 결정", clause: "이 절에 대한 TP/CR", terms: "바뀐 내용과 용어가 겹침" } as const;
@@ -14,6 +15,7 @@ export function AnnotationPanel({ spec, version, clauseKey, rawHash }: {
   const [reload, setReload] = useState(0);
   const [llmReady, setLlmReady] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
+  const analyses = useCRAnalyses(spec);
 
   useEffect(() => {
     api.annotations(spec, version, clauseKey).then(setItems, () => setItems([]));
@@ -98,6 +100,8 @@ export function AnnotationPanel({ spec, version, clauseKey, rawHash }: {
                 </p>
               )}
               <p className="muted tiny">신뢰도 {a.intent.confidence}{a.intent.model ? ` · ${a.intent.model}` : ""} · AI 요약은 CR 원문으로 확인하세요</p>
+              {(a.cr_analyses ?? []).map((k) => analyses.get(crKey(k.cr, k.tdoc))).filter((x) => !!x)
+                .map((x) => <CRAnalysisCard key={x!.tdoc + x!.cr} a={x!} spec={spec} />)}
             </>
           ) : <p className="muted small">의도 요약 없음{a.intent_error ? ` (${a.intent_error})` : " (CR 매핑만 있음)"}</p>}
           {!!a.fl_summaries?.length && <p className="small"><b>회의 논의 (FL summary)</b> <span className="muted tiny">쟁점·제안·회사 의견 중 이 변경 관련 부분</span></p>}

@@ -1,9 +1,11 @@
 // Side panels: table of contents (left) and change information (right).
 import { useEffect, useMemo, useRef, useState } from "react";
-import { cmpVersion, crTouches, tdocUrl, type CR, type Note, type TocEntry } from "../api";
+import { cmpVersion, crKey, crTouches, tdocUrl, type CR, type CRAnalysis, type Note, type TocEntry } from "../api";
 import { openCRDoc } from "./DocWindow";
+import { useCRAnalyses } from "./CRAnalysis";
 import type { VersionColor } from "../colors";
 import { AnnotationPanel } from "./AnnotationPanel";
+import { ParagraphHistory } from "./ParagraphHistory";
 import { FeaturePanel } from "./FeaturePanel";
 import type { Selection } from "./HistoryView";
 
@@ -91,7 +93,7 @@ export function ChangeRuler({ toc, baseline, onJump }: { toc: TocEntry[]; baseli
   );
 }
 
-function CRItem({ cr, hit }: { cr: CR; hit?: boolean }) {
+function CRItemView({ cr, hit, analysis }: { cr: CR; hit?: boolean; analysis?: CRAnalysis }) {
   const d = cr.detail;
   return (
     <li className={hit ? "hit" : ""}>
@@ -105,6 +107,8 @@ function CRItem({ cr, hit }: { cr: CR; hit?: boolean }) {
           <button className="link tiny" title="CR 문서(표지와 바뀐 절, 수정 표시 포함)를 별도 창으로 엽니다"
                   onClick={() => openCRDoc(cr.spec, cr.cr, cr.tdoc)}>문서 보기</button>
         )}
+        {analysis && <button className="link tiny analysed" title={analysis.summary}
+                             onClick={() => openCRDoc(cr.spec, cr.cr, cr.tdoc)}>AI 분석 있음</button>}
       </div>
       <div>{cr.subject}</div>
       {d && (
@@ -125,7 +129,9 @@ function CRItem({ cr, hit }: { cr: CR; hit?: boolean }) {
 }
 
 function CRList({ crs, clause }: { crs: CR[]; clause?: string }) {
+  const analyses = useCRAnalyses(crs[0]?.spec ?? "");
   if (!crs.length) return <p className="muted small">Change history 에 CR 기록 없음</p>;
+  const CRItem = (p: { cr: CR; hit?: boolean }) => <CRItemView {...p} analysis={analyses.get(crKey(p.cr.cr, p.cr.tdoc))} />;
   const haveDetail = crs.some((c) => c.detail);
   if (!clause || !haveDetail) return <ul className="cr-list">{crs.map((cr, i) => <CRItem key={i} cr={cr} />)}</ul>;
   const hits = crs.filter((c) => crTouches(c, clause));
@@ -182,7 +188,11 @@ export function InfoPanel({ spec, selection, version, baseline, crsByVersion, co
       </div>
       {selection ? (
         <>
-          <p className="muted small">{block ? "선택한 문단" : "절 전체"}의 변경 이력</p>
+          {block && (
+            <ParagraphHistory spec={spec} version={version} clauseKey={selection.clause.key} rawHash={block.raw_hash}
+                              colors={colors} />
+          )}
+          <p className="muted small">{block ? "이 문단이 바뀐 버전에 반영된 CR" : "절 전체의 변경 이력"}</p>
           <ol className="timeline">
             <li>
               <span className="chip" style={{ background: colors.get(introduced ?? "")?.solid }} />

@@ -195,10 +195,12 @@ def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None 
                progress: Callable[[int, int], None] | None = None, limit: int | None = None,
                clause_key: str | None = None, skip_uncovered: bool = False,
                skip_hashes: set[str] | frozenset = frozenset(), only_hashes: set[str] | None = None,
-               resolve_drafts: bool = True, find_agreements: bool = True) -> dict:
+               resolve_drafts: bool = True, find_agreements: bool = True,
+               cr_analyzer: Callable[[list[dict]], list[dict]] | None = None) -> dict:
     """``limit`` caps the LLM requests; ``skip_uncovered`` leaves changes no CR explains (front matter,
     copyright year ...) to the rules; ``skip_hashes`` are blocks that already have a summary;
-    ``only_hashes`` restricts the pack to those blocks (e.g. the texts a clause shows today)."""
+    ``only_hashes`` restricts the pack to those blocks (e.g. the texts a clause shows today);
+    ``cr_analyzer`` returns the (stored or new) analyses of the CRs behind a change, given their rows."""
     crs = [c for c in lib.crs(spec, version) if c["detail"]]
     changes = changed_blocks(lib, spec, version, clause_key)
     if only_hashes is not None:
@@ -240,6 +242,9 @@ def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None 
                 ch["fl_summaries"] = [{k: f[k] for k in ("tdoc", "title", "source", "meeting", "agenda", "url")}
                                       | {"excerpt": f["excerpt"][:1200]} for f in ctx["fl_summaries"]]
             try:
+                if cr_analyzer and hit:  # the CRs first: analysed once, reused by every paragraph they touch
+                    ctx["cr_analyses"] = cr_analyzer(hit)
+                    ch["cr_analyses"] = [{k: a[k] for k in ("cr", "rev", "tdoc")} for a in ctx["cr_analyses"]]
                 ch["intent"] = model.intent(ctx)
             except QuotaExceeded as e:  # every later request would fail the same way
                 stopped = str(e)

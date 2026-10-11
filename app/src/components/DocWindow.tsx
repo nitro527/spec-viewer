@@ -2,7 +2,8 @@
 // spec's Change history. Opened as /#/doc?folder=...&tdoc=...&find=... (scrolls to the passage the panel quoted)
 // or /#/doc?spec=...&cr=...&tdoc=... (a CR, with its revision marks).
 import { useEffect, useRef, useState } from "react";
-import { api, tdocUrl, type MeetingDoc } from "../api";
+import { api, crKey, tdocUrl, type MeetingDoc } from "../api";
+import { CRAnalysisFull, useAiJob, useCRAnalyses } from "./CRAnalysis";
 import { Html } from "./Html";
 
 const norm = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
@@ -81,6 +82,7 @@ export function DocWindow() {
       </header>
       {error && <p className="error docwin-body">{error}</p>}
       {!doc && !error && <p className="muted docwin-body">문서를 받아서 변환하는 중… (처음 여는 문서는 몇 초 걸립니다)</p>}
+      {spec && cr && tdoc && <CRAnalysisSection spec={spec} cr={cr} tdoc={tdoc} />}
       {doc && (
         <div ref={body} className="docwin-body" onClick={(e) => {
           // a Tdoc of the same meeting (R1-1812056) opens in another viewer window instead of the browser
@@ -96,5 +98,31 @@ export function DocWindow() {
         </div>
       )}
     </div>
+  );
+}
+
+function CRAnalysisSection({ spec, cr, tdoc }: { spec: string; cr: string; tdoc: string }) {
+  const analyses = useCRAnalyses(spec);
+  const job = useAiJob();
+  const [llmReady, setLlmReady] = useState(false);
+  useEffect(() => {
+    api.llm().then((s) => setLlmReady(s.has_key || s.provider !== "gemini"), () => setLlmReady(false));
+  }, []);
+  const a = analyses.get(crKey(cr, tdoc));
+  const run = (force: boolean) => job.start(() => api.analyzeCR(spec, cr, tdoc, force),
+                                            force ? "CR 다시 분석 요청…" : "CR 분석 요청…");
+  return (
+    <details className="docwin-analysis" open>
+      <summary><b>AI 분석</b> {a ? <span className="muted small">CR 문서·세부 CR·회의 합의·FL 요약을 근거로</span>
+                                     : <span className="muted small">아직 없음</span>}</summary>
+      {a && <CRAnalysisFull a={a} />}
+      <p className="small">
+        {llmReady
+          ? <button className="link" disabled={job.busy} onClick={() => run(!!a)}>{a ? "다시 분석" : "AI 로 이 CR 분석"}</button>
+          : <span className="muted">AI 분석: 메인 탭에서 LLM 설정 필요</span>}
+        {!a && <span className="muted tiny"> · 문단을 AI 요약하면 관련 CR 분석도 함께 만들어집니다</span>}
+        {job.msg && <span> · {job.msg}</span>}
+      </p>
+    </details>
   );
 }
