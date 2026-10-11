@@ -154,6 +154,16 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
     [updateNote, bookmarks]);
 
   const onFind = useCallback((h: SearchHit) => jump(h.ord, h.block), [jump]);
+  const openAt = useCallback((v: string, key: string) => {  // a clause of another (or this) version
+    if (mode !== "history" && mode !== "clean") setMode("history");
+    if (v === version) {
+      const e = toc.find((t) => t.key === key);
+      if (e) setTimeout(() => view.current?.scrollToOrd(e.ord), 80);
+      return;
+    }
+    pendingJump.current = key;  // done once that version's TOC is there
+    setVersion(v);
+  }, [mode, version, toc]);
 
   if (!versions.length || !version) {
     return <div className="empty">{versions.length === 0 ? `${spec} 를 불러오는 중…` : ""}</div>;
@@ -204,7 +214,8 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
         </aside>
 
         <main className="center">
-          {findOpen && <FindBar spec={spec} version={version} onGo={onFind} onClose={() => setFindOpen(false)} />}
+          {findOpen && <FindBar spec={spec} version={version} colors={colors} onGo={onFind} onOpenAt={openAt}
+                               onClose={() => setFindOpen(false)} />}
           {mode === "crs" ? (
             <CRBrowser spec={spec} crs={crs} toc={toc} colors={colors} onJump={(o) => jump(o)}
                        onFetchCrs={fetchCrs} fetching={crJob} />

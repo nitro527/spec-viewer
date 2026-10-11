@@ -98,3 +98,19 @@ def test_cr_analysis_made_once_and_reused_by_paragraph_summaries(library, monkey
     again = run("/api/cr-analysis", {"spec": "99.211", "cr": "0100", "tdoc": "RP-192620", "force": True})
     assert again["state"] == "done" and calls == ["0100", "0100"]
     assert c.post("/api/cr-analysis", json={"spec": "99.211", "cr": "0999", "tdoc": "RP-1"}).status_code == 404
+
+
+@needs_pandoc
+def test_phrase_history_follows_a_paragraph_across_versions(library):
+    j = _block_ord(library, "16.2.0", "7.4.1.1.1", "16.1.0")  # added in 4.3.1 in 16.1.0, moved in 16.2.0
+    text = library.db.execute("SELECT text FROM blob WHERE hash=?",
+                              (_hash(library, "16.2.0", "7.4.1.1.1", j),)).fetchone()[0]
+    phrase = " ".join(text.split()[:6])
+    h = library.phrase_history("99.211", phrase)
+    assert h["first"] == "16.1.0" and h["latest_clauses"] >= 1
+    ev = {e["version"]: e for e in h["events"]}
+    assert "4.3.1" in [c["key"] for c in ev["16.1.0"]["added"]]
+    assert "7.4.1.1.1" in [c["key"] for c in ev["16.2.0"]["added"]]
+    assert "4.3.1" in [c["key"] for c in ev["16.2.0"]["removed"]]
+    assert "[[" in ev["16.1.0"]["added"][0]["snippet"]
+    assert library.phrase_history("99.211", "no such phrase anywhere")["first"] is None

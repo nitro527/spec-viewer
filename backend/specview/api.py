@@ -86,6 +86,10 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     def clauses(spec: str, version: str, start: int = 0, count: int = 20):
         return _get(lib.clauses, spec, version, start, min(count, 200))
 
+    @app.get("/api/specs/{spec}/phrase-history")
+    def phrase_history(spec: str, q: str):
+        return _get(lib.phrase_history, spec, q)
+
     @app.get("/api/specs/{spec}/{version}/search")
     def search(spec: str, version: str, q: str):
         return _get(lib.search, spec, version, q)

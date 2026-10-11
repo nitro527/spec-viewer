@@ -748,6 +748,42 @@ class Library:
         hits.sort(key=lambda h: (h["ord"], -1 if h["block"] is None else h["block"]))
         return hits
 
+    def phrase_history(self, spec: str, query: str, per_event: int = 60) -> dict:
+        """Where an exact phrase occurs in every version: how many paragraphs and clauses, the first version that
+        has it, and per version the clauses where it appeared or disappeared (with a snippet)."""
+        words = query.replace('"', " ").split()
+        vers = self.versions(spec)
+        out = {"query": query, "versions": [], "events": [], "first": None, "latest_clauses": 0}
+        if not words or not vers:
+            return out
+        rows = self.db.execute(
+            "SELECT b.version_id, b.clause_key, c.number, c.title, c.ord, b.ord AS block, "
+            "snippet(blob_fts, 1, '[[', ']]', '…', 12) AS snip FROM blob_fts f "
+            "JOIN block_ver b ON b.raw_hash = f.hash JOIN version v ON v.id = b.version_id AND v.spec = ? "
+            "JOIN clause_ver c ON c.version_id = b.version_id AND c.key = b.clause_key "
+            "WHERE blob_fts MATCH ? ORDER BY c.ord, b.ord", (spec, '"' + " ".join(words) + '"')).fetchall()
+        by_vid: dict[int, dict[str, dict]] = {}
+        for r in rows:
+            cl = by_vid.setdefault(r["version_id"], {}).setdefault(r["clause_key"], {
+                "key": r["clause_key"], "number": r["number"], "title": r["title"], "ord": r["ord"],
+                "block": r["block"], "snippet": r["snip"], "count": 0})
+            cl["count"] += 1
+        prev: dict[str, dict] = {}
+        for v in vers:
+            cur = by_vid.get(v["id"], {})
+            out["versions"].append({"version": v["version"], "paragraphs": sum(c["count"] for c in cur.values()),
+                                    "clauses": len(cur)})
+            added = [c for k, c in cur.items() if k not in prev]
+            removed = [{k2: c[k2] for k2 in ("key", "number", "title")} for k, c in prev.items() if k not in cur]
+            if added or removed:
+                out["events"].append({"version": v["version"], "added": added[:per_event], "removed": removed[:per_event],
+                                      "more": max(0, len(added) - per_event) + max(0, len(removed) - per_event)})
+            if cur and out["first"] is None:
+                out["first"] = v["version"]
+            prev = cur
+        out["latest_clauses"] = len(prev)
+        return out
+
     # ------------------------------------------------------------ compare
 
     def _raw(self, vid: int) -> Iterator[tuple[dict, list[dict]]]:

@@ -411,3 +411,18 @@ input.num { width: 56px; margin: 0 4px; }
 .cr-row-detail p { margin: 4px 0; }
 .cr-clause { margin-right: 6px; }
 .cr-table .analysed { font-size: 10px; padding: 0 4px; border-radius: 3px; background: var(--ins); color: var(--ins-text); }
+
+/* phrase history (find bar, "버전별") */
+.find-row button.on { background: var(--accent, #2f6fde); color: #fff; }
+.phrase-loading { padding: 6px 10px; margin: 0; border-top: 1px solid var(--border); }
+.phrase { border-top: 1px solid var(--border); padding: 4px 10px 8px; max-height: 420px; overflow-y: auto; }
+.phrase > p { margin: 4px 0; }
+.phrase-bars { display: flex; align-items: flex-end; gap: 2px; height: 34px; margin: 4px 0 8px; }
+.phrase-bars span { flex: 1; min-width: 3px; border-radius: 2px 2px 0 0; background: var(--muted); }
+.phrase-events { list-style: none; margin: 0; padding: 0; font-size: 12px; }
+.phrase-events li { padding: 4px 0; border-top: 1px dashed var(--border); }
+.phrase-item { padding: 1px 4px 1px 14px; cursor: pointer; border-radius: 3px; }
+.phrase-item:hover { background: var(--panel); }
+.phrase-item.add { color: var(--ins-text); }
+.phrase-item.add span:last-child { color: var(--text); }
+.phrase-item.del { color: var(--del-text, #a33); }
