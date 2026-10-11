@@ -172,12 +172,19 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     def _repair():  # the app was closed while a download was between storing versions and computing history
         try:
-            with lock:
-                todo = sorted(set(lib.specs_missing_history()) | set(lib.fix_lettered_clauses()))
-            for spec in todo:
+            reader = Library(home / "library.sqlite")  # the scans read every block: not under the shared lock
+            try:
+                todo = set(reader.specs_missing_history())
+                rekey = reader.needs_rekey()
+            finally:
+                reader.close()
+            if rekey:
+                with lock:
+                    todo |= set(lib.fix_lettered_clauses())
+            for spec in sorted(todo):
                 lib.recompute_history(spec, lock=lock)
         except Exception:
-            pass
+            log.exception("startup repair")
 
     threading.Thread(target=_repair, daemon=True).start()
     app = FastAPI(title="specview")
@@ -207,6 +214,21 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
+    # Slow read-only queries (a compare of distant versions, the citation map, statistics) run on their own
+    # connection: under the shared lock they held up every other request for up to a second. WAL lets them
+    # read while the main connection writes; their caches check PRAGMA data_version / version ids.
+    heavy = Library(home / "library.sqlite")
+    heavy_lock = threading.Lock()
+
+    def _read(fn_name: str, *a):
+        try:
+            with heavy_lock:
+                return getattr(heavy, fn_name)(*a)
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
     def _get(fn, *a):
         try:
             with lock:
@@ -234,7 +256,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     @app.get("/api/specs/{spec}/phrase-history")
     def phrase_history(spec: str, q: str):
-        return _get(lib.phrase_history, spec, q)
+        return _read("phrase_history", spec, q)
 
     @app.get("/api/specs/{spec}/{version}/search")
     def search(spec: str, version: str, q: str):
@@ -246,7 +268,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     @app.get("/api/specs/{spec}/stats")
     def stats(spec: str):
-        return _get(lib.stats, spec)
+        return _read("stats", spec)
 
     @app.get("/api/specs/{spec}/{version}/clause/{key}/features")
     def clause_features(spec: str, version: str, key: str):
@@ -295,16 +317,16 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     @app.get("/api/specs/{spec}/referenced-by")
     def referenced_by(spec: str, clause: str):
         """Paragraphs that cite a clause, in this spec and the other downloaded ones (latest versions)."""
-        return _get(lib.referenced_by, spec, clause)
+        return _read("referenced_by", spec, clause)
 
     @app.get("/api/citations")
     def citations():
         """Citation map of the downloaded specs (latest versions)."""
-        return _get(lib.citation_map)
+        return _read("citation_map")
 
     @app.get("/api/citations/pairs")
     def citation_pairs(frm: str, to: str):
-        return _get(lib.citation_pairs, frm, to)
+        return _read("citation_pairs", frm, to)
 
     @app.get("/api/updates")
     def updates(refresh: bool = False):
@@ -411,7 +433,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     @app.get("/api/specs/{spec}/compare")
     def compare(spec: str, old: str, new: str, changed_only: bool = True):
-        return _get(lib.compare, spec, old, new, changed_only)
+        return _read("compare", spec, old, new, changed_only)
 
     @app.get("/api/asset/{h}")
     def asset(h: str):
@@ -952,7 +974,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     @app.get("/api/analysis-status")
     def analysis_status():
         """How far the AI analysis got, per spec and version (the board under ④)."""
-        return _get(lib.analysis_status)
+        return _read("analysis_status")
 
     # ---- release notes between two versions ----
 

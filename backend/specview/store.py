@@ -272,6 +272,13 @@ class Library:
         finally:
             reader.close()
 
+    def needs_rekey(self) -> bool:
+        """Whether fix_lettered_clauses has anything to do (a quick read)."""
+        from .parse_docx import _split_heading
+
+        return any(_split_heading(t)[1] for (t,) in self.db.execute(
+            "SELECT title FROM clause_ver WHERE number = '' AND title GLOB '[0-9]*[0-9]*'"))
+
     def fix_lettered_clauses(self) -> list[str]:
         """Libraries parsed before "5.2.1.5.1a" and "8.4.1.4." headings were recognised as numbered keyed such a
         clause by its title ("5-2-1-5-1a-aperiodic-csi", no number) and its unnumbered sub-headings under that.
