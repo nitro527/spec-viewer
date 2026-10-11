@@ -203,6 +203,12 @@ def test_fetch_job_goes_on_after_a_timeout_and_a_second_run_fetches_only_what_fa
     j = run()
     assert asked == [flaky] and "받지 못함" not in j["message"] and f"이미 받은 {len(docs) - 1}개" in j["message"]
     assert len(c.get("/api/specs/99.211/versions").json()) == len(docs)
+    # "새 버전 받기": nothing newer than what is there
+    asked.clear()
+    job = c.post("/api/fetch", json={"specs": ["99.211"], "with_crs": False, "only_newer": True}).json()
+    while next(x for x in c.get("/api/jobs").json() if x["id"] == job["id"])["state"] == "running":
+        time.sleep(0.05)
+    assert asked == []
 
 
 def test_download_retries_a_body_cut_off_midway(tmp_path, monkeypatch):

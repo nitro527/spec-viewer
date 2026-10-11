@@ -1,5 +1,5 @@
 // Self-contained HTML report of a comparison (for mail / review documents).
-import { tdocUrl, type ChatMessage, type ChatSource, type CompareResult, type ReleaseNote } from "./api";
+import { tdocUrl, type CR, type CRAnalysis, type ChatMessage, type ChatSource, type CompareResult, type ReleaseNote } from "./api";
 import { expandTag, renderAnswer } from "./markdown";
 import { safeHtml } from "./safe";
 
@@ -129,4 +129,22 @@ export function releaseNoteMarkdown(spec: string, oldV: string, newV: string, n:
 
 export function releaseNoteHtml(spec: string, oldV: string, newV: string, n: ReleaseNote): string {
   return page(`TS ${spec} v${oldV} → v${newV} 릴리즈 노트`, renderAnswer(releaseNoteMarkdown(spec, oldV, newV, n), {}));
+}
+
+/** The CR list as CSV for Excel: one row per CR with its cover and AI analysis. A BOM so Excel reads UTF-8
+ *  (Korean analyses); formula-like cells are prefixed so a subject starting with "=" is not run as a formula. */
+export function crCsv(rows: { cr: CR; analysis?: CRAnalysis }[]): string {
+  const cell = (v: unknown) => {
+    let s = String(v ?? "").replace(/\r?\n/g, " ");
+    if (/^[=+@\t]|^-./.test(s)) s = `'${s}`;  // a lone "-" (no revision) is no formula
+    return /[",]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const head = ["Version", "CR", "Rev", "Cat", "Subject", "Release", "WI", "Meeting", "TDoc", "WG TDoc",
+    "Clauses affected", "Reason for change", "Summary of change", "AI summary", "AI decision", "AI impact", "Link"];
+  const lines = rows.map(({ cr: c, analysis: a }) => [
+    c.new_version, c.cr, c.rev, c.cat, c.subject, c.detail?.release, c.detail?.wi_code, c.meeting, c.tdoc,
+    c.detail?.wg_tdoc, c.detail?.clauses_raw, c.detail?.reason, c.detail?.summary, a?.summary, a?.decision, a?.impact,
+    tdocUrl(c.tdoc),
+  ].map(cell).join(","));
+  return "﻿" + [head.join(","), ...lines].join("\r\n");
 }

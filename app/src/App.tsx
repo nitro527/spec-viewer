@@ -46,15 +46,15 @@ export function App() {
     setActiveId(HOME);
   }, []);
 
-  const openSpec = useCallback(async (spec: string, clause?: string, version?: string) => {
+  const openSpec = useCallback(async (spec: string, clause?: string, version?: string, baseline?: string) => {
     const existing = tabs.find((t) => t.spec === spec);
     if (existing) {
-      update(existing.id, { jumpTo: clause, jumpVersion: version });
+      update(existing.id, { jumpTo: clause, jumpVersion: version, jumpBaseline: baseline });
       setActiveId(existing.id);
       return;
     }
     const known = (await api.specs()).some((s) => s.number === spec);
-    if (known) open(newTab({ spec, jumpTo: clause, version, label: spec }));
+    if (known) open(newTab({ spec, jumpTo: clause, version, label: spec, jumpBaseline: baseline }));
     else goHome(spec); // not downloaded yet: suggest it on the main screen
   }, [tabs, open, update, goHome]);
 
@@ -100,7 +100,7 @@ export function App() {
         <button className="tab-add" onClick={() => open(newTab())} title="새 뷰어 탭 (Ctrl+T)">+</button>
       </div>
       <div className="tabpane" style={{ display: activeId === HOME ? "flex" : "none" }}>
-        <Home prefill={homePrefill} active={activeId === HOME} onOpen={(spec) => openSpec(spec)} />
+        <Home prefill={homePrefill} active={activeId === HOME} onOpen={openSpec} />
       </div>
       {chatOpened && (
         <div className="tabpane" style={{ display: activeId === CHAT ? "flex" : "none" }}>

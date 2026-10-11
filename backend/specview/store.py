@@ -643,6 +643,46 @@ class Library:
         return [dict(r) for r in self.db.execute(
             "SELECT clause_key, bookmark, text, version, updated FROM note WHERE spec=? ORDER BY updated DESC", (spec,))]
 
+    def watch_report(self) -> list[dict]:
+        """Bookmarked or annotated clauses that changed after the version they were marked in (or are gone from
+        the latest version): what to re-read after downloading a new version."""
+        out = []
+        for (spec,) in self.db.execute("SELECT DISTINCT spec FROM note").fetchall():
+            vers = self.versions(spec)
+            if not vers:
+                continue
+            latest = vers[-1]["version"]
+            toc = {t["key"]: t for t in self.toc(spec, latest)}
+            for n in self.notes(spec):
+                t = toc.get(n["clause_key"])
+                if t is None:
+                    status = "removed"
+                else:
+                    try:
+                        newer = bool(n["version"] and t["last_changed"]
+                                     and Version.parse(t["last_changed"]) > Version.parse(n["version"]))
+                    except ValueError:
+                        newer = False
+                    if not newer:
+                        continue
+                    status = "changed"
+                out.append({"spec": spec, "clause_key": n["clause_key"], "number": t["number"] if t else "",
+                            "title": t["title"] if t else n["clause_key"], "status": status, "since": n["version"],
+                            "changed_in": t["last_changed"] if t else None, "latest": latest,
+                            "bookmark": bool(n["bookmark"]), "note": n["text"][:120]})
+        return out
+
+    def mark_watch_seen(self, spec: str, key: str | None = None) -> None:
+        """The user has read the change: compare against the latest version from now on."""
+        vers = self.versions(spec)
+        if not vers:
+            return
+        q, args = "UPDATE note SET version=? WHERE spec=?", [vers[-1]["version"], spec]
+        if key:
+            q, args = q + " AND clause_key=?", args + [key]
+        with self.db:
+            self.db.execute(q, args)
+
     def save_note(self, spec: str, key: str, bookmark: bool | None = None, text: str | None = None,
                   version: str | None = None) -> dict | None:
         import datetime as dt

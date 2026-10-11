@@ -20,6 +20,7 @@ export interface TabState {
   label?: string;
   jumpTo?: string; // clause number to open at
   jumpVersion?: string; // ...in this version (switches the tab's version first)
+  jumpBaseline?: string; // ...highlighting changes after this version (a watched clause: "since I marked it")
 }
 
 interface Props {
@@ -51,6 +52,7 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
   const [paletteOpen, setPaletteOpen] = useState(false);
   const view = useRef<HistoryViewHandle>(null);
   const pendingJump = useRef<string | undefined>(tab.jumpTo);
+  const wantBaseline = useRef<string | undefined>(tab.jumpBaseline);
   const tocVersion = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -58,7 +60,9 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
       setVersions(vs);
       if (!vs.length) return;
       setVersion((v) => v ?? vs[vs.length - 1].version);
-      setBaseline(vs[0].version);
+      const b = wantBaseline.current;
+      wantBaseline.current = undefined;
+      setBaseline(b && vs.some((v) => v.version === b) ? b : vs[0].version);
     });
     api.crs(spec).then(setCrs);
     api.notes(spec).then((ns) => setNotes(new Map(ns.map((n) => [n.clause_key, n]))));
@@ -82,8 +86,14 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
       wantVersion.current = tab.jumpVersion;  // jump once that version's TOC is loaded
       setVersion(tab.jumpVersion);
     }
-    if (tab.jumpTo || tab.jumpVersion) onUpdate({ jumpTo: undefined, jumpVersion: undefined });  // consumed
-  }, [tab.jumpTo, tab.jumpVersion]);
+    if (tab.jumpBaseline) {
+      if (versions.some((v) => v.version === tab.jumpBaseline)) setBaseline(tab.jumpBaseline);
+      else wantBaseline.current = tab.jumpBaseline;  // versions not loaded yet
+    }
+    if (tab.jumpTo || tab.jumpVersion || tab.jumpBaseline) {
+      onUpdate({ jumpTo: undefined, jumpVersion: undefined, jumpBaseline: undefined });  // consumed
+    }
+  }, [tab.jumpTo, tab.jumpVersion, tab.jumpBaseline]);
   useEffect(() => {  // runs once the TOC is there, or right away when the tab is already open
     const target = pendingJump.current;
     if (!target || !toc.length) return;

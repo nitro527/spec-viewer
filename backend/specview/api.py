@@ -85,6 +85,7 @@ class FetchRequest(BaseModel):
     latest_per_release: bool = False
     with_crs: bool = True
     crs_only: bool = False
+    only_newer: bool = False  # just versions newer than the library's latest (the "새 버전 받기" button)
 
 
 FULL_RETRY_WAIT = 60  # seconds before the n-th retry waits n times this, when the LLM server fails every request
@@ -281,6 +282,62 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                         "specs": ["38.822"]})
         threading.Thread(target=_run_features, args=(job_id,), daemon=True).start()
         return jobs[job_id]
+
+    # ---- keeping up: new versions on 3gpp.org, and bookmarked clauses that changed ----
+
+    REMOTE_TTL = 12 * 3600  # 3GPP publishes new versions after each plenary, a few times a year
+
+    @app.get("/api/updates")
+    def updates(refresh: bool = False):
+        """Versions on 3gpp.org newer than the newest one downloaded, per downloaded spec. The archive listings
+        are cached for half a day (``refresh`` asks again)."""
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        with lock:
+            mine = {x["number"]: [v["version"] for v in lib.versions(x["number"])] for x in lib.specs()}
+            cache = json.loads(lib.get_setting("remote_versions") or "{}")
+        now = time.time()
+        stale = [sp for sp in mine if refresh or now - cache.get(sp, {}).get("t", 0) > REMOTE_TTL]
+        errors = []
+
+        def listing(sp):
+            try:
+                return [str(rv.version) for rv in download.select(download.list_remote(sp))]
+            except requests.RequestException as e:
+                return e
+
+        if stale:
+            with ThreadPoolExecutor(4) as ex:
+                for sp, res in zip(stale, ex.map(listing, stale)):
+                    if isinstance(res, Exception):
+                        errors.append(f"{sp}: {_short_error(res)}")
+                    else:
+                        cache[sp] = {"t": now, "v": res}
+            with lock:
+                lib.set_setting("remote_versions", json.dumps(cache))
+        out = []
+        for sp, vs in mine.items():
+            if sp not in cache or not vs:
+                continue
+            latest = max(download.Version.parse(v) for v in vs)
+            new = [v for v in cache[sp]["v"] if download.Version.parse(v) > latest]
+            if new:
+                out.append({"spec": sp, "latest": str(latest), "new": new})
+        checked = min((cache[sp]["t"] for sp in mine if sp in cache), default=None)
+        return {"specs": out, "errors": errors,
+                "checked": dt.datetime.fromtimestamp(checked).isoformat(timespec="minutes") if checked else None}
+
+    @app.get("/api/watch")
+    def watch():
+        """Bookmarked or annotated clauses changed since the version they were marked in."""
+        return _get(lib.watch_report)
+
+    @app.post("/api/watch/seen")
+    def watch_seen(body: dict):
+        with lock:
+            lib.mark_watch_seen(str(body.get("spec", "")), body.get("clause_key") or None)
+        return _get(lib.watch_report)
 
     @app.get("/api/specs/{spec}/notes")
     def notes(spec: str):
@@ -762,6 +819,13 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 except requests.RequestException as e:  # one spec's archive page: the others can still come
                     failed.append(f"{spec} (버전 목록: {_short_error(e)})")
                     continue
+                if req.only_newer:
+                    with lock:
+                        mine = [download.Version.parse(v["version"]) for v in lib.versions(spec)]
+                    if mine:
+                        remote_versions = [rv for rv in remote_versions if rv.version > max(mine)]
+                        if not remote_versions:
+                            continue
                 if not remote_versions:
                     drafts_only.append(spec)
                     continue

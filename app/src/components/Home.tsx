@@ -1,12 +1,15 @@
 // Main screen: the 3GPP downloader, downloaded specs and settings (viewing happens in viewer tabs).
 import { useEffect, useState } from "react";
 import { api, type Job, type SpecInfo } from "../api";
+import { KeepUp } from "./KeepUp";
 import { LlmPanel } from "./LlmPanel";
 import { SpecCatalog } from "./SpecCatalog";
 
 const RELEASES = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];  // LTE from Rel-8, NR from Rel-15
 
-export function Home({ prefill, active, onOpen }: { prefill?: string; active: boolean; onOpen: (spec: string) => void }) {
+export function Home({ prefill, active, onOpen }: {
+  prefill?: string; active: boolean; onOpen: (spec: string, clause?: string, version?: string, baseline?: string) => void;
+}) {
   const [specs, setSpecs] = useState<SpecInfo[] | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [input, setInput] = useState("");
@@ -56,6 +59,7 @@ export function Home({ prefill, active, onOpen }: { prefill?: string; active: bo
 
   return (
     <div className="home">
+      <KeepUp specs={specs} downloading={downloading} onJob={(j) => setJobs((js) => [...js, j])} onOpen={onOpen} />
       <section>
         <h2>받은 스펙 <span className="muted small">(누르면 뷰어 탭에서 열림 · 새 뷰어 탭은 위의 +)</span></h2>
         {specs === null && <p className="muted">불러오는 중…</p>}

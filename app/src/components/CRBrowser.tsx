@@ -7,6 +7,7 @@ import { announceAnalysesChanged, useCRAnalyses, useLlmReady } from "./CRAnalysi
 import { openCRDoc } from "./DocWindow";
 import { CAT } from "./Panels";
 import { WISummaryPanel } from "./WISummary";
+import { crCsv, download } from "../export";
 
 const wiCodes = (c: CR) => (c.detail?.wi_code ?? "").split(/[,;\s]+/).filter(Boolean);
 const release = (c: CR) => c.detail?.release?.replace(/^Rel-?/i, "") || c.new_version.split(".")[0];
@@ -129,6 +130,10 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
                        onClick={() => confirm(`CR ${todo.length}개를 차례로 AI 분석합니다. 진행할까요?`) && runBatch(todo)}>
             분석 없는 {todo.length}개 AI 분석</button></>
         )}
+        {" · "}<button className="link" title="지금 목록(필터 적용)을 Excel 에서 열 수 있는 CSV 로 저장합니다 (표지·AI 분석 포함)"
+                        onClick={() => download(`TS${spec}_CR${rel ? `_Rel-${rel}` : ""}${wi ? `_${wi}` : ""}.csv`,
+                          crCsv(shown.map((c) => ({ cr: c, analysis: analyses.get(crKey(c.cr, c.tdoc)) }))), "text/csv")}>
+          ⬇ CSV (Excel)</button>
         {batch && (
           <> · <span className="job">AI 분석 {batch.done + 1}/{batch.total} ({batch.current})</span>{" "}
             <button className="link" onClick={() => { stop.current = true; }}>중지</button></>

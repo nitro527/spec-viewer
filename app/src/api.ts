@@ -164,6 +164,11 @@ export interface Job {
   full?: boolean; started?: string; finished?: string; stopped?: boolean; chat_id?: string; steps?: string[];
   counts?: { intents: number; cr_analyses: number; wi_summaries: number; failed: number };
 }
+export interface Updates { specs: { spec: string; latest: string; new: string[] }[]; errors: string[]; checked: string | null }
+export interface WatchItem {
+  spec: string; clause_key: string; number: string; title: string; status: "changed" | "removed";
+  since: string | null; changed_in: string | null; latest: string; bookmark: boolean; note: string;
+}
 export interface FullAnalysisRequest { specs: string[] | null; skip_uncovered: boolean; cr_analyses: boolean; wi_summaries: boolean }
 
 async function get<T>(path: string): Promise<T> {
@@ -210,6 +215,10 @@ export const api = {
   compare: (spec: string, oldV: string, newV: string, changedOnly = true) =>
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
   stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),
+  updates: (refresh = false) => get<Updates>(`/api/updates${refresh ? "?refresh=true" : ""}`),
+  watch: () => get<WatchItem[]>("/api/watch"),
+  watchSeen: (spec: string, clauseKey?: string) =>
+    send<WatchItem[]>("POST", "/api/watch/seen", { spec, clause_key: clauseKey ?? null }),
   jobs: () => get<Job[]>("/api/jobs"),
   /** One job; a job the backend no longer knows (it restarted) comes back as an error instead of polling forever.
    *  null when the backend could not be reached this time (keep polling). */
@@ -278,11 +287,11 @@ export const api = {
     if (!r.ok) throw new Error(await r.text());
     return r.json();
   },
-  fetchSpecs: async (specs: string[], releases: number[] | null, latestPerRelease: boolean): Promise<Job> => {
+  fetchSpecs: async (specs: string[], releases: number[] | null, latestPerRelease: boolean, onlyNewer = false): Promise<Job> => {
     const r = await fetch("/api/fetch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ specs, releases, latest_per_release: latestPerRelease }),
+      body: JSON.stringify({ specs, releases, latest_per_release: latestPerRelease, only_newer: onlyNewer }),
     });
     if (!r.ok) throw new Error(await r.text());
     return r.json();
