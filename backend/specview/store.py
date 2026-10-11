@@ -106,6 +106,9 @@ CREATE TABLE IF NOT EXISTS cr_analysis (     -- LLM analysis of one CR as a whol
   spec TEXT NOT NULL, cr TEXT NOT NULL, rev TEXT NOT NULL, tdoc TEXT NOT NULL, data TEXT NOT NULL,
   PRIMARY KEY (spec, cr, rev, tdoc)
 );
+CREATE TABLE IF NOT EXISTS wi_summary (      -- LLM summary of one work item across every downloaded spec
+  wi TEXT PRIMARY KEY, data TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS note (          -- user bookmarks/notes, keyed by clause so they survive versions
   spec TEXT NOT NULL, clause_key TEXT NOT NULL, bookmark INTEGER NOT NULL DEFAULT 0, text TEXT NOT NULL DEFAULT '',
@@ -167,6 +170,11 @@ def _mark_moves(clauses: list[dict]) -> None:
                 best, best_s = (dc, db), sc
         if best is not None:
             pair(ic, ib, *best)
+
+
+def wi_codes(detail: dict | None) -> list[str]:
+    """Work item codes of a CR cover ("NR_unlic-Core, NR_IAB-Core" lists several)."""
+    return [w for w in re.split(r"[,;\s]+", (detail or {}).get("wi_code") or "") if w]
 
 
 def _feature_out(f: dict) -> dict:
@@ -665,6 +673,46 @@ class Library:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO cr_analysis VALUES (?,?,?,?,?)",
                             (spec, cr, rev, tdoc, json.dumps(data, ensure_ascii=False)))
+
+    # ------------------------------------------------------------ work items
+
+    def _wi_rows(self) -> Iterator[tuple[str, dict]]:
+        for sp in self.specs():
+            for c in self.crs(sp["number"]):
+                if c["detail"] and c["cr"]:
+                    yield sp["number"], c
+
+    def work_items(self) -> list[dict]:
+        """Work item codes on the CR covers of every downloaded spec, with how many CRs in which specs."""
+        out: dict[str, dict] = {}
+        for spec, c in self._wi_rows():
+            for w in wi_codes(c["detail"]):
+                e = out.setdefault(w, {"wi": w, "crs": 0, "specs": {}})
+                e["crs"] += 1
+                e["specs"][spec] = e["specs"].get(spec, 0) + 1
+        done = {r["wi"] for r in self.db.execute("SELECT wi FROM wi_summary")}
+        return sorted(({**e, "summary": e["wi"] in done} for e in out.values()), key=lambda e: -e["crs"])
+
+    def work_item(self, wi: str) -> dict:
+        """Every CR of one work item across the downloaded specs, oldest first, with its stored CR analysis."""
+        crs = []
+        for spec, c in self._wi_rows():
+            if wi not in wi_codes(c["detail"]):
+                continue
+            d, a = c["detail"], self.cr_analysis(spec, c["cr"], c["rev"], c["tdoc"])
+            crs.append({"spec": spec, "cr": c["cr"], "rev": c["rev"], "tdoc": c["tdoc"], "meeting": c["meeting"],
+                        "date": c["date"], "new_version": c["new_version"], "lib_version": c["lib_version"],
+                        "cat": c["cat"], "title": d.get("title") or c["subject"], "release": d.get("release", ""),
+                        "clauses": d.get("clauses", []), "clauses_raw": d.get("clauses_raw", ""),
+                        "reason": d.get("reason", ""), "summary": d.get("summary", ""),
+                        "analysis": {k: a.get(k) for k in ("summary", "background", "decision", "impact")} if a else None})
+        crs.sort(key=lambda c: (c["date"] or "", Version.parse(c["new_version"]), c["spec"], c["cr"]))
+        r = self.db.execute("SELECT data FROM wi_summary WHERE wi=?", (wi,)).fetchone()
+        return {"wi": wi, "crs": crs, "summary": json.loads(r["data"]) if r else None}
+
+    def save_wi_summary(self, wi: str, data: dict) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO wi_summary VALUES (?,?)", (wi, json.dumps(data, ensure_ascii=False)))
 
     def block_lineage(self, spec: str, version: str, key: str, raw_hash: str) -> list[dict]:
         """Every text a paragraph had, oldest first: the version that wrote it, the change ("base", "added",

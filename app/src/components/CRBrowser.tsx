@@ -6,13 +6,15 @@ import type { VersionColor } from "../colors";
 import { announceAnalysesChanged, useCRAnalyses, useLlmReady } from "./CRAnalysis";
 import { openCRDoc } from "./DocWindow";
 import { CAT } from "./Panels";
+import { WISummaryPanel } from "./WISummary";
 
 const wiCodes = (c: CR) => (c.detail?.wi_code ?? "").split(/[,;\s]+/).filter(Boolean);
 const release = (c: CR) => c.detail?.release?.replace(/^Rel-?/i, "") || c.new_version.split(".")[0];
 
-export function CRBrowser({ spec, crs, toc, colors, onJump, onFetchCrs, fetching }: {
+export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchCrs, fetching }: {
   spec: string; crs: CR[]; toc: TocEntry[]; colors: Map<string, VersionColor>;
-  onJump: (ord: number) => void; onFetchCrs?: () => void; fetching?: string | null;
+  onJump: (ord: number) => void; onOpenSpec: (spec: string, clause?: string) => void;
+  onFetchCrs?: () => void; fetching?: string | null;
 }) {
   const analyses = useCRAnalyses(spec);
   const [q, setQ] = useState("");
@@ -99,7 +101,8 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onFetchCrs, fetching
           <option value="">모든 카테고리</option>
           {Object.entries(CAT).map(([k, v]) => <option key={k} value={k}>{k} · {v}</option>)}
         </select>
-        <select value={wi} onChange={(e) => setWi(e.target.value)} title="Work item code (CR 표지)">
+        <select value={wi} onChange={(e) => setWi(e.target.value)}
+                title="Work item code (CR 표지). 고르면 받은 모든 스펙에 걸친 이 WI 의 요약이 위에 나옵니다">
           <option value="">모든 WI</option>
           {wis.map(([w, n]) => <option key={w} value={w}>{w} ({n})</option>)}
         </select>
@@ -109,6 +112,8 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onFetchCrs, fetching
           <option value="not">분석 없음</option>
         </select>
       </div>
+      {wi && <WISummaryPanel wi={wi} spec={spec} byNumber={byNumber} llmReady={llmReady} onJump={onJump}
+                             onOpenSpec={onOpenSpec} />}
       <p className="small muted cr-browser-status">
         {shown.length} / {rows.length}개 CR · 표지 {covers}개
         {covers < rows.length && onFetchCrs && (

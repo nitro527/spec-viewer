@@ -108,6 +108,17 @@ export interface PhraseHistory {
   versions: { version: string; paragraphs: number; clauses: number }[];
   events: { version: string; added: PhraseClause[]; removed: PhraseClause[]; more: number }[];
 }
+export interface WICR {
+  spec: string; cr: string; rev: string; tdoc: string; meeting: string; date: string; new_version: string;
+  lib_version: string | null; cat: string; title: string; release: string; clauses: string[]; clauses_raw: string;
+  reason: string; summary: string; analysis: { summary: string; background: string; decision: string; impact: string } | null;
+}
+export interface WISummary {
+  overview: string; motivation: string; spec_changes: { spec: string; clauses: string; what: string }[];
+  timeline: { when: string; what: string }[]; impact: string; open_points: string; confidence: string;
+  model?: string; generated?: string; crs: number; analysed: number;
+}
+export interface WorkItem { wi: string; crs: WICR[]; summary: WISummary | null }
 export interface SearchHit { ord: number; key: string; number: string; title: string; block: number | null; snippet: string }
 export interface LlmProviderSettings {
   base_url: string; model: string; has_key: boolean; key_hint: string; key_source: "saved" | "env" | null;
@@ -155,6 +166,8 @@ export const api = {
   search: (spec: string, v: string, q: string) => get<SearchHit[]>(`/api/specs/${s(spec)}/${s(v)}/search?q=${s(q)}`),
   phraseHistory: (spec: string, q: string) => get<PhraseHistory>(`/api/specs/${s(spec)}/phrase-history?q=${s(q)}`),
   crs: (spec: string) => get<CR[]>(`/api/specs/${s(spec)}/crs`),
+  workItem: (wi: string) => get<WorkItem>(`/api/work-items/${s(wi)}`),
+  summarizeWI: (wi: string, force = false) => send<Job>("POST", "/api/wi-summary", { wi, force }),
   compare: (spec: string, oldV: string, newV: string, changedOnly = true) =>
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
   stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),

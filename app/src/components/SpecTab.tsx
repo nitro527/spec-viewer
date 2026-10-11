@@ -217,7 +217,7 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
           {findOpen && <FindBar spec={spec} version={version} colors={colors} onGo={onFind} onOpenAt={openAt}
                                onClose={() => setFindOpen(false)} />}
           {mode === "crs" ? (
-            <CRBrowser spec={spec} crs={crs} toc={toc} colors={colors} onJump={(o) => jump(o)}
+            <CRBrowser spec={spec} crs={crs} toc={toc} colors={colors} onJump={(o) => jump(o)} onOpenSpec={onOpenSpec}
                        onFetchCrs={fetchCrs} fetching={crJob} />
           ) : mode === "stats" ? (
             <StatsView spec={spec} colors={colors}

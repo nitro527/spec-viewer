@@ -426,3 +426,12 @@ input.num { width: 56px; margin: 0 4px; }
 .phrase-item.add { color: var(--ins-text); }
 .phrase-item.add span:last-child { color: var(--text); }
 .phrase-item.del { color: var(--del-text, #a33); }
+
+/* work item summary (CR mode, WI filter) */
+.wi-summary { max-width: 1200px; margin: 4px auto 12px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); font-size: 13px; }
+.wi-summary h3 { font-size: 14px; margin: 0 0 6px; }
+.wi-summary h4 { font-size: 12.5px; margin: 10px 0 3px; color: var(--muted); }
+.wi-summary p { margin: 3px 0; }
+.wi-summary ul, .wi-summary ol { margin: 2px 0; padding-left: 20px; }
+.wi-summary li { margin: 2px 0; }
+.wi-summary .lead { font-size: 13.5px; }

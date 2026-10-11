@@ -114,3 +114,44 @@ def test_phrase_history_follows_a_paragraph_across_versions(library):
     assert "4.3.1" in [c["key"] for c in ev["16.2.0"]["removed"]]
     assert "[[" in ev["16.1.0"]["added"][0]["snippet"]
     assert library.phrase_history("99.211", "no such phrase anywhere")["first"] is None
+
+
+@needs_pandoc
+def test_work_item_gathers_crs_and_is_summarised_once(library, monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from specview.api import create_app
+    from specview.store import Library
+
+    dst = sqlite3.connect(tmp_path / "library.sqlite")
+    library.db.backup(dst)
+    dst.close()
+    lib = Library(tmp_path / "library.sqlite")
+    rows = [c for c in lib.crs("99.211") if c["cr"]][:2]
+    for i, c in enumerate(rows):
+        cover = {"title": f"t{i}", "reason": "r", "summary": "s", "clauses_raw": "7.4.1.1.1", "clauses": ["7.4.1.1.1"],
+                 "wi_code": "NR_X-Core, TEI16" if i else "NR_X-Core", "wg_tdoc": "", "category": c["cat"]}
+        with lib.db:
+            lib.db.execute("INSERT OR REPLACE INTO cr_detail VALUES (?,?,?,?,?,?,?)",
+                           ("99.211", c["cr"], c["rev"], c["tdoc"], "ok", json.dumps(cover), None))
+    lib.save_cr_analysis("99.211", rows[0]["cr"], rows[0]["rev"], rows[0]["tdoc"],
+                         {"summary": "CR summary", "background": "b", "decision": "d", "impact": "i"})
+    wis = {w["wi"]: w for w in lib.work_items()}
+    assert wis["NR_X-Core"]["crs"] == 2 and wis["TEI16"]["specs"] == {"99.211": 1}
+    wi = lib.work_item("NR_X-Core")
+    assert [c["analysis"] is not None for c in wi["crs"]].count(True) == 1
+    assert "CR summary" in intent.wi_prompt(wi) and wi["summary"] is None
+
+    seen = []
+    monkeypatch.setattr(intent.OpenAICompatIntentModel, "summarize_wi", lambda self, w: seen.append(len(w["crs"])) or {
+        "overview": "o", "motivation": "m", "spec_changes": [], "timeline": [], "impact": "i", "open_points": "",
+        "confidence": "medium", "model": self.model})
+    c = TestClient(create_app(tmp_path))
+    c.put("/api/llm", json={"provider": "openai", "base_url": "http://llm:8000/v1", "model": "glm"})
+    job = c.post("/api/wi-summary", json={"wi": "NR_X-Core"}).json()
+    while (j := next(x for x in c.get("/api/jobs").json() if x["id"] == job["id"]))["state"] == "running":
+        time.sleep(0.05)
+    assert j["state"] == "done" and seen == [2]
+    got = c.get("/api/work-items/NR_X-Core").json()["summary"]
+    assert got["overview"] == "o" and got["crs"] == 2 and got["analysed"] == 1
+    assert c.post("/api/wi-summary", json={"wi": "NO_SUCH"}).status_code == 404
