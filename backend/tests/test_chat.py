@@ -134,15 +134,9 @@ def test_stop_ends_the_answer_between_requests(library):
 
 @needs_pandoc
 def test_referenced_by_finds_citing_paragraphs(library):
-    toc = library.toc("99.211", library.versions("99.211")[-1]["version"])
-    cited = None
-    for t in toc:
-        if t["number"] and library.referenced_by("99.211", t["number"]):
-            cited = t["number"]
-            break
-    assert cited == "1"  # the fixture cites "clause 1" somewhere
-    hits = library.referenced_by("99.211", cited)
-    assert all("[[" + cited + "]]" in h["snippet"] for h in hits)
-    assert all(not (h["number"] == cited or h["number"].startswith(cited + ".")) for h in hits)
-    out = json.loads(chat.SpecTools(library).call("referenced_by", {"spec": "99.211", "clause": cited}))
-    assert out["count"] == len(hits) and out["citing"][0]["source"].startswith("99.211 §")
+    # the fixture's 7.4.1.1.1 says "... clause 5.2.1 of [4, TS 38.211]"; "Table 4.2-1" is no citation of clause 1
+    assert library.referenced_by("99.211", "1") == []
+    hits = library.referenced_by("38.211", "5.2.1")
+    assert [(h["spec"], h["number"]) for h in hits] == [("99.211", "7.4.1.1.1")] and "[[5.2.1]]" in hits[0]["snippet"]
+    out = json.loads(chat.SpecTools(library).call("referenced_by", {"spec": "38.211", "clause": "5.2.1"}))
+    assert out["count"] == 1 and out["citing"][0]["source"].startswith("99.211 §7.4.1.1.1")

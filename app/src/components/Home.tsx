@@ -1,6 +1,7 @@
 // Main screen: the 3GPP downloader, downloaded specs and settings (viewing happens in viewer tabs).
 import { useEffect, useState } from "react";
 import { api, type Job, type SpecInfo } from "../api";
+import { CitationMap } from "./CitationMap";
 import { KeepUp } from "./KeepUp";
 import { LlmPanel } from "./LlmPanel";
 import { SpecCatalog } from "./SpecCatalog";
@@ -73,6 +74,7 @@ export function Home({ prefill, active, onOpen }: {
             </button>
           ))}
         </div>
+              {(specs?.length ?? 0) > 1 && <CitationMap onOpen={(spec, clause) => onOpen(spec, clause)} />}
       </section>
 
       <section>

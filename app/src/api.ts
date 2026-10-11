@@ -165,6 +165,13 @@ export interface Job {
   partial?: string; sources?: Record<string, ChatSource>;
   counts?: { intents: number; cr_analyses: number; wi_summaries: number; failed: number };
 }
+export interface CitationMap {
+  specs: string[];
+  matrix: { from: string; to: string; clauses: number }[];
+  top_cited: { spec: string; clause: string; title: string; count: number; from_specs: string[] }[];
+  external: { spec: string; count: number }[];
+}
+export interface CitationPair { number: string; title: string; key: string; cites: string[] }
 export interface RefHit { spec: string; version: string; number: string; title: string; key: string; ord: number; snippet: string }
 export interface Updates { specs: { spec: string; latest: string; new: string[] }[]; errors: string[]; checked: string | null }
 export interface WatchItem {
@@ -217,6 +224,9 @@ export const api = {
   compare: (spec: string, oldV: string, newV: string, changedOnly = true) =>
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
   stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),
+  citations: () => get<CitationMap>("/api/citations"),
+  citationPairs: (frm: string, to: string) =>
+    get<CitationPair[]>(`/api/citations/pairs?frm=${s(frm)}&to=${s(to)}`),
   referencedBy: (spec: string, clause: string) =>
     get<RefHit[]>(`/api/specs/${s(spec)}/referenced-by?clause=${s(clause)}`),
   updates: (refresh = false) => get<Updates>(`/api/updates${refresh ? "?refresh=true" : ""}`),

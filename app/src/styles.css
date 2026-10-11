@@ -528,3 +528,18 @@ input.num { width: 56px; margin: 0 4px; }
 .answer.streaming .caret { display: inline-block; width: 7px; height: 1em; margin-left: 2px; vertical-align: text-bottom;
   background: var(--muted); animation: caret-blink 1s steps(2, start) infinite; }
 @keyframes caret-blink { to { visibility: hidden; } }
+
+/* citation map (main tab) */
+.cite-map { margin-top: 14px; }
+.cite-map > summary { cursor: pointer; }
+.cite-wrap { overflow-x: auto; margin: 10px 0; }
+.cite-table { border-collapse: collapse; font-size: 13px; }
+.cite-table th, .cite-table td { border: 1px solid var(--border); padding: 4px 10px; text-align: center; white-space: nowrap; }
+.cite-table td { cursor: pointer; min-width: 56px; font-variant-numeric: tabular-nums; }
+.cite-table td.self { color: var(--muted); background: var(--panel); }
+.cite-table td.on { outline: 2px solid #3478f6; outline-offset: -2px; }
+.cite-pairs ul { max-height: 280px; overflow-y: auto; padding-left: 18px; margin: 4px 0 10px; }
+.cite-lists { display: flex; flex-wrap: wrap; gap: 12px 32px; }
+.cite-lists > div { flex: 1 1 340px; min-width: 0; }
+.cite-lists ol, .cite-lists ul { padding-left: 20px; margin: 4px 0; max-height: 320px; overflow-y: auto; }
+.cite-lists li { margin: 2px 0; }

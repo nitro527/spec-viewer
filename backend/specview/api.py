@@ -294,6 +294,15 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         """Paragraphs that cite a clause, in this spec and the other downloaded ones (latest versions)."""
         return _get(lib.referenced_by, spec, clause)
 
+    @app.get("/api/citations")
+    def citations():
+        """Citation map of the downloaded specs (latest versions)."""
+        return _get(lib.citation_map)
+
+    @app.get("/api/citations/pairs")
+    def citation_pairs(frm: str, to: str):
+        return _get(lib.citation_pairs, frm, to)
+
     @app.get("/api/updates")
     def updates(refresh: bool = False):
         """Versions on 3gpp.org newer than the newest one downloaded, per downloaded spec. The archive listings

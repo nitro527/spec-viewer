@@ -978,6 +978,111 @@ class Library:
         hits.sort(key=lambda h: (h["ord"], -1 if h["block"] is None else h["block"]))
         return hits
 
+    # ------------------------------------------------------------ citation map
+
+    _CITE = None
+
+    @classmethod
+    def _cite_patterns(cls):
+        import re
+
+        if cls._CITE is None:
+            spec = r"(\d{2}\.\d{3}(?:-\d{1,2})?)"
+            num = r"([A-Z](?:\.\d+)+|\d+(?:\.\d+)*[a-z]?)"
+            cl = r"(?:[Ss]ub)?[Cc]lauses?|[Aa]nnex|[Ss]ection"
+            cls._CITE = (
+                # clause X of [4, TS 38.211] / clause X in TS 38.211
+                re.compile(rf"(?:{cl})\s+{num}(?![.\-]?\d)\s+(?:of|in)\s+(?:\[\d+\]\s*,?\s*)?\[?(?:\d+\s*,\s*)?"
+                           rf"(?:3GPP\s+)?T[SR]\s*{spec}"),
+                # TS 38.211 [4], clause X
+                re.compile(rf"T[SR]\s*{spec}\]?\s*(?:\[\d+\])?\s*,?\s*(?:{cl})\s+{num}(?![.\-]?\d)"),
+                re.compile(rf"(?:{cl})\s+{num}(?![.\-]?\d)"),  # clause X: this spec
+                re.compile(rf"T[SR]\s*{spec}"),  # the spec as a whole
+            )
+        return cls._CITE
+
+    def _citations(self) -> list[tuple]:
+        """(from_spec, from_number, from_title, from_key, to_spec, to_clause or "") for every citation in the latest
+        version of every downloaded spec. One pass over the text (well under a second for several big specs),
+        kept until a spec gets a new latest version."""
+        latest = {x["number"]: self.versions(x["number"])[-1]["id"] for x in self.specs() if x["versions"]}
+        key = tuple(sorted(latest.items()))
+        cached = getattr(self, "_cite_cache", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        of, tscl, same, specref = self._cite_patterns()
+        edges = set()
+        for sp, vid in latest.items():
+            for r in self.db.execute(
+                    "SELECT c.number, c.title, c.key, x.text FROM block_ver b JOIN blob x ON x.hash = b.raw_hash "
+                    "JOIN clause_ver c ON c.version_id = b.version_id AND c.key = b.clause_key WHERE b.version_id = ?",
+                    (vid,)):
+                title = r["title"] or ""
+                if "change history" in title.lower() or title.lower() in ("references", "normative references"):
+                    continue
+                t, frm, spans = r["text"], (sp, r["number"], title, r["key"]), []
+                for m in of.finditer(t):
+                    edges.add(frm + (m.group(2), m.group(1)))
+                    spans.append(m.span())
+                for m in tscl.finditer(t):
+                    edges.add(frm + (m.group(1), m.group(2)))
+                    spans.append(m.span())
+                for m in same.finditer(t):
+                    if not any(a <= m.start() < b for a, b in spans) and m.group(1) != r["number"]:
+                        edges.add(frm + (sp, m.group(1)))
+                for m in specref.finditer(t):
+                    if m.group(1) != sp:
+                        edges.add(frm + (m.group(1), ""))
+        out = sorted(edges)
+        self._cite_cache = (key, out)
+        return out
+
+    def citation_map(self, top: int = 40) -> dict:
+        """Which downloaded spec cites which, counted in citing clauses; the most cited clauses; and the specs
+        cited that are not downloaded."""
+        from collections import defaultdict
+
+        edges = self._citations()
+        mine = [x["number"] for x in self.specs() if x["versions"]]
+        citing: dict[tuple, set] = defaultdict(set)
+        cited: dict[tuple, set] = defaultdict(set)
+        external: dict[str, set] = defaultdict(set)
+        for fs, fn, _ft, fk, ts, tc in edges:
+            if ts in mine:
+                citing[(fs, ts)].add(fk)
+                if tc and (fs, fn) != (ts, tc):
+                    cited[(ts, tc)].add((fs, fk))
+            else:
+                external[ts].add((fs, fk))
+        titles = {}
+        for sp in mine:
+            v = self.versions(sp)[-1]["version"]
+            titles.update({(sp, t["number"]): t["title"] for t in self.toc(sp, v) if t["number"]})
+        ranked = sorted(cited.items(), key=lambda kv: -len(kv[1]))[:top]
+        return {
+            "specs": mine,
+            "matrix": [{"from": f, "to": t, "clauses": len(k)} for (f, t), k in sorted(citing.items())],
+            "top_cited": [{"spec": sp, "clause": c, "title": titles.get((sp, c), ""), "count": len(by),
+                           "from_specs": sorted({f for f, _ in by})} for (sp, c), by in ranked],
+            "external": [{"spec": sp, "count": len(by)}
+                         for sp, by in sorted(external.items(), key=lambda kv: -len(kv[1]))[:30]],
+        }
+
+    def citation_pairs(self, frm: str, to: str) -> list[dict]:
+        """The clauses of ``frm`` that cite ``to``, with the clauses they cite (empty: the spec as a whole)."""
+        out: dict[str, dict] = {}
+        for fs, fn, ft, fk, ts, tc in self._citations():
+            if fs == frm and ts == to:
+                e = out.setdefault(fk, {"number": fn, "title": ft, "key": fk, "cites": []})
+                if tc and tc not in e["cites"]:
+                    e["cites"].append(tc)
+        import re
+
+        nat = lambda x: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", x)]  # noqa: E731 - 5.2 before 5.10
+        for e in out.values():
+            e["cites"].sort(key=nat)
+        return sorted(out.values(), key=lambda e: nat(e["number"] or e["title"]))
+
     def referenced_by(self, spec: str, clause: str, limit: int = 300) -> list[dict]:
         """Paragraphs (latest version of every downloaded spec) that cite ``clause`` of ``spec``: "clause 6.3.3.2"
         inside the spec itself, "clause 6.3.3.2 of TS 38.211" / "TS 38.211 ... 6.3.3.2" in the others. What to
@@ -988,8 +1093,8 @@ class Library:
         if not re.fullmatch(r"[A-Z]?\d*(\.\w+)*", num) or not num:
             raise ValueError(f"not a clause number: {clause}")
         tokens = re.findall(r"\w+", num)
-        exact = re.compile(rf"(?<![\w.]){re.escape(num)}(?![.\-]?\d)(?!\.[A-Za-z]\b)")
-        cue = re.compile(r"(?:sub)?clauses?|annex|section|table|figure", re.I)
+        exact = re.compile(rf"(?<![\w.\-]){re.escape(num)}(?![.\-]?\d)(?!\.[A-Za-z]\b)")  # not "Table 4.2-1"
+        cue = re.compile(r"(?:sub)?clauses?|annex|section", re.I)
         out = []
         for row in self.specs():
             other = row["number"]
@@ -1017,8 +1122,8 @@ class Library:
                     before = t[max(0, m.start() - 60):m.start()]
                     if other != spec and spec not in t[max(0, m.start() - 160):m.end() + 160]:
                         continue  # another spec's clause with the same number
-                    if cue.search(before) or other != spec:
-                        hit = m
+                    if re.search(rf"(?:{cue.pattern})\s+(?:[\w.]+(?:,\s*|\s+and\s+|\s+or\s+))*$", before, re.I):
+                        hit = m  # "clause 4.5", "clauses 4.4.2 and 5.3", "Annex A"
                         break
                 if not hit:
                     continue
