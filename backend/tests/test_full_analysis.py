@@ -154,3 +154,40 @@ def test_release_notes_between_versions(library, tmp_path, monkeypatch):
     out = json.loads(SpecTools(lib).call("crs_between", {"spec": "99.211", "old": vs[0]}))
     assert out["release_notes"]["overview"] == "o" and out["crs"][0]["source"].startswith("CR 99.211 ")
     assert c.post("/api/release-notes", json={"spec": "99.211", "old": vs[-1], "new": vs[-1]}).status_code == 404
+
+
+@needs_pandoc
+def test_empty_replies_do_not_loop_and_a_failing_cr_does_not_stop_the_run(library, tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(intent.OpenAICompatIntentModel, "intent", lambda self, ch: calls.append(ch["raw_hash"]))
+    monkeypatch.setattr(intent.OpenAICompatIntentModel, "ping", lambda self: {"reply": "OK"})
+
+    def analyze(self, ev):
+        if ev["cr"] == bad:
+            raise intent.LLMError("prompt too long")
+        return {"summary": "c", "background": "", "changes": [], "decision": "", "impact": "", "confidence": "low"}
+
+    monkeypatch.setattr(intent.OpenAICompatIntentModel, "analyze_cr", analyze)
+    monkeypatch.setattr(intent.OpenAICompatIntentModel, "summarize_wi", lambda self, wi: {
+        "overview": "o", "motivation": "", "spec_changes": [], "timeline": [], "impact": "", "open_points": "",
+        "confidence": "low"})
+    c = _client(library, tmp_path, monkeypatch)
+    bad = next(r["cr"] for r in c.get("/api/specs/99.211/crs").json() if r["cr"])
+    j = _run(c, {"skip_uncovered": False})
+    assert j["state"] == "done" and "완료" in j["message"]
+    assert len(calls) == len(set(calls)) or len(calls) < 50  # each paragraph asked once per version, no loop
+    assert j["counts"]["cr_analyses"] == 2 and j["counts"]["failed"] >= 1 and j["counts"]["wi_summaries"] == 1
+
+
+def test_llm_reply_parsing_handles_reasoning_and_bad_replies():
+    import pytest
+
+    m = intent.OpenAICompatIntentModel("http://x/v1", "m")
+    reply = lambda content, reason="stop": {"choices": [{"message": {"content": content}, "finish_reason": reason}]}  # noqa: E731
+    assert m._answer(reply('thinking {not json} ...</think>\n{"summary": "s"}'), intent.INTENT_SCHEMA)["summary"] == "s"
+    assert m._answer(reply('Here: {"summary": "s", "x": {"a": 1}} done'))["x"] == {"a": 1}
+    assert m._answer(reply('{"summary": "s"}'), intent.INTENT_SCHEMA)["motivation"] == ""  # defaults filled
+    for bad, why in ((reply(None, "content_filter"), "비어"), (reply("<think>still thinking", "length"), "비어"),
+                     (reply('{"summary": "cut', "length"), "잘렸"), (reply("[1, 2]"), "객체")):
+        with pytest.raises(intent.LLMError, match=why):
+            m._answer(bad)

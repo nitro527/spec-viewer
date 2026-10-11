@@ -91,3 +91,31 @@ def test_chat_api_keeps_the_conversation(library, tmp_path, monkeypatch):
     assert [x["id"] for x in c.get("/api/chats").json()] == [cid]
     c.delete(f"/api/chats/{cid}")
     assert c.get("/api/chats").json() == []
+
+
+@needs_pandoc
+def test_tool_calls_from_loose_servers_are_normalised(library):
+    sent = []
+
+    class Loose:
+        model = name = "loose"
+
+        def __init__(self):
+            self.n = 0
+
+        def complete(self, messages, tools=None):
+            sent.append([dict(m) for m in messages])
+            self.n += 1
+            if self.n == 1:  # dict arguments, no id, no type, a number for the clause
+                return {"content": "", "tool_calls": [{"function": {"name": "read_clause",
+                                                                    "arguments": {"spec": 99.211, "clause": 7.4}}}]}
+            if self.n == 2:  # arguments that are not an object
+                return {"content": "", "tool_calls": [{"id": "x", "function": {"name": "search", "arguments": "null"}}]}
+            return {"content": "끝"}
+
+    r = chat.answer(Loose(), library, "q")
+    assert r["answer"] == "끝"
+    echoed = [m for m in sent[1] if m["role"] == "assistant"][0]["tool_calls"][0]
+    assert echoed["id"] and echoed["type"] == "function" and isinstance(echoed["function"]["arguments"], str)
+    tool_reply = [m for m in sent[1] if m["role"] == "tool"][0]
+    assert tool_reply["tool_call_id"] == echoed["id"] and "error" in tool_reply["content"] or "text" in tool_reply["content"]

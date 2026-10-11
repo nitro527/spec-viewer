@@ -85,6 +85,10 @@ class FetchRequest(BaseModel):
 FULL_RETRY_WAIT = 60  # seconds before the n-th retry waits n times this, when the LLM server fails every request
 
 
+class LLMErrorText(Exception):
+    """A failure that only left its message behind (build_pack records errors as text)."""
+
+
 def _llm_timeout() -> float:
     """Seconds to wait for one LLM reply: SPECVIEW_LLM_TIMEOUT, else 300 (a local model on a long prompt can
     take minutes; the connection itself is given up after 20 s)."""
@@ -366,27 +370,44 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
         finder = AgreementFinder(home / "cache")
 
-        def run(rows: list[dict]) -> list[dict]:
+        failed: set[tuple] = set()  # CRs that failed in this job: not asked again for every paragraph
+
+        def run(rows: list[dict], strict: bool = False) -> list[dict]:
+            """``strict`` raises a failure; otherwise a CR that fails is left out (and remembered)."""
             out = []
             for row in rows:
                 key = (row["cr"], row["rev"], row["tdoc"])
                 have = None if key in force else reader.cr_analysis(spec, *key)
+                if have is None and key in failed and not strict:
+                    continue
                 if have is None:
-                    job["message"] = f"{spec} CR{row['cr']} 분석 중 (CR 문서·회의 자료 모으는 중)"
-                    ev = cranalysis.evidence(reader, spec, row, home / "cache", finder)
-                    job["message"] = f"{spec} CR{row['cr']} 분석 중 (AI 요청)"
-                    res = model.analyze_cr(ev)
-                    if not res:
+                    try:
+                        have = make(row, key)
+                    except intent.QuotaExceeded:
+                        raise
+                    except Exception:
+                        failed.add(key)
+                        if strict:
+                            raise
                         continue
-                    have = {**res, "spec": spec, "cr": row["cr"], "rev": row["rev"], "tdoc": row["tdoc"],
-                            "meeting": row["meeting"], "title": row["detail"].get("title") or row["subject"],
-                            "version": row["lib_version"], "evidence": cranalysis.brief(ev),
-                            "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
-                    with lock:
-                        lib.save_cr_analysis(spec, *key, have)
-                    job["cr_made"] = job.get("cr_made", 0) + 1
-                out.append(have)
+                if have:
+                    out.append(have)
             return out
+
+        def make(row: dict, key: tuple) -> dict:
+            job["message"] = f"{spec} CR{row['cr']} 분석 중 (CR 문서·회의 자료 모으는 중)"
+            ev = cranalysis.evidence(reader, spec, row, home / "cache", finder)
+            job["message"] = f"{spec} CR{row['cr']} 분석 중 (AI 요청)"
+            res = model.analyze_cr(ev)
+            have = {**res, "spec": spec, "cr": row["cr"], "rev": row["rev"], "tdoc": row["tdoc"],
+                    "meeting": row["meeting"], "title": row["detail"].get("title") or row["subject"],
+                    "version": row["lib_version"], "evidence": cranalysis.brief(ev),
+                    "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+            with lock:
+                lib.save_cr_analysis(spec, *key, have)
+            job["cr_made"] = job.get("cr_made", 0) + 1
+            return have
+
         return run
 
     def _run_intent(job_id: str, req: IntentRequest, model: intent.OpenAICompatIntentModel):
@@ -470,7 +491,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         job = jobs[job_id]
         reader = Library(home / "library.sqlite")
         try:
-            got = _cr_analyzer(reader, req.spec, model, job, force={(row["cr"], row["rev"], row["tdoc"])})([row])
+            got = _cr_analyzer(reader, req.spec, model, job, force={(row["cr"], row["rev"], row["tdoc"])})([row], strict=True)
             job["state"] = "done" if got else "error"
             job["message"] = f"{req.spec} CR{req.cr} 분석 완료 ({model.name})" if got else "AI 응답이 비어 있습니다"
         except intent.LLMError as e:
@@ -853,8 +874,14 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
             job["message"] = s
 
         try:
-            history = [{"role": m["role"], "content": m["content"]} for m in conv["messages"][:-1] if m.get("content")]
-            res = chatmod.answer(model, reader, req.question.strip(), history, req.context, step=step)
+            history, known = [], {}
+            for q, a in zip(conv["messages"][:-1:2], conv["messages"][1:-1:2]):  # (question, answer) turns
+                if a.get("error") or not a.get("content"):  # a failed turn is not something the model said
+                    continue
+                history += [{"role": "user", "content": q["content"]}, {"role": "assistant", "content": a["content"]}]
+                known.update(a.get("sources") or {})
+            res = chatmod.answer(model, reader, req.question.strip(), history, req.context, step=step,
+                                 known_sources=known)
             reply = {"role": "assistant", "content": res["answer"] or "(빈 답변)", "sources": res["sources"],
                      "steps": res["steps"], "mode": res["mode"], "model": res.get("model") or model.name}
             job["state"], job["message"] = "done", "답변 완료"
@@ -903,7 +930,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         counts = job["counts"]
         reader = Library(home / "library.sqlite")
         awake = _keep_awake()
-        chunk, max_strikes = 10, 8  # waits 1+2+...+7 minutes (about half an hour) before giving up
+        max_strikes = 8  # waits 1+2+...+7 minutes (about half an hour) before giving up
 
         class Stop(Exception):
             pass
@@ -921,52 +948,58 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 check()
                 time.sleep(min(1, FULL_RETRY_WAIT))
 
+        def failed_item(err: Exception) -> bool:
+            """After a failed request: True when the server answers (the item fails on its own: count it and
+            go on), False after waiting when it does not (try the item again). Quota stops the run."""
+            nonlocal strikes
+            if isinstance(err, intent.QuotaExceeded):
+                raise Stop(str(err))
+            try:
+                model.ping()
+            except intent.QuotaExceeded as e:
+                raise Stop(str(e))
+            except Exception:
+                strikes += 1
+                wait_after_failure(strikes, str(err))
+                return False
+            strikes = 0
+            counts["failed"] += 1
+            return True
+
+        strikes = 0  # failures in a row while the server did not answer at all
         try:
-            # 1) paragraph summaries, newest versions first; CR analyses are made along the way
+            # 1) paragraph summaries, newest versions first; CR analyses are made along the way. One pass per
+            # version: every summary is saved as it is made (closing the app loses at most the one in flight)
             plan = []
             with lock:
                 for spec in specs:
                     plan += [(spec, v["version"]) for v in reversed(lib.versions(spec)[1:])]
-            strikes = 0  # chunks in a row where every request failed, across versions: the server is down
             for i, (spec, v) in enumerate(plan, 1):
+                check()
                 analyzer = _cr_analyzer(reader, spec, model, job)
-                failed: set[str] = set()
-                while True:
-                    check()
-                    before = job.get("cr_made", 0)
 
-                    def prog(n, total, spec=spec, v=v, i=i):
-                        job["done"], job["total"] = n, total
-                        job["message"] = (f"[1/3 문단 요약] {spec} v{v} ({i}/{len(plan)}번째 버전) {n}/{total}")
-                    pack = build_pack(reader, spec, v, model, progress=prog, limit=chunk,
-                                      skip_uncovered=req.skip_uncovered,
-                                      skip_hashes=reader.intent_hashes(spec, v) | failed, cr_analyzer=analyzer)
-                    with lock:
-                        made = lib.merge_pack(pack)  # saved every chunk: closing the app loses little
-                    counts["intents"] += made
-                    counts["cr_analyses"] += job.get("cr_made", 0) - before
-                    errs = [c for c in pack["changes"] if c.get("intent_error")]
-                    gen = pack["generator"]
-                    if gen.get("stopped"):  # quota: every later request fails the same way
-                        raise Stop(gen["stopped"])
-                    if errs and not made:
-                        try:  # the server answers: these paragraphs fail on their own, leave them for next run
-                            model.ping()
-                            failed |= {c["raw_hash"] for c in errs}
-                            counts["failed"] += len(errs)
-                        except intent.QuotaExceeded as e:
-                            raise Stop(str(e))
-                        except Exception:  # the server is down (restart, network): wait and try again
-                            strikes += 1
-                            wait_after_failure(strikes, errs[0]["intent_error"])
-                        continue
-                    if made:
+                def prog(n, total, spec=spec, v=v, i=i):
+                    job["done"], job["total"] = n, total
+                    job["message"] = f"[1/3 문단 요약] {spec} v{v} ({i}/{len(plan)}번째 버전) {n}/{total}"
+
+                def saved(ch: dict, spec=spec, v=v) -> None:
+                    nonlocal strikes
+                    if ch.get("intent"):
+                        keep = {k: x for k, x in ch.items() if k not in ("clause_key", "text", "old_text")}
+                        with lock:
+                            counts["intents"] += lib.merge_pack({"spec": spec, "version": v, "changes": [keep],
+                                                                 "generated": dt.datetime.now(dt.timezone.utc)
+                                                                 .isoformat(timespec="seconds")})
                         strikes = 0
-                    if errs:  # the server answers, these paragraphs fail on their own (e.g. bad JSON)
-                        failed |= {c["raw_hash"] for c in errs}
-                        counts["failed"] += len(errs)
-                    if not gen["over_limit"]:
-                        break
+                    elif ch.get("intent_error"):  # left for the next run either way
+                        failed_item(LLMErrorText(ch["intent_error"]))
+                    counts["cr_analyses"] = job.get("cr_made", 0)
+
+                pack = build_pack(reader, spec, v, model, progress=prog, skip_uncovered=req.skip_uncovered,
+                                  skip_hashes=reader.intent_hashes(spec, v), cr_analyzer=analyzer,
+                                  on_change=saved, should_stop=lambda: "사용자가 중지함" if job.get("cancel") else None)
+                if stopped := pack["generator"].get("stopped"):
+                    raise Stop(stopped)
             # 2) CRs no paragraph summary needed (e.g. clauses not downloaded), when they have a cover
             if req.cr_analyses:
                 for spec in specs:
@@ -976,41 +1009,34 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                                 and not lib.cr_analysis(spec, c["cr"], c["rev"], c["tdoc"])]
                     analyzer = _cr_analyzer(reader, spec, model, job)
                     for n, row in enumerate(rows, 1):
-                        check()
                         job["done"], job["total"] = n, len(rows)
-                        before = job.get("cr_made", 0)
-                        for strikes in range(1, max_strikes + 1):
-                            try:
-                                analyzer([row])
-                                break
-                            except intent.QuotaExceeded as e:
-                                raise Stop(str(e))
-                            except Exception as e:
-                                wait_after_failure(strikes, str(e))
-                        else:
-                            counts["failed"] += 1
-                        counts["cr_analyses"] += job.get("cr_made", 0) - before
                         job["message"] = f"[2/3 CR 분석] {spec} CR{row['cr']} {n}/{len(rows)}"
+                        while True:
+                            check()
+                            try:
+                                analyzer([row], strict=True)
+                                break
+                            except Exception as e:  # noqa: BLE001
+                                if failed_item(e):
+                                    break
+                        counts["cr_analyses"] = job.get("cr_made", 0)
             # 3) work item summaries (after the CR analyses they are built from)
             if req.wi_summaries:
                 with lock:
                     wis = [w["wi"] for w in lib.work_items() if not w["summary"]]
                 for n, w in enumerate(wis, 1):
-                    check()
                     job["done"], job["total"] = n, len(wis)
                     job["message"] = f"[3/3 WI 요약] {w} {n}/{len(wis)}"
                     with lock:
                         wi = lib.work_item(w)
-                    for strikes in range(1, max_strikes + 1):
+                    while True:
+                        check()
                         try:
                             counts["wi_summaries"] += 1 if _summarize_wi(model, wi) else 0
                             break
-                        except intent.QuotaExceeded as e:
-                            raise Stop(str(e))
-                        except Exception as e:
-                            wait_after_failure(strikes, str(e))
-                    else:
-                        counts["failed"] += 1
+                        except Exception as e:  # noqa: BLE001
+                            if failed_item(e):
+                                break
             job["state"] = "done"
             job["message"] = "전체 AI 분석 완료 · " + _full_counts(counts)
         except Stop as e:

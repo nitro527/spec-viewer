@@ -32,7 +32,8 @@ SYSTEM = (
 TOOLS = [
     {"type": "function", "function": {
         "name": "list_specs", "description": "The downloaded specifications with their titles and versions.",
-        "parameters": {"type": "object", "properties": {}}}},
+        "parameters": {"type": "object", "properties": {  # some servers reject an empty properties object
+            "series": {"type": "string", "description": "optional filter, e.g. 38"}}}}},
     {"type": "function", "function": {
         "name": "search", "description": "Full-text search in the specs (latest version of each, or the given "
         "spec/version). Use English 3GPP terms. Returns clauses with a snippet and a source tag.",
@@ -160,18 +161,22 @@ class SpecTools:
         fn = getattr(self, f"t_{name}", None)
         if fn is None:
             return json.dumps({"error": f"unknown tool {name}"})
-        try:
-            out = fn(**{k: v for k, v in args.items() if v not in (None, "")})
+        try:  # small models pass numbers (clause 6.3, version 16.2): every argument is text here
+            out = fn(**{k: str(v) for k, v in args.items() if v not in (None, "")})
         except KeyError as e:
             out = {"error": str(e).strip("'\"")}
         except TypeError as e:
             out = {"error": f"bad arguments: {e}"}
+        except Exception as e:  # noqa: BLE001 - the model gets the error and can try again
+            out = {"error": f"{type(e).__name__}: {e}"}
         text = json.dumps(out, ensure_ascii=False)
         return text if len(text) <= _MAX_RESULT else text[:_MAX_RESULT] + "…(truncated)"
 
-    def t_list_specs(self) -> list[dict]:
+    def t_list_specs(self, series: str | None = None) -> list[dict]:
         out = []
         for s in self.lib.specs():
+            if series and not s["number"].startswith(series.strip().rstrip(".") + "."):
+                continue
             vs = self._versions(s["number"])
             out.append({"spec": s["number"], "title": s.get("title"), "versions": len(vs),
                         "first": vs[0] if vs else None, "latest": vs[-1] if vs else None})
@@ -348,7 +353,7 @@ class SpecTools:
 
 
 def _step_label(name: str, args: dict) -> str:
-    a = {k: v for k, v in args.items() if v}
+    a = {k: str(v) for k, v in args.items() if v}
     return {
         "search": lambda: f"검색: {a.get('query', '')}" + (f" ({a['spec']})" if a.get("spec") else ""),
         "read_clause": lambda: f"읽기: {a.get('spec', '')} §{a.get('clause', '')}",
@@ -387,13 +392,53 @@ def _user_text(question: str, context: dict | None, tag: str | None = None) -> s
     return f"{head}\n\nQuestion: {question}"
 
 
+_BUDGET = 60000  # characters of tool results kept in full; older ones shrink to a stub (context window)
+
+
+def _tool_calls(msg: dict, step: int) -> list[dict]:
+    """Tool calls as every OpenAI-compatible server accepts them back: an id, type "function", arguments as a
+    JSON string (some servers send a dict, leave out the id or the type); extra fields (e.g. Gemini's thought
+    signature) are kept."""
+    out = []
+    for i, tc in enumerate(msg.get("tool_calls") or []):
+        fn = dict(tc.get("function") or {})
+        args = fn.get("arguments")
+        if not isinstance(args, str):
+            fn["arguments"] = json.dumps(args if isinstance(args, dict) else {}, ensure_ascii=False)
+        out.append({**tc, "id": tc.get("id") or f"call_{step}_{i}", "type": "function", "function": fn})
+    return out
+
+
+def _args(tc: dict) -> dict:
+    try:
+        args = json.loads(tc["function"].get("arguments") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return args if isinstance(args, dict) else {}
+
+
+def _shrink(messages: list[dict]) -> None:
+    """Keep the newest tool results whole and shrink older ones once the total passes the budget."""
+    total = 0
+    for m in reversed(messages):
+        if m["role"] != "tool":
+            continue
+        total += len(m["content"])
+        if total > _BUDGET and not m["content"].startswith('{"omitted"'):
+            m["content"] = json.dumps({"omitted": "earlier result shortened to save space; call the tool again "
+                                                  "if you still need it"})
+
+
 def answer(model, lib, question: str, history: list[dict] | None = None, context: dict | None = None,
-           language: str = "Korean", max_steps: int = 10, step: Callable[[str], None] | None = None) -> dict:
-    """Answer one question; ``history`` is the earlier turns ({role, content}). Returns
-    {"answer", "sources", "steps", "mode", "model"}."""
-    from .intent import ToolsUnsupported
+           language: str = "Korean", max_steps: int = 10, step: Callable[[str], None] | None = None,
+           known_sources: dict | None = None) -> dict:
+    """Answer one question; ``history`` is the earlier turns ({role, content}); ``known_sources`` the sources
+    earlier answers cited (a follow-up may cite them again). Returns {"answer", "sources", "steps", "mode",
+    "model"}."""
+    from .intent import LLMError, ToolsUnsupported
 
     tools = SpecTools(lib)
+    tools.sources.update(known_sources or {})
     steps: list[str] = []
 
     def note(s: str):
@@ -407,23 +452,27 @@ def answer(model, lib, question: str, history: list[dict] | None = None, context
         messages.append({"role": m["role"], "content": m["content"][:4000]})
     messages.append({"role": "user", "content": _user_text(question, context, tag)})
     try:
-        for _ in range(max_steps):
-            msg = model.complete(messages, TOOLS)
-            calls = msg.get("tool_calls") or []
+        for n in range(max_steps):
+            try:
+                msg = model.complete(messages, TOOLS)
+            except LLMError as e:  # context window: answer with what was found so far
+                if n == 0 or not re.search(r"context|token|length|too long|maximum", str(e), re.I):
+                    raise
+                break
+            calls = _tool_calls(msg, n)
             if not calls:
                 return {"answer": msg["content"], "sources": tools.sources, "steps": steps, "mode": "tools",
                         "model": msg.get("model")}
-            messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
+            messages.append({k: v for k, v in msg.items() if k not in ("model",)} | {"role": "assistant",
+                            "content": msg.get("content") or "", "tool_calls": calls})
             for tc in calls:
-                fn = tc.get("function") or {}
-                try:
-                    args = json.loads(fn.get("arguments") or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                note(_step_label(fn.get("name", ""), args))
-                messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "name": fn.get("name", ""),
-                                 "content": tools.call(fn.get("name", ""), args)})
+                name, args = tc["function"].get("name", ""), _args(tc)
+                note(_step_label(name, args))
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "name": name,
+                                 "content": tools.call(name, args)})
+            _shrink(messages)
         messages.append({"role": "user", "content": f"Answer now with the material above, in {language}."})
+        _shrink(messages)
         msg = model.complete(messages)
         return {"answer": msg["content"], "sources": tools.sources, "steps": steps, "mode": "tools",
                 "model": msg.get("model")}
