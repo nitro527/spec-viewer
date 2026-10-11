@@ -24,13 +24,16 @@ const Answer = memo(function Answer({ m, onClick }: { m: ChatMessage; onClick: (
 });
 
 /** The answer while it streams in: rendered at most every 150 ms (KaTeX on every token would be the slow part). */
-function Streaming({ text, sources }: { text: string; sources: Record<string, ChatSource> }) {
+function Streaming({ text, sources, onRendered }: {
+  text: string; sources: Record<string, ChatSource>; onRendered: () => void;
+}) {
   const [shown, setShown] = useState(text);
   useEffect(() => {
     const t = setTimeout(() => setShown(text), 150);
     return () => clearTimeout(t);
   }, [text]);
   const html = useMemo(() => renderAnswer(shown, sources), [shown, sources]);
+  useEffect(onRendered, [html, onRendered]);  // after the new text is on screen
   return <div className="answer streaming" dangerouslySetInnerHTML={{ __html: html + '<span class="caret"></span>' }} />;
 }
 
@@ -59,10 +62,9 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
     setTimeout(() => input.current?.focus(), 50);
   }, [pending, onPendingTaken]);
   useEffect(() => { bottom.current?.scrollIntoView({ block: "end" }); }, [chat, job?.steps.length]);
-  useEffect(() => {  // follow the streaming answer, unless the user scrolled up to read
-    const box = bottom.current?.parentElement;
-    if (box && box.scrollHeight - box.scrollTop - box.clientHeight < 120) bottom.current?.scrollIntoView({ block: "end" });
-  }, [job?.partial]);
+  // follow the streaming answer unless the user scrolled up to read (decided on scroll, before the text grows)
+  const stick = useRef(true);
+  const follow = useCallback(() => { if (stick.current) bottom.current?.scrollIntoView({ block: "end" }); }, []);
 
   // follow the job: steps while it looks things up, then the answer text as it streams in
   const jobId = job?.id;
@@ -85,7 +87,7 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
         if (j.state === "error" && j.message.startsWith("작업 정보가 없습니다")) setError(j.message);  // other errors are in the chat
         const done = await api.chat(jobChat.current).catch(() => null);
         setJob(null);
-        if (done) setChat((cur) => (!cur || cur.id === done.id ? done : cur));  // the user may have opened another one
+        if (done) setChat((cur) => (cur?.id === done.id ? done : cur));  // not over another chat or a new one
         loadList();
       } finally {
         busy = false;
@@ -159,8 +161,11 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
               ⬇ 대화 내보내기 (HTML)</button>
           </div>
         )}
-        <div className="chat-msgs">
-          {!chat && !job && (
+        <div className="chat-msgs" onScroll={(e) => {
+          const b = e.currentTarget;
+          stick.current = b.scrollHeight - b.scrollTop - b.clientHeight < 80;
+        }}>
+          {!chat && (
             <div className="chat-empty">
               <h2>받은 스펙에 대해 물어보세요</h2>
               <p className="muted">
@@ -208,7 +213,7 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
               )}
             </div>
           ))}
-          {job && (
+          {job && job.chatId === chat?.id && (
             <div className="msg msg-assistant">
               <div className="thinking">
                 <span className="spinner" /> {job.stopping ? "중지하는 중 (지금 요청이 끝나면 멈춤)…" : job.partial ? "답을 쓰는 중…" : "자료를 찾아보는 중…"}
@@ -219,7 +224,7 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
                 )}
                 <ol>{job.steps.map((s, k) => <li key={k}>{s}</li>)}</ol>
               </div>
-              {job.partial && <Streaming text={job.partial} sources={job.sources ?? {}} />}
+              {job.partial && <Streaming text={job.partial} sources={job.sources ?? {}} onRendered={follow} />}
             </div>
           )}
           <div ref={bottom} />

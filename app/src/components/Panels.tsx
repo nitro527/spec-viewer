@@ -113,7 +113,11 @@ function ReferencedBy({ spec, clause, onXref }: {
 }) {
   const [refs, setRefs] = useState<RefHit[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const load = () => { if (!refs) api.referencedBy(spec, clause).then(setRefs, (e) => setError(String(e))); };
+  const load = () => {
+    if (refs) return;
+    setError(null);
+    api.referencedBy(spec, clause).then(setRefs, (e) => setError(String(e).replace(/^Error: /, "")));
+  };
   const bySpec = useMemo(() => {
     const m = new Map<string, RefHit[]>();
     (refs ?? []).forEach((r) => m.set(r.spec, [...(m.get(r.spec) ?? []), r]));
@@ -242,11 +246,12 @@ export const CAT: Record<string, string> = {
 };
 
 export function InfoPanel({ spec, selection, version, baseline, crsByVersion, colors, onClose, onFetchCrs, fetching,
-  note, onSaveNote, onXref }: {
+  note, onSaveNote, onXref, notesReady = true }: {
   spec: string; selection: Selection | null; version: string; baseline: string; crsByVersion: Map<string, CR[]>;
   colors: Map<string, VersionColor>; onClose: () => void; onFetchCrs?: () => void; fetching?: string | null;
   note?: Note; onSaveNote: (key: string, text: string) => void;
   onXref: (clause: string | undefined, spec: string | undefined) => void;
+  notesReady?: boolean;
 }) {
   const hasDetail = [...crsByVersion.values()].some((l) => l.some((c) => c.detail_status));
   const block = selection && selection.block !== null ? selection.clause.blocks[selection.block] : null;
@@ -298,8 +303,10 @@ export function InfoPanel({ spec, selection, version, baseline, crsByVersion, co
           {selection.clause.number && (
             <ReferencedBy key={selection.clause.key} spec={spec} clause={selection.clause.number} onXref={onXref} />
           )}
-          <NoteEditor key={selection.clause.key} initial={note?.text ?? ""} meta={note}
-                      onSave={(t) => onSaveNote(selection.clause.key, t)} />
+          {notesReady && (  // an editor opened before the notes arrive would save "" over a stored note
+            <NoteEditor key={selection.clause.key} initial={note?.text ?? ""} meta={note}
+                        onSave={(t) => onSaveNote(selection.clause.key, t)} />
+          )}
           <AnnotationPanel spec={spec} version={version} clauseKey={selection.clause.key} rawHash={block?.raw_hash} />
           <FeaturePanel spec={spec} version={version} clauseKey={selection.clause.key} />
         </>

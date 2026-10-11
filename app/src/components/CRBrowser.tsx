@@ -65,9 +65,10 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
       setBatch({ done: i, total: list.length, current: `CR${c.cr}`, failed });
       try {
         const job = await api.analyzeCR(spec, c.cr, c.tdoc);
-        for (;;) {
+        for (let misses = 0; !stop.current;) {  // stop: leave this CR's job to finish on its own
           await new Promise((r) => setTimeout(r, 1500));
           const j = await api.job(job.id);
+          if (!j && ++misses > 40) { failed++; break; }  // the backend is gone
           if (j && j.state !== "running") {
             if (j.state !== "done") failed++;
             break;

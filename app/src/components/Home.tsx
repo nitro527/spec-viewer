@@ -74,7 +74,8 @@ export function Home({ prefill, active, onOpen }: {
             </button>
           ))}
         </div>
-              {(specs?.length ?? 0) > 1 && <CitationMap onOpen={(spec, clause) => onOpen(spec, clause)} />}
+              {(specs?.length ?? 0) > 1 && <CitationMap onOpen={(spec, clause) => onOpen(spec, clause)}
+                                                       specsKey={(specs ?? []).map((x) => `${x.number}@${x.latest}`).join(",")} />}
       </section>
 
       <section>

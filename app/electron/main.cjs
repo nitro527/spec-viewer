@@ -101,7 +101,10 @@ async function backendDied(code) {
     detail: `종료 코드 ${code}. 진행 중이던 다운로드·AI 작업은 멈췄고, 저장된 내용은 남아 있습니다.\n` +
       "다시 시작하면 열려 있던 탭이 닫힙니다.",
   });
-  if (r.response === 1) shell.openPath(path.join(HOME, "logs"));
+  if (r.response === 1) {  // look at the log, then decide: the same question again
+    await shell.openPath(path.join(HOME, "logs"));
+    return backendDied(code);
+  }
   if (r.response === 2) return app.quit();
   try {
     const port = await startBackend();

@@ -14,6 +14,7 @@ export function KeepUp({ specs, downloading, onJob, onOpen }: {
 
   const check = (refresh = false) => {
     setChecking(true);
+    setError(null);
     api.updates(refresh).then(setUpd, (e) => setError(String(e).replace(/^Error: /, ""))).finally(() => setChecking(false));
   };
   // the library changed (a download finished): what is new and what changed is different now

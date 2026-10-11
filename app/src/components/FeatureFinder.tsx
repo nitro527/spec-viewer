@@ -1,6 +1,6 @@
 // Feature-first view: pick a TR 38.822 UE feature, see the clauses of every downloaded spec tied to it.
 import { useEffect, useRef, useState } from "react";
-import { api, type FeatureClause, type FeatureLinks, type UEFeature } from "../api";
+import { api, followJob, type FeatureClause, type FeatureLinks, type Job, type UEFeature } from "../api";
 
 export function FeatureFinder({ onOpen }: { onOpen: (spec: string, clause?: string) => void }) {
   const [status, setStatus] = useState<{ count: number; source: string | null } | null>(null);
@@ -20,16 +20,22 @@ export function FeatureFinder({ onOpen }: { onOpen: (spec: string, clause?: stri
     return () => clearTimeout(t);
   }, [q]);
 
+  const stopJob = useRef<() => void>();
+  useEffect(() => () => stopJob.current?.(), []);
   const fetchFeatures = async () => {
-    const j = await api.fetchFeatures();
+    let j: Job;
+    try {
+      j = await api.fetchFeatures();
+    } catch (e) {
+      return setJob(`실패: ${String(e).replace(/^Error: /, "")}`);
+    }
     setJob("38.822 받는 중…");
-    const t = setInterval(async () => {
-      const cur = await api.job(j.id);
-      if (!cur || cur.state === "running") return setJob(`38.822: ${cur?.message ?? ""}`);
-      clearInterval(t);
+    stopJob.current?.();
+    stopJob.current = followJob(j.id, (cur) => {
+      if (cur.state === "running") return setJob(`38.822: ${cur.message ?? ""}`);
       setJob(cur.state === "error" ? `실패: ${cur.message}` : null);
       loadStatus();
-    }, 1000);
+    });
   };
 
   if (!status) return <p className="muted">불러오는 중…</p>;

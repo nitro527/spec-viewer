@@ -1,25 +1,35 @@
 // Which downloaded spec cites which (latest versions), as a table rather than a graph: rows cite, columns are
 // cited, a cell counts the citing clauses. A cell lists those clauses and what they cite; the most cited clauses
 // are what a change ripples out from.
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { api, type CitationMap as Map_, type CitationPair } from "../api";
 
-export function CitationMap({ onOpen }: { onOpen: (spec: string, clause?: string) => void }) {
+export function CitationMap({ onOpen, specsKey }: { onOpen: (spec: string, clause?: string) => void; specsKey: string }) {
   const [data, setData] = useState<Map_ | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cell, setCell] = useState<{ from: string; to: string; pairs: CitationPair[] | null } | null>(null);
-  const load = () => { if (!data) api.citations().then(setData, (e) => setError(String(e))); };
+  const [open, setOpen] = useState(false);
+  const load = () => {
+    setError(null);
+    api.citations().then(setData, (e) => setError(String(e).replace(/^Error: /, "")));
+  };
+  // after a download the map changes: load again if it is open, else when it is next opened
+  useEffect(() => { setData(null); setCell(null); if (open) load(); }, [specsKey]);  // eslint-disable-line react-hooks/exhaustive-deps
   const count = (f: string, t: string) => data?.matrix.find((m) => m.from === f && m.to === t)?.clauses ?? 0;
   const max = Math.max(1, ...(data?.matrix.filter((m) => m.from !== m.to).map((m) => m.clauses) ?? [1]));
   const pick = (from: string, to: string) => {
     if (cell?.from === from && cell.to === to) return setCell(null);
     setCell({ from, to, pairs: null });
     api.citationPairs(from, to).then((pairs) => setCell((c) => c && c.from === from && c.to === to ? { ...c, pairs } : c),
-      (e) => setError(String(e)));
+      (e) => { setCell(null); setError(String(e).replace(/^Error: /, "")); });
   };
 
   return (
-    <details className="cite-map" onToggle={(e) => (e.target as HTMLDetailsElement).open && load()}>
+    <details className="cite-map" onToggle={(e) => {
+      const o = (e.target as HTMLDetailsElement).open;
+      setOpen(o);
+      if (o && !data) load();
+    }}>
       <summary><b>스펙 간 인용 관계</b> <span className="small muted">받은 스펙의 최신 버전 · 어느 스펙의 몇 개 절이 어느 스펙을 인용하는지</span></summary>
       {error && <p className="small status-error">{error}</p>}
       {!data && !error && <p className="small muted">계산 중…</p>}

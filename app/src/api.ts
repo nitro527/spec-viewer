@@ -253,6 +253,7 @@ export const api = {
     const r = await fetch(`/api/specs/${s(spec)}/notes/${s(key)}`, {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);  // an error body is no note
     return r.json() as Promise<Note | null>;
   },
   annotations: (spec: string, v: string, key: string) =>
@@ -311,6 +312,31 @@ export const api = {
     return r.json();
   },
 };
+
+/** Follow a background job until it ends: ``onUpdate`` gets it while it runs and once more when it is done. Gives
+ *  up (as an error) when the backend has not answered for a minute. Returns a function that stops following;
+ *  call it when the view goes away so no timer keeps polling. */
+export function followJob(id: string, onUpdate: (j: Job) => void, everyMs = 1000): () => void {
+  let misses = 0, busy = false;
+  const t = setInterval(async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const j = await api.job(id);
+      if (!j) {
+        if (++misses * everyMs < 60000) return;
+        clearInterval(t);
+        return onUpdate({ id, state: "error", done: 0, total: 0, specs: [], message: "백엔드가 응답하지 않습니다" });
+      }
+      misses = 0;
+      if (j.state !== "running") clearInterval(t);
+      onUpdate(j);
+    } finally {
+      busy = false;
+    }
+  }, everyMs);
+  return () => clearInterval(t);
+}
 
 export function cmpVersion(a: string, b: string): number {
   const pa = a.split(".").map(Number), pb = b.split(".").map(Number);

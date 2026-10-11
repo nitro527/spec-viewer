@@ -53,6 +53,9 @@ export const HistoryView = forwardRef<HistoryViewHandle, Props>(function History
   });
   const items = virt.getVirtualItems();
 
+  const shown = useRef({ lo: 0, hi: 0 });
+  if (items.length) shown.current = { lo: items[0].index, hi: items[items.length - 1].index };
+
   // Load whichever pages the visible window needs.
   useEffect(() => {
     const pages = new Set(items.map((it) => Math.floor(it.index / PAGE)));
@@ -60,13 +63,13 @@ export const HistoryView = forwardRef<HistoryViewHandle, Props>(function History
       if (loading.current.has(p) || cache.has(p * PAGE)) continue;
       loading.current.add(p);
       const key = `${spec}@${version}`;
-      const lo = items[0].index, hi = items[items.length - 1].index;
       api.clauses(spec, version, p * PAGE, PAGE).then((cs) => {
         if (key !== current.current) return;
         setCache((old) => {
           const next = new Map(old);
           for (const c of cs) next.set(c.ord, c);
           if (next.size > KEEP) {  // a big conformance spec scrolled end to end: drop what is far from view
+            const { lo, hi } = shown.current;  // where the view is now, not when this page was asked for
             for (const ord of next.keys()) {
               if (ord < lo - KEEP / 2 || ord > hi + KEEP / 2) {
                 next.delete(ord);

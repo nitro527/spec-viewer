@@ -140,7 +140,10 @@ function IntentRunner({ specs, ready, onJob }: { specs: SpecInfo[]; ready: boole
   useEffect(() => { if (!spec && specs.length) setSpec(specs[0].number); }, [specs, spec]);
   useEffect(() => {
     if (!spec) return;
-    api.versions(spec).then((vs) => { setVersions(vs); setVersion(vs[vs.length - 1]?.version ?? ""); }, () => setVersions([]));
+    let live = true;  // a slow answer for the spec picked before must not land under this one
+    api.versions(spec).then((vs) => { if (live) { setVersions(vs); setVersion(vs[vs.length - 1]?.version ?? ""); } },
+      () => live && setVersions([]));
+    return () => { live = false; };
   }, [spec]);
 
   const start = async () => {

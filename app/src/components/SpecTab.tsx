@@ -1,6 +1,6 @@
 // One open specification: toolbar, TOC, reading/compare view, info panel and timeline.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type CR, type Note, type SearchHit, type TocEntry, type VersionInfo } from "../api";
+import { api, followJob, type CR, type Job, type Note, type SearchHit, type TocEntry, type VersionInfo } from "../api";
 import { highlightCss, highlighted, versionColors } from "../colors";
 import { CommandPalette } from "./CommandPalette";
 import { CompareView, VersionSelect } from "./CompareView";
@@ -35,6 +35,8 @@ interface Props {
 export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOpenSpec }: Props) {
   const spec = tab.spec!;
   const [versions, setVersions] = useState<VersionInfo[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
   const [version, setVersion] = useState<string | undefined>(tab.version);
   const [baseline, setBaseline] = useState<string>("");
   const [mode, setMode] = useState<Mode>("history");
@@ -48,6 +50,7 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
   const [cmp, setCmp] = useState<[string, string] | null>(null);
   const [crJob, setCrJob] = useState<string | null>(null);
   const [notes, setNotes] = useState<Map<string, Note>>(new Map());
+  const [notesLoaded, setNotesLoaded] = useState(false);
   const [bookmarkedOnly, setBookmarkedOnly] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const view = useRef<HistoryViewHandle>(null);
@@ -56,6 +59,8 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
   const tocVersion = useRef<string | undefined>(undefined);
 
   useEffect(() => {
+    setLoadError(null);
+    const fail = (e: unknown) => setLoadError(String(e).replace(/^Error: /, ""));
     api.versions(spec).then((vs) => {
       setVersions(vs);
       if (!vs.length) return;
@@ -63,10 +68,10 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
       const b = wantBaseline.current;
       wantBaseline.current = undefined;
       setBaseline(b && vs.some((v) => v.version === b) ? b : vs[0].version);
-    });
-    api.crs(spec).then(setCrs);
-    api.notes(spec).then((ns) => setNotes(new Map(ns.map((n) => [n.clause_key, n]))));
-  }, [spec]);
+    }, fail);
+    api.crs(spec).then(setCrs, () => undefined);  // the viewer works without them
+    api.notes(spec).then((ns) => { setNotes(new Map(ns.map((n) => [n.clause_key, n]))); setNotesLoaded(true); }, fail);
+  }, [spec, reload]);
 
   useEffect(() => {
     if (!version) return;
@@ -102,7 +107,7 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
       wantVersion.current = undefined;
     }
     const e = toc.find((t) => t.number === target || t.key === target);
-    if (e) setTimeout(() => view.current?.scrollToOrd(e.ord), 50);
+    if (e) setTimeout(() => jump(e.ord), 50);  // jump() leaves CR / Compare / Statistics mode first
     pendingJump.current = undefined;
   }, [toc, tab.jumpTo]);
 
@@ -158,20 +163,32 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
     if (e) jump(e.ord);
   }, [spec, toc, jump, onOpenSpec]);
 
+  const stopCrJob = useRef<() => void>();
+  useEffect(() => () => stopCrJob.current?.(), []);
   const fetchCrs = useCallback(async () => {
-    const job = await api.fetchCrs(spec);
+    let job: Job;
+    try {
+      job = await api.fetchCrs(spec);
+    } catch (e) {
+      return setCrJob(`실패: ${String(e).replace(/^Error: /, "")}`);
+    }
     setCrJob("CR 표지 받는 중…");
-    const t = setInterval(async () => {
-      const j = await api.job(job.id);
-      if (!j) return;
+    stopCrJob.current?.();
+    stopCrJob.current = followJob(job.id, (j) => {
       setCrJob(j.state === "running" ? `CR 표지 받는 중 ${j.done}/${j.total || "?"}` : j.state === "error" ? `실패: ${j.message}` : null);
-      if (j.state !== "running") { clearInterval(t); api.crs(spec).then(setCrs); }
-    }, 1000);
+      if (j.state !== "running") api.crs(spec).then(setCrs, () => undefined);
+    });
   }, [spec]);
 
   const bookmarks = useMemo(() => new Set([...notes.values()].filter((n) => n.bookmark).map((n) => n.clause_key)), [notes]);
   const updateNote = useCallback(async (key: string, body: { bookmark?: boolean; text?: string }) => {
-    const saved = await api.saveNote(spec, key, { ...body, version });
+    let saved: Note | null;
+    try {
+      saved = await api.saveNote(spec, key, { ...body, version });
+    } catch (e) {
+      alert(`메모·북마크를 저장하지 못했습니다: ${String(e).replace(/^Error: /, "")}`);
+      return;
+    }
     setNotes((m) => {
       const next = new Map(m);
       if (saved) next.set(key, saved); else next.delete(key);
@@ -194,7 +211,13 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
   }, [mode, version, toc]);
 
   if (!versions.length || !version) {
-    return <div className="empty">{versions.length === 0 ? `${spec} 를 불러오는 중…` : ""}</div>;
+    return (
+      <div className="empty">
+        {loadError ? <>{spec} 를 불러오지 못했습니다: {loadError}{" "}
+          <button className="link" onClick={() => setReload((n) => n + 1)}>다시 시도</button></>
+          : versions.length === 0 ? `${spec} 를 불러오는 중…` : ""}
+      </div>
+    );
   }
   const [cmpOld, cmpNew] = cmp ?? [baseline === version ? versions[Math.max(0, versions.length - 2)].version : baseline, version];
 
@@ -272,7 +295,7 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
           <InfoPanel spec={spec} selection={selection} version={version} baseline={baseline} crsByVersion={crsByVersion}
                      colors={colors} onClose={() => setSelection(null)} onFetchCrs={fetchCrs} fetching={crJob}
                      note={selection ? notes.get(selection.clause.key) : undefined}
-                     onSaveNote={(key, text) => updateNote(key, { text })} onXref={onXref} />
+                     onSaveNote={(key, text) => updateNote(key, { text })} onXref={onXref} notesReady={notesLoaded} />
         )}
       </div>
 

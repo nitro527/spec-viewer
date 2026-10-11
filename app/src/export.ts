@@ -21,7 +21,8 @@ async function inlineAssets(html: string): Promise<string> {
     const data = await new Promise<string>((res) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.readAsDataURL(blob); });
     map.set(u, data);
   }));
-  return safeHtml(html).replace(/src="(\/api\/asset\/[0-9a-f]+)"/g, (_, u) => `src="${map.get(u) ?? u}"`);
+  // files open without the app's CSP: always the full pass
+  return safeHtml(html, true).replace(/src="(\/api\/asset\/[0-9a-f]+)"/g, (_, u) => `src="${map.get(u) ?? u}"`);
 }
 
 export async function compareReport(data: CompareResult): Promise<string> {
