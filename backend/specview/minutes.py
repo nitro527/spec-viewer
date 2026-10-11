@@ -13,7 +13,9 @@ meetings' Tdoc number ranges).
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 import zipfile
 from pathlib import Path
 from urllib.parse import unquote
@@ -119,31 +121,40 @@ class TdocIndex:
 
     def __init__(self, cache_dir: Path, session=None):
         self.file = Path(cache_dir) / "minutes" / "tdoc_ranges.json"
-        self.ranges: dict[str, list[int]] = json.loads(self.file.read_text()) if self.file.exists() else {}
+        raw = json.loads(self.file.read_text()) if self.file.exists() else {}
+        # folder -> {"r": [lowest, highest Tdoc] or [], "t": when listed}; files of older versions held bare lists
+        self.ranges: dict[str, dict] = {k: v if isinstance(v, dict) else {"r": v, "t": 0} for k, v in raw.items()}
         self.s = session or new_session()
 
-    def _range(self, folder: str) -> list[int] | None:
-        if folder not in self.ranges:
+    def _range(self, folder: str, recent: bool = False) -> list[int] | None:
+        """Lowest and highest Tdoc number in a meeting's Docs folder. A folder of one of the latest meetings
+        (still filling up during and after the meeting) is listed again after two days, an empty one after a
+        week; older meetings are final."""
+        import time
+
+        e = self.ranges.get(folder)
+        stale = e is not None and time.time() - e["t"] > (2 * 86400 if recent else 7 * 86400 if not e["r"] else 1e18)
+        if e is None or stale:
             try:
                 r = _get(self.s, f"{folder}/Docs/")
             except Unreachable:
-                return None  # not recorded: asked again next time
+                return e["r"] or None if e else None  # not recorded: asked again next time
             vals = [tdoc_value(f"R{m[0]}-{m[1]}") for m in _ANY_TDOC.findall(r.text)] if r is not None else []
-            self.ranges[folder] = [min(vals), max(vals)] if vals else []
+            self.ranges[folder] = e = {"r": [min(vals), max(vals)] if vals else [], "t": time.time()}
             self.file.parent.mkdir(parents=True, exist_ok=True)
             self.file.write_text(json.dumps(self.ranges))
-        return self.ranges[folder] or None
+        return e["r"] or None
 
     def meeting_of(self, tdoc: str) -> str | None:
         m = _ANY_TDOC.match(tdoc)
         if not m:
             return None
         v = tdoc_value(tdoc)
-        meetings = list_meetings(m.group(1), self.s)
+        meetings = list(list_meetings(m.group(1), self.s))  # a copy: the list is shared, cached for a day
         lo, hi = 0, len(meetings) - 1
         while lo <= hi:
             mid = (lo + hi) // 2
-            rg = self._range(meetings[mid])
+            rg = self._range(meetings[mid], recent=mid >= len(meetings) - 3)
             if rg is None:  # empty folder: look at a neighbour instead
                 meetings.pop(mid)
                 hi -= 1
@@ -235,10 +246,15 @@ def parse_report(docx: Path) -> list[dict]:
 
 def fetch_report(folder: str, cache_dir: Path, session=None) -> dict | None:
     """Parsed report of one meeting, cached as JSON (an empty file marks "no report")."""
+    import time
+
     cache = Path(cache_dir) / "minutes" / f"{folder_name(folder)}.json"
     if cache.exists():
         data = json.loads(cache.read_text(encoding="utf-8"))
-        if not data or data.get("v") == 2:
+        final = bool(data) and "final" in (data.get("url") or "").lower()
+        # no report yet, or only a draft: final minutes come weeks after the meeting, so look again weekly
+        recheck = not final and time.time() - cache.stat().st_mtime > 7 * 86400
+        if (not data or data.get("v") == 2) and not recheck:
             return data or None  # older cache entries lack the Tdoc list: fetch again
     s = session or new_session()
     result = None
@@ -251,7 +267,12 @@ def fetch_report(folder: str, cache_dir: Path, session=None) -> dict | None:
         work = cache.parent / folder_name(folder)
         work.mkdir(parents=True, exist_ok=True)
         zp = work / "report.zip"
-        zp.write_bytes(r.content)
+        part = zp.with_name(f"report.{os.getpid()}.{threading.get_ident()}.part")
+        part.write_bytes(r.content)
+        os.replace(part, zp)  # never a half-written zip under the final name
+        if not zipfile.is_zipfile(zp):
+            zp.unlink(missing_ok=True)
+            return None  # cut off: not cached, fetched again next time
         with zipfile.ZipFile(zp) as z:
             docs = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc")) and not n.startswith("__MACOSX")]
             if docs:

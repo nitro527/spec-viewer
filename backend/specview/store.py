@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import Iterator
 
-from . import changehistory, history, secret
+from . import changehistory, crdocs, history, secret
 from .diff import render_diff
 from .parse_docx import ParsedSpec, content_hash
 from .versions import Version
@@ -272,6 +272,58 @@ class Library:
         finally:
             reader.close()
 
+    def fix_lettered_clauses(self) -> list[str]:
+        """Libraries parsed before "5.2.1.5.1a" and "8.4.1.4." headings were recognised as numbered keyed such a
+        clause by its title ("5-2-1-5-1a-aperiodic-csi", no number) and its unnumbered sub-headings under that.
+        Give them the keys a fresh parse gives ("5.2.1.5.1a", "5.2.1.5.1a/ue"), so history continues into newly
+        downloaded versions and CRs reach them. Returns the specs changed (their history needs recomputing)."""
+        from .parse_docx import _split_heading
+
+        TMP = "mig:"  # keys never start with it (numbers, "front", slugs of letters/digits/dashes)
+        rows = self.db.execute(
+            "SELECT c.version_id, c.key, c.title, v.spec FROM clause_ver c JOIN version v ON v.id = c.version_id "
+            "WHERE c.number = '' AND c.title GLOB '[0-9]*[0-9]*'").fetchall()
+        renames: dict[int, dict[str, tuple[str, str, str]]] = {}
+        specs: dict[int, str] = {}
+        for r in rows:
+            key, number, title = _split_heading(r["title"])
+            if number:  # what a parse today makes of this heading
+                renames.setdefault(r["version_id"], {})[r["key"]] = (key, number, title)
+                specs[r["version_id"]] = r["spec"]
+        changed = set()
+        with self.db:
+            for vid, ren in renames.items():
+                keys = {k for (k,) in self.db.execute("SELECT key FROM clause_ver WHERE version_id=?", (vid,))}
+                mapping: dict[str, str] = {}
+                for old, (new, _, _) in ren.items():
+                    if new in keys:
+                        continue  # already there (a duplicate heading): leave this one alone
+                    mapping[old] = new
+                    for k in keys:  # its sub-headings: "<old>/ue" -> "<new>/ue"
+                        if k.startswith(old + "/"):
+                            mapping[k] = new + k[len(old):]
+                if not mapping:
+                    continue
+                for old, new in mapping.items():  # two steps: no clash while keys trade places
+                    self.db.execute("UPDATE clause_ver SET key=? WHERE version_id=? AND key=?", (TMP + new, vid, old))
+                    self.db.execute("UPDATE block_ver SET clause_key=? WHERE version_id=? AND clause_key=?",
+                                    (TMP + new, vid, old))
+                self.db.execute("UPDATE clause_ver SET key=substr(key, ?) WHERE version_id=? AND key LIKE ?",
+                                (len(TMP) + 1, vid, TMP + "%"))
+                self.db.execute("UPDATE block_ver SET clause_key=substr(clause_key, ?) WHERE version_id=? AND "
+                                "clause_key LIKE ?", (len(TMP) + 1, vid, TMP + "%"))
+                for old, (new, number, title) in ren.items():
+                    if mapping.get(old) == new:
+                        self.db.execute("UPDATE clause_ver SET number=?, title=?, level=? WHERE version_id=? AND key=?",
+                                        (number, title, number.count(".") + 1, vid, new))
+                spec = specs[vid]
+                for old, new in mapping.items():  # notes are per spec: follow the rename
+                    self.db.execute("UPDATE OR IGNORE note SET clause_key=? WHERE spec=? AND clause_key=?", (new, spec, old))
+                changed.add(spec)
+        if changed:
+            self._compared.clear()
+        return sorted(changed)
+
     def specs_missing_history(self) -> list[str]:
         """Specs with versions whose history was never computed (an import cut off before that step)."""
         return [r[0] for r in self.db.execute(
@@ -365,6 +417,8 @@ class Library:
         for r in self.db.execute(q, args):
             d = dict(r)
             cover = json.loads(d.pop("cover") or "null")
+            if cover and cover.get("clauses_raw"):  # covers saved by older versions parsed "Annex A.2" as A and 2
+                cover["clauses"] = crdocs.parse_clauses(cover["clauses_raw"])
             d["detail"] = cover
             rows.append(d)
         rows.sort(key=lambda r: Version.parse(r["new_version"]).sort_key)

@@ -33,6 +33,7 @@ class IntentModel(Protocol):
 
 
 def _touches(cl: str, number: str) -> bool:
+    number = number[6:] if number.startswith("Annex ") else number  # an annex heading is "Annex B"; CRs say "B"
     return cl == number or number.startswith(cl + ".") or cl.startswith(number + ".")
 
 

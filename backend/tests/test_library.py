@@ -126,3 +126,54 @@ def test_merge_split_parts():
     assert m.title == "LTE; Physical channels"
     assert [c.key for c in m.clauses] == ["front", "foreword", "1", "6", "1~2"]
     assert [x.text for x in m.clauses[2].blocks] == ["s", "cont"]  # text before p2's first heading continues §1
+
+
+def test_heading_numbers_with_a_letter_or_a_stray_dot():
+    from specview.crdocs import parse_clauses
+    from specview.parse_docx import _split_heading
+
+    assert _split_heading("5.2.1.5.1a Aperiodic CSI") == ("5.2.1.5.1a", "5.2.1.5.1a", "Aperiodic CSI")
+    assert _split_heading("8.4.1.4. Demodulation reference signals")[:2] == ("8.4.1.4", "8.4.1.4")
+    assert _split_heading("AA.1 Test")[1] == "AA.1" and _split_heading("6.2A.1 x")[1] == "6.2A.1"
+    assert _split_heading("5G System")[1] == ""
+    assert parse_clauses("5.3.1, Table 7.4.1.5.3-1, Annex B, Annex A.2, 5.2.1.5.1a") == \
+        ["5.3.1", "7.4.1.5.3", "B", "A.2", "5.2.1.5.1a"]
+
+
+def test_old_title_keys_are_renamed_to_numbers(library, tmp_path):
+    import sqlite3
+
+    from specview.store import Library
+
+    dst = sqlite3.connect(tmp_path / "library.sqlite")
+    library.db.backup(dst)
+    dst.close()
+    lib = Library(tmp_path / "library.sqlite")
+    slug = "7-4-1-1-3-mapping-for-positioning"
+    with lib.db:  # what a parse before the fix stored for "7.4.1.1.3. Mapping for positioning"
+        for (vid,) in lib.db.execute("SELECT id FROM version WHERE spec='99.211'").fetchall():
+            lib.db.execute("UPDATE clause_ver SET key=?, number='', title='7.4.1.1.3. Mapping for positioning' "
+                           "WHERE version_id=? AND key='7.4.1.1.3'", (slug, vid))
+            lib.db.execute("UPDATE block_ver SET clause_key=? WHERE version_id=? AND clause_key='7.4.1.1.3'", (slug, vid))
+        lib.db.execute("INSERT INTO note VALUES ('99.211', ?, 1, 'x', NULL, '2026-01-01')", (slug,))
+    assert lib.fix_lettered_clauses() == ["99.211"] and lib.fix_lettered_clauses() == []
+    lib.recompute_history("99.211")
+    latest = lib.versions("99.211")[-1]["version"]
+    e = next(t for t in lib.toc("99.211", latest) if t["key"] == "7.4.1.1.3")
+    assert e["number"] == "7.4.1.1.3" and e["title"] == "Mapping for positioning"
+    assert lib.notes("99.211")[0]["clause_key"] == "7.4.1.1.3"
+    assert lib.clauses("99.211", latest, e["ord"], 1)[0]["blocks"]
+
+
+def test_change_history_with_merged_cells_keeps_every_cr():
+    from lxml import html
+
+    from specview.changehistory import _rows
+
+    t = html.fragment_fromstring(
+        "<table><tr><th>Date</th><th>Meeting</th><th>TDoc</th><th>CR</th><th>Rev</th><th>Cat</th>"
+        "<th>Subject/Comment</th><th>New version</th></tr>"
+        "<tr><td rowspan='2'>2020-03</td><td rowspan='2'>RAN#87</td><td>RP-1</td><td>0001</td><td>-</td><td>F</td>"
+        "<td>First</td><td rowspan='2'>16.1.0</td></tr>"
+        "<tr><td>RP-2</td><td>0002</td><td>1</td><td>B</td><td>Second</td></tr></table>")
+    assert _rows(t)[2] == ["2020-03", "RAN#87", "RP-2", "0002", "1", "B", "Second", "16.1.0"]

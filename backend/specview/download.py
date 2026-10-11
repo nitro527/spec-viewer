@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -148,7 +149,8 @@ def _extract_docx(zip_path: Path, out_dir: Path) -> list[Path]:
         targets = []
         for name in names:
             target = out_dir / Path(name).name
-            part = target.with_name(target.name + ".part")  # a half-written file must not count as cached
+            # a half-written file must not count as cached; private name: two jobs may extract the same version
+            part = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.part")
             with z.open(name) as src, open(part, "wb") as dst:
                 shutil.copyfileobj(src, dst)
             os.replace(part, target)
@@ -250,7 +252,7 @@ def _download(s: requests.Session, url: str, dest: Path, progress: Callable[[int
         r.raise_for_status()
         total = int(r.headers.get("content-length") or 0)
         done = 0
-        tmp = dest.with_suffix(".part")
+        tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{threading.get_ident()}.part")  # private per download
         with open(tmp, "wb") as f:
             for chunk in r.iter_content(1 << 16):
                 f.write(chunk)

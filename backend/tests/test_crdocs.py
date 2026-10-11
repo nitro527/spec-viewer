@@ -5,6 +5,19 @@ from docx import Document
 from specview import crdocs
 
 
+def _zip_bytes() -> bytes:
+    import io
+    import zipfile
+
+    b = io.BytesIO()
+    with zipfile.ZipFile(b, "w") as z:
+        z.writestr("x.txt", "x")
+    return b.getvalue()
+
+
+_ZIP = _zip_bytes()  # a real (tiny) zip: cached packs are checked
+
+
 def _cr_docx(path):
     d = Document()
     t = d.add_table(rows=2, cols=7)
@@ -83,7 +96,7 @@ def test_ttcn_cr_tdoc_found_by_year(tmp_path):
     asked = []
 
     class Resp:
-        status_code, content = 200, b"PK\x03\x04"
+        status_code, content = 200, _ZIP
 
     class Session:
         def get(self, url, timeout=None):
@@ -147,14 +160,14 @@ def test_tsg_meeting_found_by_tdoc_number_when_change_history_has_none(tmp_path)
         f"{ran}/TSGR_95e/Docs/": '<a href="RP-220001.zip">RP-220001.zip</a> RP-220950.zip',
         f"{ran}/TSGR_96/Docs/": "RP-221000.zip RP-221800.zip",
         f"{ran}/TSGR_97e/Docs/": "RP-222000.zip RP-223500.zip",
-        f"{ran}/TSGR_96/Docs/RP-221713.zip": b"PK\x03\x04",
+        f"{ran}/TSGR_96/Docs/RP-221713.zip": _ZIP,
     })
     assert crdocs.fetch_pack("RP-221713", "", tmp_path, site).name == "RP-221713.zip"  # 36.323: no meeting given
 
 
 def test_e_meeting_folder_tried_when_change_history_drops_the_e(tmp_path):
     ran = f"{crdocs.FTP}/tsg_ran/TSG_RAN"
-    site = _Site({f"{ran}/TSGR_88e/Docs/RP-201167.zip": b"PK\x03\x04"})
+    site = _Site({f"{ran}/TSGR_88e/Docs/RP-201167.zip": _ZIP})
     assert crdocs.fetch_pack("RP-201167", "RP-88", tmp_path, site).name == "RP-201167.zip"  # 36.302
 
 

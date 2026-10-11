@@ -173,7 +173,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     def _repair():  # the app was closed while a download was between storing versions and computing history
         try:
             with lock:
-                todo = lib.specs_missing_history()
+                todo = sorted(set(lib.specs_missing_history()) | set(lib.fix_lettered_clauses()))
             for spec in todo:
                 lib.recompute_history(spec, lock=lock)
         except Exception:

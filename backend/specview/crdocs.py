@@ -88,7 +88,9 @@ def meeting_folder(tdoc: str, meeting: str) -> str | None:
 def parse_clauses(raw: str) -> list[str]:
     """``"5.3.1, Table 7.4.1.5.3-1, Annex B"`` -> ``["5.3.1", "7.4.1.5.3", "B"]``."""
     out: list[str] = []
-    for m in re.finditer(r"Annex\s+([A-Z])\b|((?:[A-Z]\.)?\d+(?:\.\d+[A-Z]{0,2})*)(?:-\d+)?", raw):
+    # "Annex A.2" is clause A.2 (not "A" and clause 2); 5.2.1.5.1a keeps its letter
+    for m in re.finditer(r"Annex\s+([A-Z]{1,2}(?:\.\d+)*)\b|((?:[A-Z]{1,2}\.)?\d+(?:\.\d+(?:[A-Z]{1,2}|[a-z])?)*)(?:-\d+)?",
+                         raw):
         c = m.group(1) or m.group(2)
         if c and c not in out:
             out.append(c)
@@ -139,10 +141,29 @@ def parse_cover(docx: Path) -> CRCover:
     return cover
 
 
+def _write_atomic(path: Path, data: bytes) -> None:
+    """Write through a private temp file: a reader never sees half a file, two threads never interleave, and an
+    interrupted write leaves nothing that looks cached."""
+    import os
+    import threading
+
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.part")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+def _zip_ok(path: Path) -> bool:
+    """A cached zip that is not one (cut off, or an error page): removed so it is downloaded again."""
+    if zipfile.is_zipfile(path):
+        return True
+    path.unlink(missing_ok=True)
+    return False
+
+
 def fetch_pack(tdoc: str, meeting: str, cache_dir: Path, session: requests.Session | None = None) -> Path | None:
     """Download (cached) the TSG Tdoc zip; None if it cannot be located."""
     target = Path(cache_dir) / "tdocs" / f"{tdoc}.zip"
-    if target.exists():
+    if target.exists() and _zip_ok(target):
         return target
     s = session or new_session()
     folder = meeting_folder(tdoc, meeting)
@@ -173,8 +194,9 @@ def fetch_pack(tdoc: str, meeting: str, cache_dir: Path, session: requests.Sessi
                     raise
                 time.sleep(2 ** attempt)
         if r.status_code == 200 and r.content[:2] == b"PK":
-            target.write_bytes(r.content)
-            return target
+            _write_atomic(target, r.content)
+            if _zip_ok(target):
+                return target
     return None
 
 
@@ -232,7 +254,7 @@ def find_cr_doc(pack: Path, spec: str, cr: str, out_dir: Path) -> Path | None:
                 out = Path(out_dir) / Path(name).name
                 out.parent.mkdir(parents=True, exist_ok=True)
                 if not out.exists():
-                    out.write_bytes(src.read(name))
+                    _write_atomic(out, src.read(name))
                 if _cover_matches(out, spec, cr):
                     return out
         if pick is None:
@@ -242,7 +264,8 @@ def find_cr_doc(pack: Path, spec: str, cr: str, out_dir: Path) -> Path | None:
         out.parent.mkdir(parents=True, exist_ok=True)
         if out.suffix.lower() == ".doc" and out.with_suffix(".docx").exists():
             return out.with_suffix(".docx")
-        out.write_bytes(src.read(name))
+        if not out.exists():  # rewriting it on every request raced with readers (and Windows file locks)
+            _write_atomic(out, src.read(name))
     if out.suffix.lower() == ".doc":
         from .download import _convert_doc
 
@@ -325,13 +348,16 @@ def fetch_draft_cr(tdoc: str, cover: dict, cache_dir: Path, session: requests.Se
             out_dir = Path(cache_dir) / "tdocs" / tdoc
             out_dir.mkdir(parents=True, exist_ok=True)
             pack = out_dir / f"{tdoc}.zip"
-            pack.write_bytes(r.content)
+            _write_atomic(pack, r.content)
+            if not _zip_ok(pack):  # cut off on the way: try again another time
+                unsure = True
+                continue
             with zipfile.ZipFile(pack) as z:
                 docs = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc"))]
                 if not docs:
                     break
                 doc = out_dir / Path(docs[0]).name
-                doc.write_bytes(z.read(docs[0]))
+                _write_atomic(doc, z.read(docs[0]))
             if doc.suffix.lower() == ".doc":
                 from .download import LegacyDocError, _convert_doc
 

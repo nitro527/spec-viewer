@@ -22,7 +22,9 @@ from lxml import etree, html
 from .wmf import wmf_to_svg
 
 HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-_NUM_RE = re.compile(r"^((?:[A-Z]\.)?\d+(?:\.\d+[A-Z]{0,2})*)\s+(.*)$", re.S)  # 7.4.1, A.2, 6.2A.1 (RF specs)
+# 7.4.1, A.2, AA.1, 6.2A.1 (RF specs), 5.2.1.5.1a (a clause added between two others)
+# "8.4.1.4." with a stray dot (38.211 v16) is 8.4.1.4
+_NUM_RE = re.compile(r"^((?:[A-Z]{1,2}\.)?\d+(?:\.\d+(?:[A-Z]{1,2}|[a-z])?)*)\.?\s+(.*)$", re.S)
 _ANNEX_RE = re.compile(r"^Annex\s+([A-Z]{1,2})\b\s*(.*)$", re.S)
 _WS = re.compile(r"\s+")
 _IMAGE_CONVERT = {".emf"}  # WMF is handled by specview.wmf
@@ -219,10 +221,17 @@ def _convert_vector_images(paths: list[Path]) -> dict[Path, Path]:
     for p in paths:
         by_dir.setdefault(p.parent, []).append(p)
     for d, files in by_dir.items():
-        subprocess.run(
-            [soffice, "--headless", "--convert-to", "png", "--outdir", str(d), *map(str, files)],
-            capture_output=True, timeout=600,
-        )
+        # its own profile per run: versions convert in parallel, and a second LibreOffice on a shared profile
+        # quietly does nothing (images left as EMF in one version, PNG in the next: false changes)
+        with tempfile.TemporaryDirectory(prefix="specview-lo-") as profile:
+            try:
+                subprocess.run(
+                    [soffice, f"-env:UserInstallation={Path(profile).as_uri()}", "--headless", "--convert-to", "png",
+                     "--outdir", str(d), *map(str, files)],
+                    capture_output=True, timeout=600,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
         for f in files:
             png = f.with_suffix(".png")
             if png.exists():
