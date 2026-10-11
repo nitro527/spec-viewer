@@ -116,7 +116,7 @@ def _resolve_moves(added: list, gone: list[dict], vi: int) -> None:
             for g in gone:
                 if g.get("used") or len(g["state"].src.text) < _MOVE_MIN_CHARS:
                     continue
-                sc = similarity(g["state"].src.text, b.text)
+                sc = similarity(g["state"].src.text, b.text, max(_MOVE_SIMILARITY, best))
                 if sc >= _MOVE_SIMILARITY and sc > best:
                     cand, best = g, sc
         if cand is None:

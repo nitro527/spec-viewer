@@ -23,7 +23,9 @@ export function CompareView({ spec, versions, oldV, newV, onChange, onXref }: Pr
     setData(null);
     setError(null);
     if (cmpVersion(oldV, newV) >= 0) return;
-    api.compare(spec, oldV, newV).then(setData, (e) => setError(String(e)));
+    let live = true;  // a big compare takes seconds: the reply for versions picked before must not land here
+    api.compare(spec, oldV, newV).then((x) => live && setData(x), (e) => live && setError(String(e)));
+    return () => { live = false; };
   }, [spec, oldV, newV]);
 
   const all = useMemo(() => (data ? [...data.clauses, ...data.removed] : []), [data]);

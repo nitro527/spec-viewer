@@ -77,6 +77,60 @@ def cr_prompt(ev: dict) -> str:
     return "\n\n".join(parts)
 
 
+WI_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "overview": {"type": "string", "description": "What the feature is and what it adds to NR, 3-5 sentences."},
+        "motivation": {"type": "string", "description": "Why it was introduced (problem, use case)."},
+        "spec_changes": {"type": "array", "description": "Per spec: the clauses the work item changed and what.",
+                         "items": {"type": "object",
+                                   "properties": {"spec": {"type": "string"}, "clauses": {"type": "string"},
+                                                  "what": {"type": "string"}},
+                                   "required": ["spec", "clauses", "what"], "additionalProperties": False}},
+        "timeline": {"type": "array", "description": "How it entered the specs: the introducing CRs, then the "
+                                                     "later corrections, in time order.",
+                     "items": {"type": "object",
+                               "properties": {"when": {"type": "string", "description": "meeting or version"},
+                                              "what": {"type": "string"}},
+                               "required": ["when", "what"], "additionalProperties": False}},
+        "impact": {"type": "string", "description": "What a UE/modem implementer has to support, across the specs."},
+        "open_points": {"type": "string", "description": "Corrections, ambiguities fixed later or known caveats; "
+                                                         "empty if none in the material."},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    },
+    "required": ["overview", "motivation", "spec_changes", "timeline", "impact", "open_points", "confidence"],
+    "additionalProperties": False,
+}
+
+WI_SYSTEM = (
+    "You explain one 3GPP work item (a feature) to physical-layer modem engineers, from every change request "
+    "(CR) it made to the specifications. <crs> lists them oldest first: spec, CR number, meeting, version, "
+    "category (B/C = feature addition or change, F/A = correction, D = editorial), cover page reason and summary, "
+    "the clauses it changed, and where available an earlier detailed analysis of the CR. Describe the feature as a "
+    "whole: what it is, why, what each spec got, how it evolved (first the introducing CRs, then corrections), and "
+    "what an implementer has to support. Use only the provided material; name CRs and meetings you rely on; when "
+    "something is not in the material, leave it out and lower the confidence. "
+    "Write in {language}; keep 3GPP terms (PDSCH, DM-RS, parameter names) in English."
+)
+
+
+def wi_prompt(wi: dict, max_chars: int = 60000) -> str:
+    rows, used = [], 0
+    for c in wi["crs"]:
+        row = {"spec": c["spec"], "cr": c["cr"], "meeting": c["meeting"], "version": c["new_version"],
+               "cat": c["cat"], "title": c["title"], "clauses": c["clauses_raw"],
+               "reason": (c["reason"] or "")[:700], "summary": (c["summary"] or "")[:900]}
+        if c.get("analysis"):
+            row["analysis"] = {k: (v or "")[:700] for k, v in c["analysis"].items()}
+        text = json.dumps(row, ensure_ascii=False)
+        if used + len(text) > max_chars:  # very large work items: keep the oldest (introducing) CRs whole
+            row = {k: row[k] for k in ("spec", "cr", "meeting", "version", "cat", "title", "clauses")}
+            text = json.dumps(row, ensure_ascii=False)
+        used += len(text)
+        rows.append(text)
+    return f"Work item {wi['wi']}: {len(rows)} CRs.\n<crs>\n" + "\n".join(rows) + "\n</crs>"
+
+
 SYSTEM = (
     "You explain changes in 3GPP specifications to physical-layer modem engineers. "
     "<changes> lists exactly which words were removed (-) and added (+) in the paragraph. "
@@ -297,6 +351,15 @@ class OpenAICompatIntentModel:
             return [{"role": "system", "content": system},
                     {"role": "user", "content": cr_prompt(evidence) + f"\n\nWrite every field in {self.language}."}]
         return self._answer(self._structured(messages, ("cr_analysis", CR_SCHEMA)))
+
+    def summarize_wi(self, wi: dict) -> dict | None:
+        def messages():
+            system = WI_SYSTEM.format(language=self.language)
+            if self._schema_mode != "json_schema":
+                system += "\nReply with only a JSON object matching this schema:\n" + json.dumps(WI_SCHEMA)
+            return [{"role": "system", "content": system},
+                    {"role": "user", "content": wi_prompt(wi) + f"\n\nWrite every field in {self.language}."}]
+        return self._answer(self._structured(messages, ("wi_summary", WI_SCHEMA)))
 
     def _answer(self, data: dict) -> dict | None:
         choice = (data.get("choices") or [{}])[0]

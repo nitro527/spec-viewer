@@ -31,7 +31,7 @@ export function CommandPalette({ spec, toc, versions, onJump, onVersion, onMode,
       versions.filter((v) => v.version.startsWith(vm[1])).slice(0, 6)
         .forEach((v) => out.push({ label: `v${v.version}`, hint: `Rel-${v.release} 버전 보기`, run: () => onVersion(v.version) }));
     }
-    const modes: [Mode, string][] = [["history", "History"], ["compare", "Compare"], ["clean", "Clean"], ["stats", "Statistics"]];
+    const modes: [Mode, string][] = [["history", "History"], ["compare", "Compare"], ["clean", "Clean"], ["stats", "Statistics"], ["crs", "CR 목록"]];
     modes.filter(([, n]) => low && n.toLowerCase().startsWith(low)).forEach(([m, n]) => out.push({ label: n, hint: "모드 전환", run: () => onMode(m) }));
     const clauseQ = other ? "" : low;
     const byNum = toc.filter((t) => clauseQ && t.number.toLowerCase().startsWith(clauseQ));

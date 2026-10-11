@@ -164,7 +164,7 @@ function NoteEditor({ initial, meta, onSave }: { initial: string; meta?: Note; o
   );
 }
 
-const CAT: Record<string, string> = {
+export const CAT: Record<string, string> = {
   F: "Correction", A: "Mirror of a correction in an earlier release", B: "Addition of feature",
   C: "Functional modification of feature", D: "Editorial modification",
 };

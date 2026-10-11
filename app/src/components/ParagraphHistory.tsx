@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, crKey, type LineageStep } from "../api";
 import type { VersionColor } from "../colors";
-import { CRAnalysisCard, useAiJob, useCRAnalyses } from "./CRAnalysis";
+import { CRAnalysisCard, useAiJob, useCRAnalyses, useLlmReady } from "./CRAnalysis";
 import { openCRDoc } from "./DocWindow";
 import { Html } from "./Html";
 
@@ -12,10 +12,7 @@ const CHANGE: Record<string, string> = { base: "처음 버전", added: "추가",
 export function ParagraphHistory({ spec, version, clauseKey, rawHash, colors }: {
   spec: string; version: string; clauseKey: string; rawHash: string; colors: Map<string, VersionColor>;
 }) {
-  const [llmReady, setLlmReady] = useState(false);
-  useEffect(() => {
-    api.llm().then((s) => setLlmReady(s.has_key || s.provider !== "gemini"), () => setLlmReady(false));
-  }, []);
+  const llmReady = useLlmReady();
   const [steps, setSteps] = useState<LineageStep[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
@@ -25,7 +22,11 @@ export function ParagraphHistory({ spec, version, clauseKey, rawHash, colors }: 
 
   useEffect(() => {
     setError(null);
-    api.lineage(spec, version, clauseKey, rawHash).then(setSteps, (e) => { setSteps([]); setError(String(e)); });
+    let live = true;
+    api.lineage(spec, version, clauseKey, rawHash).then((x) => live && setSteps(x), (e) => {
+      if (live) { setSteps([]); setError(String(e)); }
+    });
+    return () => { live = false; };
   }, [spec, version, clauseKey, rawHash, reload]);
 
   if (steps === null) return <p className="muted small">변화 이력 불러오는 중…</p>;

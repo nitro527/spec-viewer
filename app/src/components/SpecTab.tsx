@@ -4,13 +4,14 @@ import { api, type CR, type Note, type SearchHit, type TocEntry, type VersionInf
 import { highlightCss, highlighted, versionColors } from "../colors";
 import { CommandPalette } from "./CommandPalette";
 import { CompareView, VersionSelect } from "./CompareView";
+import { CRBrowser } from "./CRBrowser";
 import { FindBar } from "./FindBar";
 import { HistoryView, type HistoryViewHandle, type Selection } from "./HistoryView";
 import { ChangeRuler, InfoPanel, Toc } from "./Panels";
 import { StatsView } from "./StatsView";
 import { Timeline } from "./Timeline";
 
-export type Mode = "history" | "compare" | "clean" | "stats";
+export type Mode = "history" | "compare" | "clean" | "stats" | "crs";
 
 export interface TabState {
   id: string;
@@ -117,7 +118,7 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
   }, [crs]);
 
   const jump = useCallback((ord: number, block: number | null = null) => {
-    const away = mode === "compare" || mode === "stats";
+    const away = mode === "compare" || mode === "stats" || mode === "crs";
     if (away) setMode("history");
     setTimeout(() => view.current?.scrollToOrd(ord, block), away ? 80 : 0);
   }, [mode]);
@@ -153,6 +154,16 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
     [updateNote, bookmarks]);
 
   const onFind = useCallback((h: SearchHit) => jump(h.ord, h.block), [jump]);
+  const openAt = useCallback((v: string, key: string) => {  // a clause of another (or this) version
+    if (mode !== "history" && mode !== "clean") setMode("history");
+    if (v === version) {
+      const e = toc.find((t) => t.key === key);
+      if (e) setTimeout(() => view.current?.scrollToOrd(e.ord), 80);
+      return;
+    }
+    pendingJump.current = key;  // done once that version's TOC is there
+    setVersion(v);
+  }, [mode, version, toc]);
 
   if (!versions.length || !version) {
     return <div className="empty">{versions.length === 0 ? `${spec} 를 불러오는 중…` : ""}</div>;
@@ -170,9 +181,9 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
                          onChange={setBaseline} label="이후 변경 표시" />
         )}
         <div className="seg">
-          {(["history", "compare", "clean", "stats"] as Mode[]).map((m) => (
+          {(["history", "compare", "clean", "stats", "crs"] as Mode[]).map((m) => (
             <button key={m} className={mode === m ? "on" : ""} onClick={() => setMode(m)}>
-              {{ history: "History", compare: "Compare", clean: "Clean", stats: "Statistics" }[m]}
+              {{ history: "History", compare: "Compare", clean: "Clean", stats: "Statistics", crs: "CR" }[m]}
             </button>
           ))}
         </div>
@@ -203,8 +214,12 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
         </aside>
 
         <main className="center">
-          {findOpen && <FindBar spec={spec} version={version} onGo={onFind} onClose={() => setFindOpen(false)} />}
-          {mode === "stats" ? (
+          {findOpen && <FindBar spec={spec} version={version} colors={colors} onGo={onFind} onOpenAt={openAt}
+                               onClose={() => setFindOpen(false)} />}
+          {mode === "crs" ? (
+            <CRBrowser spec={spec} crs={crs} toc={toc} colors={colors} onJump={(o) => jump(o)} onOpenSpec={onOpenSpec}
+                       onFetchCrs={fetchCrs} fetching={crJob} />
+          ) : mode === "stats" ? (
             <StatsView spec={spec} colors={colors}
                        onJump={(key) => { const e = toc.find((t) => t.key === key); if (e) jump(e.ord); }}
                        onCompare={(v) => {

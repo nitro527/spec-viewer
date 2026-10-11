@@ -48,6 +48,11 @@ class CRAnalysisRequest(BaseModel):
     force: bool = False  # analyse again (e.g. after a better model is set up)
 
 
+class WISummaryRequest(BaseModel):
+    wi: str
+    force: bool = False
+
+
 class FetchRequest(BaseModel):
     specs: list[str]
     releases: list[int] | None = None
@@ -85,6 +90,10 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     @app.get("/api/specs/{spec}/{version}/clauses")
     def clauses(spec: str, version: str, start: int = 0, count: int = 20):
         return _get(lib.clauses, spec, version, start, min(count, 200))
+
+    @app.get("/api/specs/{spec}/phrase-history")
+    def phrase_history(spec: str, q: str):
+        return _get(lib.phrase_history, spec, q)
 
     @app.get("/api/specs/{spec}/{version}/search")
     def search(spec: str, version: str, q: str):
@@ -409,6 +418,54 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 1, "message": f"CR{req.cr} 분석 준비",
                         "specs": [req.spec], "kind": "intent"}
         threading.Thread(target=_run_cr_analysis, args=(job_id, req, row, model), daemon=True).start()
+        return jobs[job_id]
+
+    @app.get("/api/work-items")
+    def work_items():
+        """Work item codes of the CR covers of every downloaded spec."""
+        return _get(lib.work_items)
+
+    @app.get("/api/work-items/{wi}")
+    def work_item(wi: str):
+        """Every CR of one work item across the downloaded specs, with the stored WI summary."""
+        return _get(lib.work_item, wi)
+
+    @app.post("/api/wi-summary")
+    def make_wi_summary(req: WISummaryRequest):
+        """Summarise a work item from its CRs (covers and stored CR analyses) in a background job."""
+        with lock:
+            wi = lib.work_item(req.wi)
+        if not wi["crs"]:
+            raise HTTPException(404, f"{req.wi} 의 CR 표지가 없습니다")
+        model = _llm()
+        if not model.api_key and "googleapis.com" in model.base_url:
+            raise HTTPException(400, "Gemini API 키를 먼저 저장하세요")
+        if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
+            raise HTTPException(409, "AI 작업이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
+        job_id = uuid.uuid4().hex[:8]
+        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 1,
+                        "message": f"{req.wi} 요약 중 (CR {len(wi['crs'])}개, AI 요청)",
+                        "specs": sorted({c["spec"] for c in wi["crs"]}), "kind": "intent"}
+
+        def run():
+            job = jobs[job_id]
+            try:
+                res = model.summarize_wi(wi)
+                if not res:
+                    job["state"], job["message"] = "error", "AI 응답이 비어 있습니다"
+                    return
+                analysed = sum(1 for c in wi["crs"] if c["analysis"])
+                data = {**res, "wi": req.wi, "crs": len(wi["crs"]), "analysed": analysed,
+                        "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+                with lock:
+                    lib.save_wi_summary(req.wi, data)
+                job["state"], job["message"] = "done", f"{req.wi} 요약 완료 ({model.name})"
+            except intent.LLMError as e:
+                job["state"], job["message"] = "error", str(e)
+            except Exception as e:
+                job["state"], job["message"] = "error", f"WI 요약 실패: {e}"
+
+        threading.Thread(target=run, daemon=True).start()
         return jobs[job_id]
 
     # ---- downloads (background jobs) ----

@@ -9,7 +9,9 @@ export function FeaturePanel({ spec, version, clauseKey }: { spec: string; versi
 
   useEffect(() => {
     setData(null);
-    api.clauseFeatures(spec, version, clauseKey).then(setData, () => setData(null));
+    let live = true;
+    api.clauseFeatures(spec, version, clauseKey).then((x) => live && setData(x), () => live && setData(null));
+    return () => { live = false; };
   }, [spec, version, clauseKey, reload]);
 
   const fetchFeatures = async () => {

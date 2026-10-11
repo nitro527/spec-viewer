@@ -106,6 +106,9 @@ CREATE TABLE IF NOT EXISTS cr_analysis (     -- LLM analysis of one CR as a whol
   spec TEXT NOT NULL, cr TEXT NOT NULL, rev TEXT NOT NULL, tdoc TEXT NOT NULL, data TEXT NOT NULL,
   PRIMARY KEY (spec, cr, rev, tdoc)
 );
+CREATE TABLE IF NOT EXISTS wi_summary (      -- LLM summary of one work item across every downloaded spec
+  wi TEXT PRIMARY KEY, data TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS note (          -- user bookmarks/notes, keyed by clause so they survive versions
   spec TEXT NOT NULL, clause_key TEXT NOT NULL, bookmark INTEGER NOT NULL DEFAULT 0, text TEXT NOT NULL DEFAULT '',
@@ -117,33 +120,61 @@ CREATE VIRTUAL TABLE IF NOT EXISTS blob_fts USING fts5(hash UNINDEXED, text, tok
 
 
 def _mark_moves(clauses: list[dict]) -> None:
-    """Pair deletions and insertions of (nearly) the same paragraph in different places as a move."""
-    from .diff import similarity, strip_tags
+    """Pair deletions and insertions of (nearly) the same paragraph in different places as a move.
+
+    Identical text is paired through a dict first; only what is left is compared word by word, and only
+    with deletions of a length that could still reach the similarity floor (a reorganised conformance
+    spec has thousands of each)."""
+    import bisect
+
+    from .diff import strip_tags, word_similarity
 
     dels = [(c, b) for c in clauses for b in c["blocks"] if b["op"] == "delete"]
     ins = [(c, b) for c in clauses for b in c["blocks"] if b["op"] == "insert"]
     text = {id(b): " ".join(strip_tags(b["old"] or b["new"] or "").split()) for _, b in dels + ins}
     used: set[int] = set()
-    for ic, ib in ins:
-        t = text[id(ib)]
-        if len(t) < 40:
-            continue
-        best, best_s = None, 0.8
-        for dc, db in dels:
-            if id(db) in used or dc is ic:
-                continue
-            sc = 1.0 if text[id(db)] == t else similarity(text[id(db)], t)
-            if sc >= best_s:
-                best, best_s = (dc, db), sc
-                if sc == 1.0:
-                    break
-        if best is None:
-            continue
-        dc, db = best
+
+    def pair(ic, ib, dc, db) -> None:
         used.add(id(db))
         db["op"], db["moved_to"] = "move-out", ic["number"] or ic["title"]
         ib["op"], ib["moved_from"] = "move-in", dc["number"] or dc["title"]
         ib["diff"] = render_diff(db["old"], ib["new"])
+
+    same: dict[str, list] = {}
+    for dc, db in dels:
+        same.setdefault(text[id(db)], []).append((dc, db))
+    fuzzy = []
+    for ic, ib in ins:
+        t = text[id(ib)]
+        if len(t) < 40:
+            continue
+        hit = next(((dc, db) for dc, db in same.get(t, ()) if id(db) not in used and dc is not ic), None)
+        if hit:
+            pair(ic, ib, *hit)
+        else:
+            fuzzy.append((ic, ib))
+    floor = 0.8
+    words = {id(b): text[id(b)].split() for _, b in dels}
+    by_len = sorted((len(words[id(b)]), i) for i, (_, b) in enumerate(dels) if id(b) not in used)
+    lens = [n for n, _ in by_len]
+    for ic, ib in fuzzy:
+        w = text[id(ib)].split()
+        lo, hi = len(w) * floor / (2 - floor), len(w) * (2 - floor) / floor  # 2·min/(a+b) ≥ floor
+        best, best_s = None, floor
+        for _, i in by_len[bisect.bisect_left(lens, lo):bisect.bisect_right(lens, hi)]:
+            dc, db = dels[i]
+            if id(db) in used or dc is ic:
+                continue
+            sc = word_similarity(words[id(db)], w, best_s)
+            if sc >= best_s:
+                best, best_s = (dc, db), sc
+        if best is not None:
+            pair(ic, ib, *best)
+
+
+def wi_codes(detail: dict | None) -> list[str]:
+    """Work item codes of a CR cover ("NR_unlic-Core, NR_IAB-Core" lists several)."""
+    return [w for w in re.split(r"[,;\s]+", (detail or {}).get("wi_code") or "") if w]
 
 
 def _feature_out(f: dict) -> dict:
@@ -160,6 +191,7 @@ class Library:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
+        self._compared: dict[tuple, dict] = {}  # last few compare results; a big conformance spec takes seconds
 
     def close(self) -> None:
         self.db.close()
@@ -168,6 +200,7 @@ class Library:
 
     def add_version(self, spec: str, version: Version, parsed: ParsedSpec, source: str = "",
                     recompute: bool = True) -> int:
+        self._compared.clear()
         db = self.db
         with db:
             db.execute("INSERT INTO spec(number, title) VALUES (?, ?) ON CONFLICT(number) DO UPDATE SET "
@@ -209,6 +242,7 @@ class Library:
                 for r in self.db.execute("SELECT * FROM clause_ver WHERE version_id=? ORDER BY ord", (vid,))]
 
     def recompute_history(self, spec: str) -> None:
+        self._compared.clear()
         vers = self.versions(spec)
         if not vers:
             return
@@ -640,6 +674,46 @@ class Library:
             self.db.execute("INSERT OR REPLACE INTO cr_analysis VALUES (?,?,?,?,?)",
                             (spec, cr, rev, tdoc, json.dumps(data, ensure_ascii=False)))
 
+    # ------------------------------------------------------------ work items
+
+    def _wi_rows(self) -> Iterator[tuple[str, dict]]:
+        for sp in self.specs():
+            for c in self.crs(sp["number"]):
+                if c["detail"] and c["cr"]:
+                    yield sp["number"], c
+
+    def work_items(self) -> list[dict]:
+        """Work item codes on the CR covers of every downloaded spec, with how many CRs in which specs."""
+        out: dict[str, dict] = {}
+        for spec, c in self._wi_rows():
+            for w in wi_codes(c["detail"]):
+                e = out.setdefault(w, {"wi": w, "crs": 0, "specs": {}})
+                e["crs"] += 1
+                e["specs"][spec] = e["specs"].get(spec, 0) + 1
+        done = {r["wi"] for r in self.db.execute("SELECT wi FROM wi_summary")}
+        return sorted(({**e, "summary": e["wi"] in done} for e in out.values()), key=lambda e: -e["crs"])
+
+    def work_item(self, wi: str) -> dict:
+        """Every CR of one work item across the downloaded specs, oldest first, with its stored CR analysis."""
+        crs = []
+        for spec, c in self._wi_rows():
+            if wi not in wi_codes(c["detail"]):
+                continue
+            d, a = c["detail"], self.cr_analysis(spec, c["cr"], c["rev"], c["tdoc"])
+            crs.append({"spec": spec, "cr": c["cr"], "rev": c["rev"], "tdoc": c["tdoc"], "meeting": c["meeting"],
+                        "date": c["date"], "new_version": c["new_version"], "lib_version": c["lib_version"],
+                        "cat": c["cat"], "title": d.get("title") or c["subject"], "release": d.get("release", ""),
+                        "clauses": d.get("clauses", []), "clauses_raw": d.get("clauses_raw", ""),
+                        "reason": d.get("reason", ""), "summary": d.get("summary", ""),
+                        "analysis": {k: a.get(k) for k in ("summary", "background", "decision", "impact")} if a else None})
+        crs.sort(key=lambda c: (c["date"] or "", Version.parse(c["new_version"]), c["spec"], c["cr"]))
+        r = self.db.execute("SELECT data FROM wi_summary WHERE wi=?", (wi,)).fetchone()
+        return {"wi": wi, "crs": crs, "summary": json.loads(r["data"]) if r else None}
+
+    def save_wi_summary(self, wi: str, data: dict) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO wi_summary VALUES (?,?)", (wi, json.dumps(data, ensure_ascii=False)))
+
     def block_lineage(self, spec: str, version: str, key: str, raw_hash: str) -> list[dict]:
         """Every text a paragraph had, oldest first: the version that wrote it, the change ("base", "added",
         "modified", "moved"), the clause it sat in, its HTML and the diff from the step before, with the CRs of
@@ -722,6 +796,46 @@ class Library:
         hits.sort(key=lambda h: (h["ord"], -1 if h["block"] is None else h["block"]))
         return hits
 
+    def phrase_history(self, spec: str, query: str, per_event: int = 60, max_rows: int = 20000) -> dict:
+        """Where an exact phrase occurs in every version: how many paragraphs and clauses, the first version that
+        has it, and per version the clauses where it appeared or disappeared (with a snippet)."""
+        words = query.replace('"', " ").split()
+        vers = self.versions(spec)
+        out = {"query": query, "versions": [], "events": [], "first": None, "latest_clauses": 0, "truncated": False}
+        if not words or not vers:
+            return out
+        rows = self.db.execute(
+            "SELECT b.version_id, b.clause_key, c.number, c.title, c.ord, b.ord AS block, "
+            "snippet(blob_fts, 1, '[[', ']]', '…', 12) AS snip FROM blob_fts f "
+            "JOIN block_ver b ON b.raw_hash = f.hash JOIN version v ON v.id = b.version_id AND v.spec = ? "
+            "JOIN clause_ver c ON c.version_id = b.version_id AND c.key = b.clause_key "
+            "WHERE blob_fts MATCH ? LIMIT ?", (spec, '"' + " ".join(words) + '"', max_rows + 1)).fetchall()
+        if len(rows) > max_rows:  # a very common phrase: counts would be partial, so say so
+            out["truncated"] = True
+            rows = rows[:max_rows]
+        rows.sort(key=lambda r: (r["ord"], r["block"]))
+        by_vid: dict[int, dict[str, dict]] = {}
+        for r in rows:
+            cl = by_vid.setdefault(r["version_id"], {}).setdefault(r["clause_key"], {
+                "key": r["clause_key"], "number": r["number"], "title": r["title"], "ord": r["ord"],
+                "block": r["block"], "snippet": r["snip"], "count": 0})
+            cl["count"] += 1
+        prev: dict[str, dict] = {}
+        for v in vers:
+            cur = by_vid.get(v["id"], {})
+            out["versions"].append({"version": v["version"], "paragraphs": sum(c["count"] for c in cur.values()),
+                                    "clauses": len(cur)})
+            added = [c for k, c in cur.items() if k not in prev]
+            removed = [{k2: c[k2] for k2 in ("key", "number", "title")} for k, c in prev.items() if k not in cur]
+            if added or removed:
+                out["events"].append({"version": v["version"], "added": added[:per_event], "removed": removed[:per_event],
+                                      "more": max(0, len(added) - per_event) + max(0, len(removed) - per_event)})
+            if cur and out["first"] is None:
+                out["first"] = v["version"]
+            prev = cur
+        out["latest_clauses"] = len(prev)
+        return out
+
     # ------------------------------------------------------------ compare
 
     def _raw(self, vid: int) -> Iterator[tuple[dict, list[dict]]]:
@@ -732,7 +846,19 @@ class Library:
             yield dict(c), blocks
 
     def compare(self, spec: str, old: str, new: str, changed_only: bool = True) -> dict:
-        """Clause-by-clause diff between two arbitrary versions."""
+        """Clause-by-clause diff between two arbitrary versions (the CRs are read fresh, the diff is cached)."""
+        # data_version changes when another connection (the CLI, an LLM job) commits: a re-import there can
+        # reuse the version's rowid, so the ids alone do not prove the cached diff is current
+        k = (spec, self.version_id(spec, old), self.version_id(spec, new), changed_only,
+             self.db.execute("PRAGMA data_version").fetchone()[0])
+        if k not in self._compared:
+            if len(self._compared) >= 4:
+                self._compared.pop(next(iter(self._compared)))
+            self._compared[k] = self._compare(spec, old, new, changed_only)
+        return self._compared[k] | {
+            "crs": [r for r in self.crs(spec) if Version.parse(old) < Version.parse(r["new_version"]) <= Version.parse(new)]}
+
+    def _compare(self, spec: str, old: str, new: str, changed_only: bool) -> dict:
         from .diff import align
 
         a = {c["key"]: (c, bl) for c, bl in self._raw(self.version_id(spec, old))}
@@ -774,5 +900,4 @@ class Library:
                                 "diff": f"<del>{x['html']}</del>"} for x in bl]}
                    for k, (c, bl) in a.items() if k not in seen]
         _mark_moves(out + removed)
-        return {"spec": spec, "old": old, "new": new, "clauses": out, "removed": removed,
-                "crs": [r for r in self.crs(spec) if Version.parse(old) < Version.parse(r["new_version"]) <= Version.parse(new)]}
+        return {"spec": spec, "old": old, "new": new, "clauses": out, "removed": removed}

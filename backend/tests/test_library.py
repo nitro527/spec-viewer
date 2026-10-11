@@ -19,7 +19,7 @@ def test_word_level_blame(library):
     c = _clause(library, "16.2.0", "7.4.1.1.1")
     first = c["blocks"][0]
     assert first["introduced"] == "15.0.0" and first["changed"] == "16.0.0"
-    assert '<span class="vc" data-v="16.0.0"> of TS 38.211</span>' in first["html"]
+    assert ' <span class="vc" data-v="16.0.0">of TS 38.211</span>' in first["html"]
 
 
 def test_deletion_recorded_in_version_it_happened(library):

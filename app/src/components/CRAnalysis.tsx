@@ -28,6 +28,17 @@ export function announceAnalysesChanged() {
   try { localStorage.setItem(CHANGED, String(Date.now())); } catch { /* storage may be unavailable */ }
 }
 
+/** Whether AI requests can be made: Gemini needs a key, an OpenAI-compatible (in-house) server may not. */
+export function useLlmReady(): boolean {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    let live = true;
+    api.llm().then((s) => live && setReady(s.has_key || s.provider !== "gemini"), () => live && setReady(false));
+    return () => { live = false; };
+  }, []);
+  return ready;
+}
+
 /** Run an AI job and follow it until it ends; `done` gets the final message. */
 export function useAiJob(done?: () => void) {
   const [jobId, setJobId] = useState<string | null>(null);

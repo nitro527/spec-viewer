@@ -2,7 +2,7 @@
 // (both optional; the viewer works without them).
 import { useEffect, useState } from "react";
 import { api, crKey, tdocUrl, type Annotation } from "../api";
-import { CRAnalysisCard, useCRAnalyses } from "./CRAnalysis";
+import { CRAnalysisCard, useCRAnalyses, useLlmReady } from "./CRAnalysis";
 import { findKey, openMeetingDoc } from "./DocWindow";
 
 const VIA = { tdoc: "이 CR 의 Tdoc 이 나오는 결정", clause: "이 절에 대한 TP/CR", terms: "바뀐 내용과 용어가 겹침" } as const;
@@ -13,16 +13,15 @@ export function AnnotationPanel({ spec, version, clauseKey, rawHash }: {
   const [items, setItems] = useState<Annotation[] | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
-  const [llmReady, setLlmReady] = useState(false);
+  const llmReady = useLlmReady();
   const [jobId, setJobId] = useState<string | null>(null);
   const analyses = useCRAnalyses(spec);
 
   useEffect(() => {
-    api.annotations(spec, version, clauseKey).then(setItems, () => setItems([]));
+    let live = true;  // a reply for the clause selected before must not land on this one
+    api.annotations(spec, version, clauseKey).then((x) => live && setItems(x), () => live && setItems([]));
+    return () => { live = false; };
   }, [spec, version, clauseKey, reload]);
-  useEffect(() => {
-    api.llm().then((s) => setLlmReady(s.has_key || s.provider !== "gemini"), () => setLlmReady(false));
-  }, []);
   useEffect(() => { setMsg(null); setJobId(null); }, [clauseKey]);
 
   useEffect(() => {

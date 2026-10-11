@@ -8,7 +8,7 @@ def test_math_is_atomic():
 
 def test_render_diff_word_level():
     out = render_diff("<p>defined in clause 5.2.1.</p>", "<p>defined in clause 5.2.1 of TS 38.211.</p>")
-    assert out == "<p>defined in clause 5.2.1<ins> of TS 38.211</ins>.</p>"
+    assert out == "<p>defined in clause 5.2.1 <ins>of TS 38.211</ins>.</p>"
 
 
 def test_annotation_never_spans_tags():
@@ -66,3 +66,57 @@ def test_big_table_diff_is_row_wise_and_exact():
             assert [x.text for x in a[i1:i2]] == [x.text for x in b[j1:j2]]
     changed = [x.text for tag, i1, i2, j1, j2 in ops if tag != "equal" for x in b[j1:j2]]
     assert "VALUE" in changed and "inserted" in changed and "w1" not in changed[:5]
+
+
+def test_table_with_many_repeated_rows_diffs_fast():
+    """Conformance-spec tables repeat rows (empty cells, "FFS"): difflib alone went quadratic on them."""
+    import time
+
+    from specview.diff import render_diff
+
+    rows = [f"<tr><td>{i % 7}</td><td>FFS</td></tr>" if i % 3 else f"<tr><td>step {i}</td></tr>" for i in range(30000)]
+    old = "<table>" + "".join(rows) + "</table>"
+    rows[15000] = "<tr><td>changed step</td></tr>"
+    new = "<table>" + "".join(rows) + "</table>"
+    t = time.time()
+    out = render_diff(old, new)
+    assert time.time() - t < 10
+    assert "<ins>changed</ins>" in out and out.count("<ins>") == 1
+
+
+def test_whitespace_only_differences_keep_tokens_aligned():
+    from specview.diff import opcodes, tokenize
+
+    a, b = tokenize("a b  c<i>d</i>"), tokenize("a  b c <i>d</i> e")
+    ops = opcodes(a, b)
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == "equal":
+            norm = lambda toks: [" " if x.kind == "ws" else x.text for x in toks]  # noqa: E731
+            assert norm(a[i1:i2]) == norm(b[j1:j2])
+    assert ops[0][1] == 0 and ops[-1][2] == len(a) and ops[-1][4] == len(b)
+
+
+def test_big_table_rows_that_only_split_words_differently_are_changes():
+    from specview.diff import opcodes, render_diff, tokenize
+
+    rows = [f"<tr><td>row {i} value</td></tr>" for i in range(1500)]
+    old = "<table>" + "".join(rows) + "</table>"
+    rows[700] = "<tr><td>row700 value</td></tr>"
+    new = "<table>" + "".join(rows) + "</table>"
+    out = render_diff(old, new)
+    assert "<ins>row700</ins>" in out
+    a, b = tokenize(old), tokenize(new)
+    for tag, i1, i2, j1, j2 in opcodes(a, b):
+        if tag == "equal":
+            assert [x.text.strip() for x in a[i1:i2]] == [x.text.strip() for x in b[j1:j2]]
+
+
+def test_whitespace_only_blocks_and_deep_anchor_nesting():
+    from specview.diff import _patience, opcodes, render_diff, tokenize
+
+    assert render_diff("abc", "  ") == "<del>abc</del>  "
+    assert opcodes(tokenize(" "), tokenize(" ")) == [("equal", 0, 1, 0, 1)]
+    # anchors found one per level: recursion used to hit the limit
+    a = [f"u{i}" if i % 2 else "x" for i in range(6000)]
+    b = list(reversed(a))
+    assert _patience(a, b) is not None
