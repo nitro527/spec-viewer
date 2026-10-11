@@ -276,7 +276,7 @@ export function InfoPanel({ spec, selection, version, baseline, crsByVersion, co
       {selection ? (
         <>
           {block && (
-            <ParagraphHistory spec={spec} version={version} clauseKey={selection.clause.key} rawHash={block.raw_hash}
+            <ParagraphHistory key={`${selection.clause.key}/${block.raw_hash}`} spec={spec} version={version} clauseKey={selection.clause.key} rawHash={block.raw_hash}
                               colors={colors} />
           )}
           <p className="muted small">{block ? "이 문단이 바뀐 버전에 반영된 CR" : "절 전체의 변경 이력"}</p>
@@ -307,7 +307,7 @@ export function InfoPanel({ spec, selection, version, baseline, crsByVersion, co
             <NoteEditor key={selection.clause.key} initial={note?.text ?? ""} meta={note}
                         onSave={(t) => onSaveNote(selection.clause.key, t)} />
           )}
-          <AnnotationPanel spec={spec} version={version} clauseKey={selection.clause.key} rawHash={block?.raw_hash} />
+          <AnnotationPanel key={`${version}/${selection.clause.key}/${block?.raw_hash ?? ""}`} spec={spec} version={version} clauseKey={selection.clause.key} rawHash={block?.raw_hash} />
           <FeaturePanel spec={spec} version={version} clauseKey={selection.clause.key} />
         </>
       ) : (

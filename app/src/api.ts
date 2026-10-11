@@ -182,7 +182,12 @@ export interface FullAnalysisRequest { specs: string[] | null; skip_uncovered: b
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  if (!r.ok) {  // the backend's readable "detail", not a JSON dump
+    const text = await r.text();
+    let detail: unknown = text;
+    try { detail = JSON.parse(text).detail ?? text; } catch { /* not JSON */ }
+    throw new Error(typeof detail === "string" ? detail : `${r.status} ${JSON.stringify(detail)}`);
+  }
   return r.json();
 }
 

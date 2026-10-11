@@ -9,16 +9,26 @@ export function ReleaseNotes({ spec, oldV, newV }: { spec: string; oldV: string;
   const llmReady = useLlmReady();
   const [info, setInfo] = useState<{ note: ReleaseNote | null; crs: number; analysed: number; changed_clauses: number } | null>(null);
   const [reload, setReload] = useState(0);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const refresh = useCallback(() => setReload((n) => n + 1), []);
   const job = useAiJob(refresh);
   useEffect(() => {
     let live = true;
     setInfo(null);
-    api.releaseNotes(spec, oldV, newV).then((x) => live && setInfo(x), () => live && setInfo(null));
+    setLoadError(null);
+    api.releaseNotes(spec, oldV, newV).then((x) => live && setInfo(x),
+      (e) => live && setLoadError(String(e).replace(/^Error: /, "")));
     return () => { live = false; };
   }, [spec, oldV, newV, reload]);
 
-  if (!info) return <section className="release-notes"><p className="muted small">릴리즈 노트 불러오는 중…</p></section>;
+  if (!info) {
+    return (
+      <section className="release-notes">
+        <p className={loadError ? "small status-error" : "muted small"}>
+          {loadError ? `릴리즈 노트를 불러오지 못했습니다: ${loadError}` : "릴리즈 노트 불러오는 중…"}</p>
+      </section>
+    );
+  }
   const n = info.note;
   const run = (force: boolean) => job.start(() => api.makeReleaseNotes(spec, oldV, newV, force), "릴리즈 노트 AI 요청…");
   return (

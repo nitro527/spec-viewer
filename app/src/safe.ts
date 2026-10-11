@@ -3,7 +3,7 @@
 // what goes into exported files, which open without that policy.
 // a cheap test before parsing; anything that could hide a script (event handlers after "/" as well as space,
 // entity-encoded or split "javascript:", svg/math) goes to the real pass, which keeps only allowed URLs
-const RISKY = /java\s*script|vbscript|&#|<\s*(script|iframe|frame|object|embed|form|base|meta|link|svg|math|style)\b|[\s/"']on[a-z]+\s*=|srcdoc/i;
+const RISKY = /java\s*script|vbscript|&#|&(tab|newline|colon);|<\s*(script|iframe|frame|object|embed|form|base|meta|link|svg|math|style)\b|[\s/"']on[a-z]+\s*=|srcdoc/i;
 const SAFE_URL = /^\s*(https?:|mailto:|#|\/api\/asset\/|data:image\/(png|jpe?g|gif|webp|bmp);)/i;
 const DROP = "script,iframe,frame,object,embed,form,base,meta,link,style,svg,math";
 

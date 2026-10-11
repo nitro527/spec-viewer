@@ -11,16 +11,25 @@ export function WISummaryPanel({ wi, spec, byNumber, llmReady, onJump, onOpenSpe
   onJump: (ord: number) => void; onOpenSpec: (spec: string, clause?: string) => void;
 }) {
   const [data, setData] = useState<WorkItem | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const refresh = useCallback(() => setReload((n) => n + 1), []);
   const job = useAiJob(refresh);
   useEffect(() => {
     let live = true;
-    api.workItem(wi).then((x) => live && setData(x), () => live && setData(null));
+    setError(null);
+    api.workItem(wi).then((x) => live && setData(x), (e) => live && setError(String(e).replace(/^Error: /, "")));
     return () => { live = false; };
   }, [wi, reload]);
 
-  if (!data) return <section className="wi-summary"><p className="muted small">{wi} 불러오는 중…</p></section>;
+  if (!data) {
+    return (
+      <section className="wi-summary">
+        {error ? <p className="small status-error">{wi}: {error} <button className="link" onClick={refresh}>다시 시도</button></p>
+          : <p className="muted small">{wi} 불러오는 중…</p>}
+      </section>
+    );
+  }
   const perSpec = new Map<string, number>();
   data.crs.forEach((c) => perSpec.set(c.spec, (perSpec.get(c.spec) ?? 0) + 1));
   const analysed = data.crs.filter((c) => c.analysis).length;

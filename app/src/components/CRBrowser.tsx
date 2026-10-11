@@ -118,7 +118,7 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
           <option value="not">분석 없음</option>
         </select>
       </div>
-      {wi && <WISummaryPanel wi={wi} spec={spec} byNumber={byNumber} llmReady={llmReady} onJump={onJump}
+      {wi && <WISummaryPanel key={wi} wi={wi} spec={spec} byNumber={byNumber} llmReady={llmReady} onJump={onJump}
                              onOpenSpec={onOpenSpec} />}
       <p className="small muted cr-browser-status">
         {shown.length} / {rows.length}개 CR · 표지 {covers}개
