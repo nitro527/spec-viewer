@@ -254,6 +254,7 @@ def test_damaged_zip_in_cache_is_downloaded_again(tmp_path, monkeypatch):
     assert not list(d.glob("*.part"))
 
 
+@needs_pandoc
 def test_history_missing_after_an_interrupted_import_is_repaired(tmp_path, fixture_docs):
     import threading
 
