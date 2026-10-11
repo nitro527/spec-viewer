@@ -81,7 +81,10 @@ export const HistoryView = forwardRef<HistoryViewHandle, Props>(function History
         setTimeout(() => { if (key === current.current) { loading.current.delete(p); setCache((c) => new Map(c)); } }, 2000);
       });
     }
-    if (items.length) onVisible(items[Math.min(1, items.length - 1)].index);
+    // the clause at the top of the view (the virtual items also include a few rendered above it)
+    const top = virt.scrollOffset ?? 0;
+    const first = items.find((it) => it.end > top + 8);
+    if (first) onVisible(first.index);
   }, [items, spec, version, cache, onVisible]);
 
   useImperativeHandle(ref, () => ({

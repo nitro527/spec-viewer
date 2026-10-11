@@ -520,3 +520,8 @@ input.num { width: 56px; margin: 0 4px; }
 .keepup .watch summary { cursor: pointer; }
 .keepup .watch ul { margin: 6px 0 0; padding-left: 18px; max-height: 260px; overflow-y: auto; }
 .keepup .watch li { margin: 3px 0; }
+.refby { margin: 10px 0; }
+.refby summary { cursor: pointer; }
+.refby ul { margin: 2px 0 8px; padding-left: 16px; }
+.refby li { margin: 3px 0; line-height: 1.4; }
+.refby mark { background: var(--mark, #fff1a8); }

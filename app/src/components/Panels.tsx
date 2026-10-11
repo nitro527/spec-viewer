@@ -1,6 +1,6 @@
 // Side panels: table of contents (left) and change information (right).
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { cmpVersion, crKey, crTouches, tdocUrl, type CR, type CRAnalysis, type Note, type TocEntry } from "../api";
+import { api, cmpVersion, crKey, crTouches, tdocUrl, type CR, type CRAnalysis, type Note, type RefHit, type TocEntry } from "../api";
 import { askAboutParagraph } from "../ask";
 import { openCRDoc } from "./DocWindow";
 import { useCRAnalyses } from "./CRAnalysis";
@@ -106,6 +106,46 @@ const TocRows = memo(function TocRows({ visible, highlight, baseline, changedOnl
   );
 });
 
+/** Paragraphs that cite this clause, here and in the other downloaded specs: what else to re-check when it
+ *  changes. Looked up when opened. */
+function ReferencedBy({ spec, clause, onXref }: {
+  spec: string; clause: string; onXref: (clause: string | undefined, spec: string | undefined) => void;
+}) {
+  const [refs, setRefs] = useState<RefHit[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = () => { if (!refs) api.referencedBy(spec, clause).then(setRefs, (e) => setError(String(e))); };
+  const bySpec = useMemo(() => {
+    const m = new Map<string, RefHit[]>();
+    (refs ?? []).forEach((r) => m.set(r.spec, [...(m.get(r.spec) ?? []), r]));
+    return [...m].sort(([a], [b]) => (a === spec ? -1 : b === spec ? 1 : a.localeCompare(b)));
+  }, [refs, spec]);
+  return (
+    <details className="refby" onToggle={(e) => (e.target as HTMLDetailsElement).open && load()}>
+      <summary className="small">이 절(§{clause})을 인용하는 곳{refs ? ` ${refs.length}` : ""}
+        <span className="muted"> · 받은 스펙의 최신 버전</span></summary>
+      {error && <p className="small status-error">{error}</p>}
+      {refs && !refs.length && <p className="small muted">인용하는 문단을 찾지 못했습니다.</p>}
+      {bySpec.map(([sp, hits]) => (
+        <div key={sp}>
+          <p className="small"><b>TS {sp}</b>{sp === spec ? " (이 스펙)" : ""} · {hits.length}곳 <span className="muted">v{hits[0].version}</span></p>
+          <ul>
+            {hits.map((h, i) => (
+              <li key={i} className="small">
+                <button className="link" onClick={() => onXref(h.number || h.key, sp === spec ? undefined : sp)}>
+                  §{h.number || h.title}</button>{" "}
+                <span className="muted" dangerouslySetInnerHTML={{
+                  __html: escapeHtml(h.snippet).replace(/\[\[/g, "<mark>").replace(/\]\]/g, "</mark>") }} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </details>
+  );
+}
+
+const escapeHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 /** Scrollbar-side overview: one tick per changed clause, like an editor's minimap markers. */
 export function ChangeRuler({ toc, baseline, onJump }: { toc: TocEntry[]; baseline: string; onJump: (ord: number) => void }) {
   if (!toc.length) return null;
@@ -202,10 +242,11 @@ export const CAT: Record<string, string> = {
 };
 
 export function InfoPanel({ spec, selection, version, baseline, crsByVersion, colors, onClose, onFetchCrs, fetching,
-  note, onSaveNote }: {
+  note, onSaveNote, onXref }: {
   spec: string; selection: Selection | null; version: string; baseline: string; crsByVersion: Map<string, CR[]>;
   colors: Map<string, VersionColor>; onClose: () => void; onFetchCrs?: () => void; fetching?: string | null;
   note?: Note; onSaveNote: (key: string, text: string) => void;
+  onXref: (clause: string | undefined, spec: string | undefined) => void;
 }) {
   const hasDetail = [...crsByVersion.values()].some((l) => l.some((c) => c.detail_status));
   const block = selection && selection.block !== null ? selection.clause.blocks[selection.block] : null;
@@ -253,6 +294,9 @@ export function InfoPanel({ spec, selection, version, baseline, crsByVersion, co
           {!hasDetail && onFetchCrs && (
             <p className="small note">CR 표지(변경 이유·Clauses affected)를 아직 받지 않았습니다.{" "}
               <button className="link" onClick={onFetchCrs}>CR 표지 받기</button></p>
+          )}
+          {selection.clause.number && (
+            <ReferencedBy key={selection.clause.key} spec={spec} clause={selection.clause.number} onXref={onXref} />
           )}
           <NoteEditor key={selection.clause.key} initial={note?.text ?? ""} meta={note}
                       onSave={(t) => onSaveNote(selection.clause.key, t)} />

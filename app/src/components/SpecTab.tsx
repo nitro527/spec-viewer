@@ -272,7 +272,7 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
           <InfoPanel spec={spec} selection={selection} version={version} baseline={baseline} crsByVersion={crsByVersion}
                      colors={colors} onClose={() => setSelection(null)} onFetchCrs={fetchCrs} fetching={crJob}
                      note={selection ? notes.get(selection.clause.key) : undefined}
-                     onSaveNote={(key, text) => updateNote(key, { text })} />
+                     onSaveNote={(key, text) => updateNote(key, { text })} onXref={onXref} />
         )}
       </div>
 

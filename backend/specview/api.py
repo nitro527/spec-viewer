@@ -152,7 +152,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         lib.protect_secrets()
     except Exception:  # never keep the app from starting over this
         pass
-    lock = threading.Lock()
+    lock = threading.RLock()  # one SQLite connection shared by the request threads; re-entrant for nested helpers
     jobs: dict[str, dict] = {}
     jobs_lock = threading.Lock()
 
@@ -169,7 +169,9 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     def _repair():  # the app was closed while a download was between storing versions and computing history
         try:
-            for spec in lib.specs_missing_history():
+            with lock:
+                todo = lib.specs_missing_history()
+            for spec in todo:
                 lib.recompute_history(spec, lock=lock)
         except Exception:
             pass
@@ -287,6 +289,11 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     REMOTE_TTL = 12 * 3600  # 3GPP publishes new versions after each plenary, a few times a year
 
+    @app.get("/api/specs/{spec}/referenced-by")
+    def referenced_by(spec: str, clause: str):
+        """Paragraphs that cite a clause, in this spec and the other downloaded ones (latest versions)."""
+        return _get(lib.referenced_by, spec, clause)
+
     @app.get("/api/updates")
     def updates(refresh: bool = False):
         """Versions on 3gpp.org newer than the newest one downloaded, per downloaded spec. The archive listings
@@ -350,7 +357,8 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
 
     @app.get("/api/settings")
     def get_settings():
-        return {"annotation_url": lib.get_setting("annotation_url", os.environ.get("SPECVIEW_ANNOTATION_URL", ""))}
+        with lock:
+            return {"annotation_url": lib.get_setting("annotation_url", os.environ.get("SPECVIEW_ANNOTATION_URL", ""))}
 
     @app.put("/api/settings")
     def put_settings(body: dict):
@@ -367,7 +375,8 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         s = download.new_session()
         try:
             index = s.get(f"{base}/v1/packs", timeout=30).json()
-            have = {v["version"] for v in lib.versions(spec)}
+            with lock:
+                have = {v["version"] for v in lib.versions(spec)}
             n = 0
             for item in index:
                 if item["spec"] == spec and item["version"] in have:
@@ -404,15 +413,19 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     def _provider_settings(p: str) -> dict:
         """Address, model and key are kept per provider so a key never goes to another provider's server."""
         url, model, key_env = intent.PRESETS.get(p, ("", "", None))
-        legacy = lib.get_setting("llm_provider") == p  # settings saved before they were per provider
-        get = lambda k: lib.get_setting(f"llm_{p}_{k}") or (lib.get_setting(f"llm_{k}") if legacy else None)
+        with lock:
+            legacy = lib.get_setting("llm_provider") == p  # settings saved before they were per provider
+            vals = {k: lib.get_setting(f"llm_{p}_{k}") or (lib.get_setting(f"llm_{k}") if legacy else None)
+                    for k in ("base_url", "model", "api_key")}
+        get = vals.get
         saved_key = get("api_key") or ""
         env_key = os.environ.get(key_env, "") if key_env else os.environ.get("LLM_API_KEY", "")
         return {"base_url": get("base_url") or url, "model": get("model") or model, "api_key": saved_key or env_key,
                 "key_source": "saved" if saved_key else "env" if env_key else None}
 
     def _current_provider() -> str:
-        return lib.get_setting("llm_provider") or "gemini"
+        with lock:
+            return lib.get_setting("llm_provider") or "gemini"
 
     def _public(st: dict) -> dict:
         st = dict(st)

@@ -164,6 +164,7 @@ export interface Job {
   full?: boolean; started?: string; finished?: string; stopped?: boolean; chat_id?: string; steps?: string[];
   counts?: { intents: number; cr_analyses: number; wi_summaries: number; failed: number };
 }
+export interface RefHit { spec: string; version: string; number: string; title: string; key: string; ord: number; snippet: string }
 export interface Updates { specs: { spec: string; latest: string; new: string[] }[]; errors: string[]; checked: string | null }
 export interface WatchItem {
   spec: string; clause_key: string; number: string; title: string; status: "changed" | "removed";
@@ -215,6 +216,8 @@ export const api = {
   compare: (spec: string, oldV: string, newV: string, changedOnly = true) =>
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
   stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),
+  referencedBy: (spec: string, clause: string) =>
+    get<RefHit[]>(`/api/specs/${s(spec)}/referenced-by?clause=${s(clause)}`),
   updates: (refresh = false) => get<Updates>(`/api/updates${refresh ? "?refresh=true" : ""}`),
   watch: () => get<WatchItem[]>("/api/watch"),
   watchSeen: (spec: string, clauseKey?: string) =>

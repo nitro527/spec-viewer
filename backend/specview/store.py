@@ -978,6 +978,59 @@ class Library:
         hits.sort(key=lambda h: (h["ord"], -1 if h["block"] is None else h["block"]))
         return hits
 
+    def referenced_by(self, spec: str, clause: str, limit: int = 300) -> list[dict]:
+        """Paragraphs (latest version of every downloaded spec) that cite ``clause`` of ``spec``: "clause 6.3.3.2"
+        inside the spec itself, "clause 6.3.3.2 of TS 38.211" / "TS 38.211 ... 6.3.3.2" in the others. What to
+        re-check when that clause changes."""
+        import re
+
+        num = re.sub(r"^(annex|clause)\s+", "", clause.strip(), flags=re.I)  # "Annex A" -> "A"
+        if not re.fullmatch(r"[A-Z]?\d*(\.\w+)*", num) or not num:
+            raise ValueError(f"not a clause number: {clause}")
+        tokens = re.findall(r"\w+", num)
+        exact = re.compile(rf"(?<![\w.]){re.escape(num)}(?![.\-]?\d)(?!\.[A-Za-z]\b)")
+        cue = re.compile(r"(?:sub)?clauses?|annex|section|table|figure", re.I)
+        out = []
+        for row in self.specs():
+            other = row["number"]
+            vers = self.versions(other)
+            if not vers:
+                continue
+            vid, latest = vers[-1]["id"], vers[-1]["version"]
+            q = '"' + " ".join(tokens) + '"'
+            if other != spec:
+                q += ' AND "' + " ".join(re.findall(r"\w+", spec)) + '"'
+            rows = self.db.execute(
+                "SELECT c.number, c.title, c.key, c.ord, b.ord AS block, x.text FROM blob_fts f "
+                "JOIN blob x ON x.hash = f.hash JOIN block_ver b ON b.raw_hash = f.hash AND b.version_id = ? "
+                "JOIN clause_ver c ON c.version_id = b.version_id AND c.key = b.clause_key "
+                "WHERE blob_fts MATCH ? ORDER BY c.ord, b.ord", (vid, q)).fetchall()
+            for r in rows:
+                own = re.sub(r"^annex\s+", "", r["number"] or "", flags=re.I)
+                if other == spec and (own == num or own.startswith(num + ".")):
+                    continue  # the clause itself and its sub-clauses
+                if "change history" in (r["title"] or "").lower() or r["title"].lower() == "references":
+                    continue
+                t = r["text"]
+                hit = None
+                for m in exact.finditer(t):
+                    before = t[max(0, m.start() - 60):m.start()]
+                    if other != spec and spec not in t[max(0, m.start() - 160):m.end() + 160]:
+                        continue  # another spec's clause with the same number
+                    if cue.search(before) or other != spec:
+                        hit = m
+                        break
+                if not hit:
+                    continue
+                a, b = max(0, hit.start() - 90), min(len(t), hit.end() + 90)
+                out.append({"spec": other, "version": latest, "number": r["number"], "title": r["title"],
+                            "key": r["key"], "ord": r["ord"],
+                            "snippet": ("…" if a else "") + t[a:hit.start()] + "[[" + t[hit.start():hit.end()] + "]]"
+                                       + t[hit.end():b] + ("…" if b < len(t) else "")})
+                if len(out) >= limit:
+                    return out
+        return out
+
     def phrase_history(self, spec: str, query: str, per_event: int = 60, max_rows: int = 20000) -> dict:
         """Where an exact phrase occurs in every version: how many paragraphs and clauses, the first version that
         has it, and per version the clauses where it appeared or disappeared (with a snippet)."""

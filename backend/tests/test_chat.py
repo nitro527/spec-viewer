@@ -130,3 +130,19 @@ def test_stop_ends_the_answer_between_requests(library):
     with pytest.raises(chat.Stopped):
         chat.answer(m, library, "스펙 목록?", should_stop=lambda: len(m.seen) >= 2, step=asked.append)
     assert len(m.seen) == 2  # no request after the stop
+
+
+@needs_pandoc
+def test_referenced_by_finds_citing_paragraphs(library):
+    toc = library.toc("99.211", library.versions("99.211")[-1]["version"])
+    cited = None
+    for t in toc:
+        if t["number"] and library.referenced_by("99.211", t["number"]):
+            cited = t["number"]
+            break
+    assert cited == "1"  # the fixture cites "clause 1" somewhere
+    hits = library.referenced_by("99.211", cited)
+    assert all("[[" + cited + "]]" in h["snippet"] for h in hits)
+    assert all(not (h["number"] == cited or h["number"].startswith(cited + ".")) for h in hits)
+    out = json.loads(chat.SpecTools(library).call("referenced_by", {"spec": "99.211", "clause": cited}))
+    assert out["count"] == len(hits) and out["citing"][0]["source"].startswith("99.211 §")

@@ -68,6 +68,12 @@ TOOLS = [
             "new": {"type": "string", "description": "newer version (default latest)"}},
             "required": ["spec", "old"]}}},
     {"type": "function", "function": {
+        "name": "referenced_by", "description": "Paragraphs that cite a clause, in the same spec and in the other "
+        "downloaded specs (latest versions): what else is affected when that clause changes.",
+        "parameters": {"type": "object", "properties": {
+            "spec": {"type": "string"}, "clause": {"type": "string", "description": "clause number, e.g. 4.5"}},
+            "required": ["spec", "clause"]}}},
+    {"type": "function", "function": {
         "name": "search_crs", "description": "Find change requests by words in their title, work item code, "
         "clauses or AI analysis.",
         "parameters": {"type": "object", "properties": {
@@ -300,6 +306,13 @@ class SpecTools:
                          "category": c["cat"], "title": c["title"], "work_item": c["wi"], "clauses": c["clauses"],
                          "analysis": (c["analysis"] or {}).get("summary")} for c in data["crs"][:60]]}
 
+    def t_referenced_by(self, spec: str, clause: str) -> dict:
+        spec = _norm_spec(spec)
+        hits = self.lib.referenced_by(spec, clause.lstrip("§ "))
+        return {"clause": clause, "count": len(hits), "citing": [
+            {"source": self._clause_tag(h["spec"], h, h["version"]), "text": h["snippet"].replace("[[", "").replace("]]", "")}
+            for h in hits[:40]]}
+
     def t_search_crs(self, query: str, spec: str | None = None) -> dict:
         words = [w.lower() for w in re.findall(r"[\w\-.]+", query) if len(w) > 1]
         specs = [_norm_spec(spec)] if spec else [s["number"] for s in self.lib.specs()]
@@ -360,6 +373,7 @@ def _step_label(name: str, args: dict) -> str:
         "clause_history": lambda: f"변경 이력: {a.get('spec', '')} §{a.get('clause', '')}",
         "compare_clause": lambda: f"비교: {a.get('spec', '')} §{a.get('clause', '')} v{a.get('old', '')}→{a.get('new', '최신')}",
         "search_crs": lambda: f"CR 찾기: {a.get('query', '')}",
+        "referenced_by": lambda: f"인용하는 곳: {a.get('spec', '')} §{a.get('clause', '')}",
         "crs_between": lambda: f"버전 사이 CR: {a.get('spec', '')} v{a.get('old', '')}→{a.get('new', '최신')}",
         "get_cr": lambda: f"CR: {a.get('spec', '')} CR{a.get('cr', '')}",
         "work_item": lambda: f"WI: {a.get('wi', '')}",
