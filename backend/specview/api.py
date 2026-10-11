@@ -144,6 +144,27 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     lib = Library(home / "library.sqlite")
     lock = threading.Lock()
     jobs: dict[str, dict] = {}
+    jobs_lock = threading.Lock()
+
+    def _put(job: dict) -> None:
+        """Register a job; AI jobs one at a time (the check above is repeated here so two clicks can't both pass)."""
+        with jobs_lock:
+            if job.get("kind") == "intent" and any(j.get("kind") == "intent" and j["state"] == "running"
+                                                   for j in jobs.values()):
+                raise HTTPException(409, "AI 작업이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
+            finished = [k for k, j in jobs.items() if j["state"] != "running"]
+            for k in finished[:-50]:  # keep the last few finished jobs for the UI, not every one since start
+                del jobs[k]
+            jobs[job["id"]] = job
+
+    def _repair():  # the app was closed while a download was between storing versions and computing history
+        try:
+            for spec in lib.specs_missing_history():
+                lib.recompute_history(spec, lock=lock)
+        except Exception:
+            pass
+
+    threading.Thread(target=_repair, daemon=True).start()
     app = FastAPI(title="specview")
     from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -156,6 +177,8 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 return fn(*a)
         except KeyError as e:
             raise HTTPException(404, str(e))
+        except ValueError as e:  # a malformed version or clause number in the URL
+            raise HTTPException(400, str(e))
 
     @app.get("/api/specs")
     def specs():
@@ -223,8 +246,8 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     @app.post("/api/fetch-features")
     def fetch_features():
         job_id = uuid.uuid4().hex[:8]
-        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 1, "message": "starting",
-                        "specs": ["38.822"]}
+        _put({"id": job_id, "state": "running", "done": 0, "total": 1, "message": "starting",
+                        "specs": ["38.822"]})
         threading.Thread(target=_run_features, args=(job_id,), daemon=True).start()
         return jobs[job_id]
 
@@ -311,6 +334,9 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
     def _llm(cfg: LLMConfig | None = None) -> intent.OpenAICompatIntentModel:
         st = _provider_settings((cfg and cfg.provider) or _current_provider())
         if cfg:  # unsaved values from the form, so "test" works before "save"
+            new_url = (cfg.base_url or "").strip().rstrip("/")
+            if new_url and new_url != st["base_url"].rstrip("/") and not (cfg.api_key or "").strip():
+                st["api_key"] = ""  # the saved key belongs to the saved server; never send it to a typed-in one
             st.update({k: v.strip() for k, v in (("base_url", cfg.base_url), ("model", cfg.model),
                                                  ("api_key", cfg.api_key)) if v and v.strip()})
         if not st["base_url"]:
@@ -476,8 +502,8 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
             raise HTTPException(409, "AI 요약이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
         job_id = uuid.uuid4().hex[:8]
-        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 0, "message": "AI 요약 준비",
-                        "specs": [req.spec], "kind": "intent"}
+        _put({"id": job_id, "state": "running", "done": 0, "total": 0, "message": "AI 요약 준비",
+                        "specs": [req.spec], "kind": "intent"})
         threading.Thread(target=_run_intent, args=(job_id, req, model), daemon=True).start()
         return jobs[job_id]
 
@@ -514,8 +540,8 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
             raise HTTPException(409, "AI 작업이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
         job_id = uuid.uuid4().hex[:8]
-        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 1, "message": f"CR{req.cr} 분석 준비",
-                        "specs": [req.spec], "kind": "intent"}
+        _put({"id": job_id, "state": "running", "done": 0, "total": 1, "message": f"CR{req.cr} 분석 준비",
+                        "specs": [req.spec], "kind": "intent"})
         threading.Thread(target=_run_cr_analysis, args=(job_id, req, row, model), daemon=True).start()
         return jobs[job_id]
 
@@ -552,9 +578,9 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
             raise HTTPException(409, "AI 작업이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
         job_id = uuid.uuid4().hex[:8]
-        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 1,
+        _put({"id": job_id, "state": "running", "done": 0, "total": 1,
                         "message": f"{req.wi} 요약 중 (CR {len(wi['crs'])}개, AI 요청)",
-                        "specs": sorted({c["spec"] for c in wi["crs"]}), "kind": "intent"}
+                        "specs": sorted({c["spec"] for c in wi["crs"]}), "kind": "intent"})
 
         def run():
             job = jobs[job_id]
@@ -684,6 +710,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         drafts_only = []  # specs with no approved (3.x and later) version yet
         failed = []  # versions (or whole specs) 3gpp.org did not deliver even after retries
         have_count = 0
+        pending: set[str] = set()  # specs with new versions whose history is not computed yet
         try:
             for spec in req.specs:
                 if req.crs_only:
@@ -717,6 +744,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                     else:
                         with lock:
                             lib.add_version(spec, rv.version, parsed, source=rv.url, recompute=False)
+                        pending.add(spec)
                     job["done"] += 1
                 with lock:
                     if not lib.versions(spec):
@@ -726,8 +754,8 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                     with lock:
                         lib.set_spec_title(spec, title)
                 job["message"] = f"{spec}: computing history"
-                with lock:
-                    lib.recompute_history(spec)
+                lib.recompute_history(spec, lock=lock)
+                pending.discard(spec)
                 if req.with_crs:
                     def prog(i, n, c):
                         job["message"] = f"{spec}: CR 표지 {i}/{n} ({c['tdoc']})"
@@ -750,18 +778,30 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 job["message"] = "finished — " + " · ".join(notes)
         except Exception as e:
             job["state"], job["message"] = "error", str(e)
+        finally:  # versions stored before an error still get their history
+            for spec in pending:
+                try:
+                    lib.recompute_history(spec, lock=lock)
+                except Exception:
+                    pass
 
     @app.post("/api/fetch")
     def fetch(req: FetchRequest):
         job_id = uuid.uuid4().hex[:8]
-        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 0, "message": "starting",
-                        "specs": req.specs}
+        _put({"id": job_id, "state": "running", "done": 0, "total": 0, "message": "starting",
+                        "specs": req.specs})
         threading.Thread(target=_run_fetch, args=(job_id, req), daemon=True).start()
         return jobs[job_id]
 
     @app.get("/api/jobs")
     def list_jobs():
         return [{k: v for k, v in j.items() if k != "cancel"} for j in jobs.values()]
+
+    @app.get("/api/jobs/{job_id}")
+    def get_job(job_id: str):
+        if job_id not in jobs:
+            raise HTTPException(404, "no such job")
+        return {k: v for k, v in jobs[job_id].items() if k != "cancel"}
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel_job(job_id: str):
@@ -801,8 +841,8 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         if any(j.get("kind") == "intent" and j["state"] == "running" for j in jobs.values()):
             raise HTTPException(409, "AI 작업이 이미 진행 중입니다. 끝난 뒤에 다시 시도하세요")
         job_id = uuid.uuid4().hex[:8]
-        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 1, "kind": "intent", "specs": [req.spec],
-                        "message": f"{req.spec} v{req.old} → v{req.new} 릴리즈 노트 (CR {len(data['crs'])}개, AI 요청)"}
+        _put({"id": job_id, "state": "running", "done": 0, "total": 1, "kind": "intent", "specs": [req.spec],
+                        "message": f"{req.spec} v{req.old} → v{req.new} 릴리즈 노트 (CR {len(data['crs'])}개, AI 요청)"})
 
         def run():
             job = jobs[job_id]
@@ -851,7 +891,10 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
         with lock:
             if req.chat_id:
-                conv = lib.chat(req.chat_id)
+                try:
+                    conv = lib.chat(req.chat_id)
+                except KeyError:
+                    raise HTTPException(404, "대화를 찾을 수 없습니다 (지워졌을 수 있음)")
             else:
                 conv = {"id": uuid.uuid4().hex[:10], "title": req.question.strip()[:60], "messages": []}
             if any(j.get("chat_id") == conv["id"] and j["state"] == "running" for j in jobs.values()):
@@ -860,8 +903,8 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                                      "time": now})
             lib.save_chat(conv["id"], conv["title"], conv["messages"], now)
         job_id = uuid.uuid4().hex[:8]
-        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 0, "message": "질문 이해하는 중",
-                        "specs": [], "kind": "chat", "chat_id": conv["id"], "steps": []}
+        _put({"id": job_id, "state": "running", "done": 0, "total": 0, "message": "질문 이해하는 중",
+                        "specs": [], "kind": "chat", "chat_id": conv["id"], "steps": []})
         threading.Thread(target=_run_chat, args=(job_id, conv, req, model), daemon=True).start()
         return {"job": jobs[job_id], "chat_id": conv["id"]}
 
@@ -916,10 +959,10 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         with lock:
             specs = req.specs or [s["number"] for s in lib.specs()]
         job_id = uuid.uuid4().hex[:8]
-        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 0, "message": "전체 AI 분석 준비",
+        _put({"id": job_id, "state": "running", "done": 0, "total": 0, "message": "전체 AI 분석 준비",
                         "specs": specs, "kind": "intent", "full": True,
                         "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-                        "counts": {"intents": 0, "cr_analyses": 0, "wi_summaries": 0, "failed": 0}}
+                        "counts": {"intents": 0, "cr_analyses": 0, "wi_summaries": 0, "failed": 0}})
         threading.Thread(target=_run_full, args=(job_id, req, specs, model), daemon=True).start()
         return jobs[job_id]
 

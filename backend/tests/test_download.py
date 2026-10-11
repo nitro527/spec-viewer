@@ -237,3 +237,35 @@ def test_static_files_stay_inside_the_ui_folder(tmp_path):
         assert "SECRET" not in c.get(p).text
     assert c.get("/index.html").text == "INDEX"
     assert c.get("/api/specs", headers={"Host": "evil.example"}).status_code == 400
+
+
+def test_damaged_zip_in_cache_is_downloaded_again(tmp_path, monkeypatch):
+    rv = download.RemoteVersion("38.211", download.Version.parse("17.0.0"), "https://x/38211-h00.zip")
+    d = tmp_path / "38.211" / "17.0.0"
+    d.mkdir(parents=True)
+    (d / "38211-h00.zip").write_bytes(b"PK\x03\x04 cut off")  # an earlier download that was cut short
+
+    def good(s, url, dest, progress):
+        with zipfile.ZipFile(dest, "w") as z:
+            z.writestr("38211-h00.docx", b"x")
+
+    monkeypatch.setattr(download, "_download", good)
+    assert [p.name for p in download.fetch(rv, tmp_path)] == ["38211-h00.docx"]
+    assert not list(d.glob("*.part"))
+
+
+def test_history_missing_after_an_interrupted_import_is_repaired(tmp_path, fixture_docs):
+    import threading
+
+    from specview.parse_docx import parse_docx
+    from specview.store import Library
+    from specview.versions import parse_archive_name
+
+    lib = Library(tmp_path / "library.sqlite")
+    for p in fixture_docs:
+        spec, version = parse_archive_name(p.name)
+        lib.add_version(spec, version, parse_docx(p), recompute=False)  # the app closed before history
+    assert lib.specs_missing_history() == ["99.211"]
+    lib.recompute_history("99.211", lock=threading.Lock())  # computed on its own connection, written under the lock
+    assert lib.specs_missing_history() == []
+    assert any(c["status"] for c in lib.toc("99.211", lib.versions("99.211")[-1]["version"]))

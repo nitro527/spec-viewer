@@ -193,7 +193,7 @@ class Library:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path, check_same_thread=False)
+        self.db = sqlite3.connect(self.path, check_same_thread=False, timeout=30)  # waits for a writer
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
@@ -247,12 +247,46 @@ class Library:
         return [history.InClause(r["key"], r["number"], r["title"], r["level"], blocks.get(r["key"], []))
                 for r in self.db.execute("SELECT * FROM clause_ver WHERE version_id=? ORDER BY ord", (vid,))]
 
-    def recompute_history(self, spec: str) -> None:
-        self._compared.clear()
-        vers = self.versions(spec)
-        if not vers:
+    def recompute_history(self, spec: str, lock=None) -> None:
+        """Version history of every paragraph of a spec. With ``lock`` (the API's), the slow part reads and
+        computes on its own connection without holding the lock; only the writes take it."""
+        if lock is None:
+            self._compared.clear()
+            vers = self.versions(spec)
+            if vers:
+                self._write_history(vers, self._compute_history(vers))
             return
-        results = history.compute([v["version"] for v in vers], (self._load_clauses(v["id"]) for v in vers))
+        reader = Library(self.path)
+        try:
+            for _ in range(3):
+                reader.db.execute("BEGIN")  # one snapshot for the version list and every clause
+                try:
+                    vers = reader.versions(spec)
+                    results = reader._compute_history(vers) if vers else []
+                finally:
+                    reader.db.commit()
+                with lock:
+                    if [v["id"] for v in self.versions(spec)] != [v["id"] for v in vers]:
+                        continue  # a version came or went meanwhile: compute again
+                    self._compared.clear()
+                    if vers:
+                        self._write_history(vers, results)
+                    return
+            with lock:  # still changing after three tries: do it under the lock
+                self.recompute_history(spec)
+        finally:
+            reader.close()
+
+    def specs_missing_history(self) -> list[str]:
+        """Specs with versions whose history was never computed (an import cut off before that step)."""
+        return [r[0] for r in self.db.execute(
+            "SELECT DISTINCT v.spec FROM version v WHERE EXISTS "
+            "(SELECT 1 FROM block_ver b WHERE b.version_id = v.id AND b.annot_hash IS NULL)")]
+
+    def _compute_history(self, vers: list[dict]) -> list:
+        return list(history.compute([v["version"] for v in vers], (self._load_clauses(v["id"]) for v in vers)))
+
+    def _write_history(self, vers: list[dict], results: list) -> None:
         db = self.db
         with db:
             for v, res in zip(vers, results):

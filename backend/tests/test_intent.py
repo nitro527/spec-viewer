@@ -109,6 +109,9 @@ def test_llm_settings_and_intent_job(library, monkeypatch, tmp_path):
     s = c.put("/api/llm", json={"provider": "openai", "base_url": "http://llm:8000/v1", "model": "glm-5.3"}).json()
     assert s["provider"] == "openai" and not s["has_key"] and s["providers"]["gemini"]["key_hint"] == "…1234"
     assert c.post("/api/llm/test", json={"provider": "gemini"}).json()["key"] == "AIza-secret-1234"
+    # nor to an address typed into the form but not saved
+    r = c.post("/api/llm/test", json={"provider": "gemini", "base_url": "http://evil.example/v1"}).json()
+    assert r == {"key": None, "url": "http://evil.example/v1"}
     assert c.put("/api/llm", json={"provider": "gemini", "clear_key": True}).json()["has_key"] is False
 
 

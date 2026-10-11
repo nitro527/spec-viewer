@@ -148,8 +148,10 @@ def _extract_docx(zip_path: Path, out_dir: Path) -> list[Path]:
         targets = []
         for name in names:
             target = out_dir / Path(name).name
-            with z.open(name) as src, open(target, "wb") as dst:
+            part = target.with_name(target.name + ".part")  # a half-written file must not count as cached
+            with z.open(name) as src, open(part, "wb") as dst:
                 shutil.copyfileobj(src, dst)
+            os.replace(part, target)
             targets.append(target)
     return [_convert_doc(t) if t.suffix.lower() == ".doc" else t for t in targets]
 
@@ -158,8 +160,11 @@ def _cached_parts(zip_path: Path, out_dir: Path) -> list[Path] | None:
     """The extracted documents of an earlier run, if all of them are there (older runs kept only the largest part)."""
     if not zip_path.exists():
         return None
-    with zipfile.ZipFile(zip_path) as z:
-        want = [out_dir / Path(n).with_suffix(".docx").name for n in _word_parts(z)]
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            want = [out_dir / Path(n).with_suffix(".docx").name for n in _word_parts(z)]
+    except zipfile.BadZipFile:
+        return None
     return want if want and all(p.exists() for p in want) else None
 
 
@@ -224,6 +229,8 @@ def fetch(remote: RemoteVersion, cache_dir: Path, session: requests.Session | No
     zip_path = d / remote.filename
     if cached := _cached_parts(zip_path, d):
         return cached
+    if zip_path.exists() and not zipfile.is_zipfile(zip_path):
+        zip_path.unlink()  # damaged cache (disk full, an antivirus cutting it): download again
     if not zip_path.exists():
         for attempt in range(1, 4):  # the session retries the request; this also covers a body cut off midway
             try:

@@ -8,6 +8,7 @@ the units the history engine tracks across versions.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -118,14 +119,21 @@ def _level_for(tag: str, number: str) -> int:
 def _run_pandoc(docx: Path, media_dir: Path, track_changes: bool = False) -> str:
     if not shutil.which("pandoc"):
         raise RuntimeError("pandoc is required to convert .docx files (https://pandoc.org)")
-    proc = subprocess.run(
-        [
-            "pandoc", "-f", "docx+styles", "-t", "html", "--katex",
-            f"--extract-media={media_dir}", "--wrap=none", *(["--track-changes=all"] if track_changes else []),
-            str(docx),
-        ],
-        capture_output=True, check=True,
-    )
+    timeout = float(os.environ.get("SPECVIEW_PANDOC_TIMEOUT") or 1800)  # the biggest specs take a few minutes
+    try:
+        proc = subprocess.run(
+            [
+                "pandoc", "-f", "docx+styles", "-t", "html", "--katex",
+                f"--extract-media={media_dir}", "--wrap=none", *(["--track-changes=all"] if track_changes else []),
+                str(docx),
+            ],
+            capture_output=True, check=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"pandoc took more than {timeout:.0f} s on {Path(docx).name} (SPECVIEW_PANDOC_TIMEOUT)")
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError(f"pandoc failed on {Path(docx).name}: {err[-1] if err else e.returncode}")
     return proc.stdout.decode("utf-8")
 
 
