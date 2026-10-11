@@ -1,12 +1,16 @@
 // Shell: a fixed main screen (downloads, settings) plus viewer tabs. A new viewer tab shows every downloaded
 // spec at a glance; cross-references open more viewer tabs.
 import { useCallback, useEffect, useState } from "react";
-import { api } from "./api";
+import { api, type ChatContext } from "./api";
+import { ASK_EVENT } from "./ask";
+import { ChatView } from "./components/ChatView";
 import { Home } from "./components/Home";
 import { SpecPicker } from "./components/SpecPicker";
 import { SpecTab, type TabState } from "./components/SpecTab";
 
 const HOME = "home";
+const CHAT = "chat";
+
 let nextId = 1;
 const newTab = (p: Partial<TabState> = {}): TabState => ({ id: String(nextId++), spec: null, ...p });
 
@@ -16,6 +20,8 @@ export function App() {
   const [homePrefill, setHomePrefill] = useState<string | undefined>();
   const [findSignal, setFindSignal] = useState(0);
   const [paletteSignal, setPaletteSignal] = useState(0);
+  const [askContext, setAskContext] = useState<ChatContext | null>(null);
+  const [chatOpened, setChatOpened] = useState(false);  // mount the chat on first use only
 
   const update = useCallback((id: string, patch: Partial<TabState>) =>
     setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t))), []);
@@ -26,7 +32,7 @@ export function App() {
   }, []);
 
   const close = useCallback((id: string) => {
-    if (id === HOME) return;
+    if (id === HOME || id === CHAT) return;
     setTabs((ts) => {
       const i = ts.findIndex((t) => t.id === id);
       const rest = ts.filter((t) => t.id !== id);
@@ -40,27 +46,37 @@ export function App() {
     setActiveId(HOME);
   }, []);
 
-  const openSpec = useCallback(async (spec: string, clause?: string) => {
+  const openSpec = useCallback(async (spec: string, clause?: string, version?: string) => {
     const existing = tabs.find((t) => t.spec === spec);
     if (existing) {
-      update(existing.id, { jumpTo: clause });
+      update(existing.id, { jumpTo: clause, jumpVersion: version });
       setActiveId(existing.id);
       return;
     }
     const known = (await api.specs()).some((s) => s.number === spec);
-    if (known) open(newTab({ spec, jumpTo: clause, label: spec }));
+    if (known) open(newTab({ spec, jumpTo: clause, version, label: spec }));
     else goHome(spec); // not downloaded yet: suggest it on the main screen
   }, [tabs, open, update, goHome]);
+
+  useEffect(() => {
+    const h = (e: Event) => {
+      setAskContext((e as CustomEvent<ChatContext>).detail);
+      setChatOpened(true);
+      setActiveId(CHAT);
+    };
+    window.addEventListener(ASK_EVENT, h);
+    return () => window.removeEventListener(ASK_EVENT, h);
+  }, []);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
       const k = e.key.toLowerCase();
-      if (k === "f" && activeId !== HOME) { e.preventDefault(); setFindSignal((n) => n + 1); }
-      if (k === "p" && activeId !== HOME) { e.preventDefault(); setPaletteSignal((n) => n + 1); }
+      if (k === "f" && activeId !== HOME && activeId !== CHAT) { e.preventDefault(); setFindSignal((n) => n + 1); }
+      if (k === "p" && activeId !== HOME && activeId !== CHAT) { e.preventDefault(); setPaletteSignal((n) => n + 1); }
       if (k === "t") { e.preventDefault(); open(newTab()); }
-      if (k === "w" && activeId !== HOME) { e.preventDefault(); close(activeId); }
+      if (k === "w" && activeId !== HOME && activeId !== CHAT) { e.preventDefault(); close(activeId); }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
@@ -71,6 +87,9 @@ export function App() {
       <div className="tabbar">
         <div className={`tab tab-home ${activeId === HOME ? "on" : ""}`} onClick={() => setActiveId(HOME)}
              title="다운로드 · 설정">메인</div>
+        <div className={`tab tab-home tab-chat ${activeId === CHAT ? "on" : ""}`}
+             onClick={() => { setChatOpened(true); setActiveId(CHAT); }}
+             title="받은 스펙·CR·AI 분석을 근거로 질문에 답합니다">AI 채팅</div>
         {tabs.map((t) => (
           <div key={t.id} className={`tab ${t.id === activeId ? "on" : ""}`} onClick={() => setActiveId(t.id)}
                onAuxClick={(e) => e.button === 1 && close(t.id)}>
@@ -83,6 +102,12 @@ export function App() {
       <div className="tabpane" style={{ display: activeId === HOME ? "flex" : "none" }}>
         <Home prefill={homePrefill} active={activeId === HOME} onOpen={(spec) => openSpec(spec)} />
       </div>
+      {chatOpened && (
+        <div className="tabpane" style={{ display: activeId === CHAT ? "flex" : "none" }}>
+          <ChatView active={activeId === CHAT} pending={askContext} onPendingTaken={() => setAskContext(null)}
+                    onOpenSpec={openSpec} />
+        </div>
+      )}
       {tabs.map((t) => (
         <div key={t.id} className="tabpane" style={{ display: t.id === activeId ? "flex" : "none" }}>
           {t.spec ? (

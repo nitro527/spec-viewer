@@ -109,6 +109,9 @@ CREATE TABLE IF NOT EXISTS cr_analysis (     -- LLM analysis of one CR as a whol
 CREATE TABLE IF NOT EXISTS wi_summary (      -- LLM summary of one work item across every downloaded spec
   wi TEXT PRIMARY KEY, data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS chat (            -- AI chat conversations (chat.py)
+  id TEXT PRIMARY KEY, title TEXT NOT NULL, updated TEXT NOT NULL, data TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS setting (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS note (          -- user bookmarks/notes, keyed by clause so they survive versions
   spec TEXT NOT NULL, clause_key TEXT NOT NULL, bookmark INTEGER NOT NULL DEFAULT 0, text TEXT NOT NULL DEFAULT '',
@@ -713,6 +716,26 @@ class Library:
     def save_wi_summary(self, wi: str, data: dict) -> None:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO wi_summary VALUES (?,?)", (wi, json.dumps(data, ensure_ascii=False)))
+
+    # ------------------------------------------------------------ chat
+
+    def chats(self) -> list[dict]:
+        return [dict(r) for r in self.db.execute("SELECT id, title, updated FROM chat ORDER BY updated DESC")]
+
+    def chat(self, chat_id: str) -> dict:
+        r = self.db.execute("SELECT * FROM chat WHERE id=?", (chat_id,)).fetchone()
+        if r is None:
+            raise KeyError(f"no chat {chat_id}")
+        return {"id": r["id"], "title": r["title"], "updated": r["updated"], "messages": json.loads(r["data"])}
+
+    def save_chat(self, chat_id: str, title: str, messages: list[dict], updated: str) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO chat VALUES (?,?,?,?)",
+                            (chat_id, title, updated, json.dumps(messages, ensure_ascii=False)))
+
+    def delete_chat(self, chat_id: str) -> None:
+        with self.db:
+            self.db.execute("DELETE FROM chat WHERE id=?", (chat_id,))
 
     def block_lineage(self, spec: str, version: str, key: str, raw_hash: str) -> list[dict]:
         """Every text a paragraph had, oldest first: the version that wrote it, the change ("base", "added",

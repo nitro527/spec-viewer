@@ -60,6 +60,12 @@ class FullAnalysisRequest(BaseModel):
     wi_summaries: bool = True  # then every work item
 
 
+class ChatRequest(BaseModel):
+    question: str
+    chat_id: str | None = None  # None: a new conversation
+    context: dict | None = None  # {"spec", "version", "clause", "text"} when asked from a paragraph
+
+
 class FetchRequest(BaseModel):
     specs: list[str]
     releases: list[int] | None = None
@@ -688,6 +694,77 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
         if jobs[job_id]["state"] == "running":
             jobs[job_id]["message"] += " · 중지 요청됨 (지금 요청이 끝나면 멈춤)"
         return {k: v for k, v in jobs[job_id].items() if k != "cancel"}
+
+    # ---- AI chat over the downloaded material ----
+
+    @app.get("/api/chats")
+    def chats():
+        return _get(lib.chats)
+
+    @app.get("/api/chats/{chat_id}")
+    def chat(chat_id: str):
+        return _get(lib.chat, chat_id)
+
+    @app.delete("/api/chats/{chat_id}")
+    def delete_chat(chat_id: str):
+        with lock:
+            lib.delete_chat(chat_id)
+        return {"ok": True}
+
+    @app.post("/api/chat")
+    def ask(req: ChatRequest):
+        """Answer a question in a background job (the model looks things up first, which takes a while)."""
+        if not req.question.strip():
+            raise HTTPException(400, "질문을 입력하세요")
+        model = _llm()
+        if not model.api_key and "googleapis.com" in model.base_url:
+            raise HTTPException(400, "Gemini API 키를 먼저 저장하세요")
+        now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        with lock:
+            if req.chat_id:
+                conv = lib.chat(req.chat_id)
+            else:
+                conv = {"id": uuid.uuid4().hex[:10], "title": req.question.strip()[:60], "messages": []}
+            if any(j.get("chat_id") == conv["id"] and j["state"] == "running" for j in jobs.values()):
+                raise HTTPException(409, "이 대화의 답을 아직 만드는 중입니다")
+            conv["messages"].append({"role": "user", "content": req.question.strip(), "context": req.context,
+                                     "time": now})
+            lib.save_chat(conv["id"], conv["title"], conv["messages"], now)
+        job_id = uuid.uuid4().hex[:8]
+        jobs[job_id] = {"id": job_id, "state": "running", "done": 0, "total": 0, "message": "질문 이해하는 중",
+                        "specs": [], "kind": "chat", "chat_id": conv["id"], "steps": []}
+        threading.Thread(target=_run_chat, args=(job_id, conv, req, model), daemon=True).start()
+        return {"job": jobs[job_id], "chat_id": conv["id"]}
+
+    def _run_chat(job_id: str, conv: dict, req: ChatRequest, model: intent.OpenAICompatIntentModel):
+        from . import chat as chatmod
+
+        job = jobs[job_id]
+        reader = Library(home / "library.sqlite")
+
+        def step(s: str):
+            job["steps"].append(s)
+            job["message"] = s
+
+        try:
+            history = [{"role": m["role"], "content": m["content"]} for m in conv["messages"][:-1] if m.get("content")]
+            res = chatmod.answer(model, reader, req.question.strip(), history, req.context, step=step)
+            reply = {"role": "assistant", "content": res["answer"] or "(빈 답변)", "sources": res["sources"],
+                     "steps": res["steps"], "mode": res["mode"], "model": res.get("model") or model.name}
+            job["state"], job["message"] = "done", "답변 완료"
+        except intent.LLMError as e:
+            reply = {"role": "assistant", "content": f"AI 요청 실패: {e}", "error": True, "steps": job["steps"]}
+            job["state"], job["message"] = "error", str(e)
+        except Exception as e:
+            reply = {"role": "assistant", "content": f"답변 중 오류: {e}", "error": True, "steps": job["steps"]}
+            job["state"], job["message"] = "error", str(e)
+        finally:
+            reader.close()
+        reply["time"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        with lock:
+            cur = lib.chat(conv["id"])
+            cur["messages"].append(reply)
+            lib.save_chat(conv["id"], cur["title"], cur["messages"], reply["time"])
 
     # ---- full AI analysis (left running overnight) ----
 

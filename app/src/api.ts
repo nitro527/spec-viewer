@@ -119,6 +119,17 @@ export interface WISummary {
   model?: string; generated?: string; crs: number; analysed: number;
 }
 export interface WorkItem { wi: string; crs: WICR[]; summary: WISummary | null }
+export type ChatSource =
+  | { type: "clause"; spec: string; clause: string; key: string; version: string; title: string }
+  | { type: "cr"; spec: string; cr: string; tdoc: string; title: string }
+  | { type: "wi"; wi: string };
+export interface ChatContext { spec: string; version?: string; clause?: string; text?: string }
+export interface ChatMessage {
+  role: "user" | "assistant"; content: string; time?: string; context?: ChatContext | null;
+  sources?: Record<string, ChatSource>; steps?: string[]; mode?: "tools" | "retrieval"; model?: string; error?: boolean;
+}
+export interface ChatSummary { id: string; title: string; updated: string }
+export interface Chat extends ChatSummary { messages: ChatMessage[] }
 export interface SearchHit { ord: number; key: string; number: string; title: string; block: number | null; snippet: string }
 export interface LlmProviderSettings {
   base_url: string; model: string; has_key: boolean; key_hint: string; key_source: "saved" | "env" | null;
@@ -137,7 +148,7 @@ export interface MeetingDoc { meeting: string; tdoc: string | null; title: strin
 
 export interface Job {
   id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[]; kind?: "intent";
-  full?: boolean; started?: string; finished?: string; stopped?: boolean;
+  full?: boolean; started?: string; finished?: string; stopped?: boolean; chat_id?: string; steps?: string[];
   counts?: { intents: number; cr_analyses: number; wi_summaries: number; failed: number };
 }
 export interface FullAnalysisRequest { specs: string[] | null; skip_uncovered: boolean; cr_analyses: boolean; wi_summaries: boolean }
@@ -171,6 +182,11 @@ export const api = {
   search: (spec: string, v: string, q: string) => get<SearchHit[]>(`/api/specs/${s(spec)}/${s(v)}/search?q=${s(q)}`),
   phraseHistory: (spec: string, q: string) => get<PhraseHistory>(`/api/specs/${s(spec)}/phrase-history?q=${s(q)}`),
   crs: (spec: string) => get<CR[]>(`/api/specs/${s(spec)}/crs`),
+  chats: () => get<ChatSummary[]>("/api/chats"),
+  chat: (id: string) => get<Chat>(`/api/chats/${s(id)}`),
+  deleteChat: (id: string) => send<{ ok: boolean }>("DELETE", `/api/chats/${s(id)}`, {}),
+  ask: (question: string, chatId: string | null, context: ChatContext | null) =>
+    send<{ job: Job; chat_id: string }>("POST", "/api/chat", { question, chat_id: chatId, context }),
   workItem: (wi: string) => get<WorkItem>(`/api/work-items/${s(wi)}`),
   summarizeWI: (wi: string, force = false) => send<Job>("POST", "/api/wi-summary", { wi, force }),
   compare: (spec: string, oldV: string, newV: string, changedOnly = true) =>
