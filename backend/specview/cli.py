@@ -119,7 +119,24 @@ def _log_to_file(home: Path) -> None:
 
 
 
+def _system_certificates() -> None:
+    """Trust what Windows (or macOS/Linux) trusts. Company networks that inspect HTTPS re-sign it with their own
+    root certificate, which IT installs in the system store; requests' own list (certifi) does not have it, so
+    every download and LLM request failed with an SSL error there. SPECVIEW_SYSTEM_CERTS=0 turns this off."""
+    import os
+
+    if os.environ.get("SPECVIEW_SYSTEM_CERTS", "1") == "0":
+        return
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+    except Exception:  # not installed, or an old system: keep requests' own list
+        pass
+
+
 def main(argv=None):
+    _system_certificates()
     ap = argparse.ArgumentParser(prog="specview")
     ap.add_argument("--home", default=str(default_home()), help="library directory (default ~/.specview)")
     sub = ap.add_subparsers(dest="cmd", required=True)
