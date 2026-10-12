@@ -440,7 +440,9 @@ class OpenAICompatIntentModel:
             if stream and "event-stream" in r.headers.get("Content-Type", ""):
                 return self._read_stream(r, on_text)
             data = r.json()  # not streamed (or a server that ignores "stream")
-            msg = dict((data.get("choices") or [{}])[0].get("message") or {})
+            choice = (data.get("choices") or [{}])[0]
+            msg = dict(choice.get("message") or {})
+            msg["finish_reason"] = choice.get("finish_reason")
             msg["content"] = strip_think(msg.get("content") or "")
             msg["model"] = data.get("model") or self.model
             if on_text and msg["content"]:
@@ -450,7 +452,7 @@ class OpenAICompatIntentModel:
 
     def _read_stream(self, r, on_text: Callable[[str], None]) -> dict:
         """Server-sent events of a streamed completion, merged into one assistant message."""
-        text, model, calls = "", self.model, {}
+        text, model, calls, finish = "", self.model, {}, None
         r.encoding = "utf-8"  # SSE is UTF-8; without a charset requests would decode it as Latin-1 (broken Korean)
         try:
             for line in r.iter_lines(decode_unicode=True):
@@ -466,12 +468,18 @@ class OpenAICompatIntentModel:
                 if err := chunk.get("error"):
                     raise LLMError(f"LLM 오류: {err.get('message', err) if isinstance(err, dict) else err}")
                 model = chunk.get("model") or model
-                delta = ((chunk.get("choices") or [{}])[0].get("delta")) or {}
+                choice = (chunk.get("choices") or [{}])[0]
+                finish = choice.get("finish_reason") or finish
+                delta = choice.get("delta") or {}
                 if delta.get("content"):
                     text += delta["content"]
                     on_text(strip_think(text))
                 for tc in delta.get("tool_calls") or []:  # tool calls arrive in pieces, by index
-                    cur = calls.setdefault(tc.get("index", len(calls)),
+                    idx = tc.get("index")
+                    if idx is None:  # servers that leave it out: a piece with an id or a name starts a call
+                        starts = tc.get("id") or (tc.get("function") or {}).get("name")
+                        idx = len(calls) if starts or not calls else max(calls)
+                    cur = calls.setdefault(idx,
                                            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
                     cur["id"] = tc.get("id") or cur["id"]
                     # anything else rides along unchanged: Gemini 3 sends extra_content.google.thought_signature
@@ -484,7 +492,7 @@ class OpenAICompatIntentModel:
             raise LLMError(f"LLM 응답이 중간에 끊겼습니다: {e}") from e
         finally:
             r.close()
-        msg = {"role": "assistant", "content": strip_think(text), "model": model}
+        msg = {"role": "assistant", "content": strip_think(text), "model": model, "finish_reason": finish}
         if calls:
             msg["tool_calls"] = [calls[k] for k in sorted(calls)]
         return msg

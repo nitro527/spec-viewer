@@ -443,6 +443,14 @@ def _shrink(messages: list[dict]) -> None:
                                                   "if you still need it"})
 
 
+def _cut_note(msg: dict) -> str:
+    """The answer, saying so when the server stopped it at its output limit (the text just ends otherwise)."""
+    text = msg.get("content") or ""
+    if msg.get("finish_reason") == "length" and text:
+        text += "\n\n_(답변이 모델의 출력 길이 제한에 걸려 잘렸습니다. 더 좁혀서 물어보세요.)_"
+    return text
+
+
 class Stopped(Exception):
     """The user pressed stop: raised between model requests (the one in flight is not cut off)."""
 
@@ -492,9 +500,9 @@ def answer(model, lib, question: str, history: list[dict] | None = None, context
                 break
             calls = _tool_calls(msg, n)
             if not calls:
-                return {"answer": msg["content"], "sources": tools.sources, "steps": steps, "mode": "tools",
+                return {"answer": _cut_note(msg), "sources": tools.sources, "steps": steps, "mode": "tools",
                         "model": msg.get("model")}
-            messages.append({k: v for k, v in msg.items() if k not in ("model",)} | {"role": "assistant",
+            messages.append({k: v for k, v in msg.items() if k not in ("model", "finish_reason")} | {"role": "assistant",
                             "content": msg.get("content") or "", "tool_calls": calls})
             for tc in calls:
                 name, args = tc["function"].get("name", ""), _args(tc)
@@ -506,7 +514,7 @@ def answer(model, lib, question: str, history: list[dict] | None = None, context
         _shrink(messages)
         check()
         msg = ask(messages)
-        return {"answer": msg["content"], "sources": tools.sources, "steps": steps, "mode": "tools",
+        return {"answer": _cut_note(msg), "sources": tools.sources, "steps": steps, "mode": "tools",
                 "model": msg.get("model")}
     except ToolsUnsupported:
         note("이 LLM 서버는 도구 호출을 지원하지 않아 검색 결과를 한 번에 넘겨 답합니다")
@@ -564,5 +572,5 @@ def _answer_without_tools(model, tools: SpecTools, question, history, context, l
         messages.append({"role": m["role"], "content": m["content"][:3000]})
     messages.append({"role": "user", "content": f"<material>\n{body}\n</material>\n\n{_user_text(question, context, tag)}"})
     out = (final or model.complete)(messages)
-    return {"answer": out["content"], "sources": tools.sources, "steps": steps, "mode": "retrieval",
+    return {"answer": _cut_note(out), "sources": tools.sources, "steps": steps, "mode": "retrieval",
             "model": out.get("model")}

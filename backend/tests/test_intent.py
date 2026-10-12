@@ -260,3 +260,14 @@ def test_streamed_tool_calls_keep_provider_fields_and_string_errors_are_llm_erro
     m.session.post = lambda url, **kw: _Resp(lines=["data: " + json.dumps({"error": "overloaded"})])
     with pytest.raises(intent.LLMError, match="overloaded"):
         m.complete([{"role": "user", "content": "q"}], on_text=lambda t: None)
+
+
+def test_streamed_tool_call_pieces_without_index_are_joined():
+    m = intent.OpenAICompatIntentModel("http://llm/v1", "glm")
+    m.session.post = lambda url, **kw: _Resp(lines=_sse(
+        {"choices": [{"delta": {"tool_calls": [{"id": "a", "function": {"name": "search", "arguments": "{\"q"}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"function": {"arguments": "\": 1}"}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"id": "b", "function": {"name": "get_cr", "arguments": "{}"}}]}}]}))
+    msg = m.complete([{"role": "user", "content": "q"}], tools=[{}], on_text=lambda t: None)
+    assert [(c["id"], c["function"]["name"], c["function"]["arguments"]) for c in msg["tool_calls"]] == [
+        ("a", "search", '{"q": 1}'), ("b", "get_cr", "{}")]

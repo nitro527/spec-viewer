@@ -148,3 +148,8 @@ def test_referenced_by_finds_citing_paragraphs(library):
     assert [(h["spec"], h["number"]) for h in hits] == [("99.211", "7.4.1.1.1")] and "[[5.2.1]]" in hits[0]["snippet"]
     out = json.loads(chat.SpecTools(library).call("referenced_by", {"spec": "38.211", "clause": "5.2.1"}))
     assert out["count"] == 1 and out["citing"][0]["source"].startswith("99.211 §7.4.1.1.1")
+
+
+def test_answer_cut_at_the_length_limit_says_so():
+    assert chat._cut_note({"content": "절반", "finish_reason": "length"}).startswith("절반\n\n_(답변이")
+    assert chat._cut_note({"content": "전부", "finish_reason": "stop"}) == "전부"
