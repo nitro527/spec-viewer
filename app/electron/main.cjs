@@ -78,7 +78,8 @@ async function startBackend() {
     args.unshift("-m", "specview");
     args.push("--static", path.join(__dirname, "..", "dist"));
   }
-  const proc = spawn(cmd, args, { cwd, env, stdio: "inherit" });
+  // no console window next to the app on Windows: errors go to the log file (Help → 로그 폴더 열기)
+  const proc = spawn(cmd, args, { cwd, env, stdio: "inherit", windowsHide: true });
   backend = proc;
   const exited = new Promise((_, reject) => {
     proc.on("exit", (code) => reject(new Error(`backend exited (code ${code})`)));
@@ -148,4 +149,16 @@ app.on("web-contents-created", (_e, wc) => guard(wc));  // every window, the doc
 app.whenReady().then(createWindow);
 app.on("window-all-closed", () => app.quit());
 app.on("before-quit", () => { quitting = true; });
-app.on("quit", () => backend && backend.kill());
+// The backend may be running pandoc or LibreOffice for a download: on Windows killing it alone leaves those
+// converting for minutes after the app is gone, so end the whole process tree.
+function stopBackend() {
+  if (!backend) return;
+  if (process.platform === "win32" && backend.pid) {
+    try {
+      require("child_process").spawnSync("taskkill", ["/pid", String(backend.pid), "/T", "/F"], { windowsHide: true });
+      return;
+    } catch (_) { /* fall back to a plain kill */ }
+  }
+  backend.kill();
+}
+app.on("quit", stopBackend);
