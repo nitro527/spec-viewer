@@ -1,6 +1,6 @@
 // Every CR of the spec's Change history in one list: filter by text, release, category, work item and AI
 // analysis; open the CR document, jump to the clauses it changed, and analyse the filtered CRs in one go.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { api, crKey, tdocUrl, type CR, type CRAnalysis, type TocEntry } from "../api";
 import type { VersionColor } from "../colors";
 import { announceAnalysesChanged, useCRAnalyses, useLlmReady } from "./CRAnalysis";
@@ -36,8 +36,9 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
   }, [rows]);
   const byNumber = useMemo(() => new Map(toc.map((t) => [t.number, t])), [toc]);
 
+  const fq = useDeferredValue(q);  // typing stays smooth; the long list follows a moment later
   const shown = useMemo(() => {
-    const low = q.trim().toLowerCase();
+    const low = fq.trim().toLowerCase();
     return rows.filter((c) => {
       const a = analyses.get(crKey(c.cr, c.tdoc));
       if (rel && release(c) !== rel) return false;
@@ -49,7 +50,18 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
       return [c.cr, c.tdoc, c.subject, c.meeting, c.detail?.wi_code, c.detail?.clauses_raw, c.detail?.wg_tdoc,
         a?.summary].some((x) => x?.toLowerCase().includes(low));
     });
-  }, [rows, analyses, q, rel, cat, wi, only]);
+  }, [rows, analyses, fq, rel, cat, wi, only]);
+  // a big spec has over a thousand CRs (38.101-1: 1280): render 200 and more as the list is scrolled
+  const [limit, setLimit] = useState(200);
+  useEffect(() => setLimit(200), [fq, rel, cat, wi, only]);
+  const more = useRef<HTMLTableRowElement>(null);
+  useEffect(() => {
+    const el = more.current;
+    if (!el) return;
+    const io = new IntersectionObserver((es) => es[0].isIntersecting && setLimit((n) => n + 200), { rootMargin: "600px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [limit, shown.length]);
   const todo = shown.filter((c) => c.detail && !analyses.has(crKey(c.cr, c.tdoc)));
   const covers = rows.filter((c) => c.detail).length;
 
@@ -149,7 +161,7 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
           <tr><th>버전</th><th>CR</th><th>Cat</th><th>제목</th><th>WI</th><th>회의</th><th /></tr>
         </thead>
         <tbody>
-          {shown.map((c) => {
+          {shown.slice(0, limit).map((c) => {
             const k = `${c.new_version}/${c.tdoc}/${c.cr}/${c.rev}`;  // the same CR can be listed twice
             const a = analyses.get(crKey(c.cr, c.tdoc));
             const isOpen = open === k;
@@ -172,6 +184,9 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
               ),
             ];
           })}
+          {shown.length > limit && (
+            <tr ref={more}><td colSpan={7} className="muted small">… {shown.length - limit}개 더 (스크롤하면 이어서 표시)</td></tr>
+          )}
         </tbody>
       </table>
     </div>
