@@ -443,6 +443,11 @@ def _shrink(messages: list[dict]) -> None:
                                                   "if you still need it"})
 
 
+_RAW_TOOL_CALL = re.compile(
+    r"<tool_call>|<\|tool[▁_]call|<function=|^\s*\{\s*\"name\"\s*:\s*\"(?:search|read_clause|clause_history|"
+    r"compare_clause|crs_between|search_crs|get_cr|work_item|list_specs|referenced_by)\"", re.M)
+
+
 def _cut_note(msg: dict) -> str:
     """The answer, saying so when the server stopped it at its output limit (the text just ends otherwise)."""
     text = msg.get("content") or ""
@@ -499,6 +504,10 @@ def answer(model, lib, question: str, history: list[dict] | None = None, context
                     raise
                 break
             calls = _tool_calls(msg, n)
+            if not calls and _RAW_TOOL_CALL.search(msg.get("content") or ""):
+                # a server without a tool-call parser (vLLM without --tool-call-parser): the model wrote its
+                # call as text. Answer from search results instead of showing that text.
+                raise ToolsUnsupported("tool call came back as text")
             if not calls:
                 return {"answer": _cut_note(msg), "sources": tools.sources, "steps": steps, "mode": "tools",
                         "model": msg.get("model")}

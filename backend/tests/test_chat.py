@@ -153,3 +153,16 @@ def test_referenced_by_finds_citing_paragraphs(library):
 def test_answer_cut_at_the_length_limit_says_so():
     assert chat._cut_note({"content": "절반", "finish_reason": "length"}).startswith("절반\n\n_(답변이")
     assert chat._cut_note({"content": "전부", "finish_reason": "stop"}) == "전부"
+
+
+@needs_pandoc
+def test_tool_call_written_as_text_falls_back_to_search_results(library):
+    class TextCalls(FakeModel):
+        def complete(self, messages, tools=None):
+            if tools:
+                self.seen.append(messages)
+                return {"content": '<tool_call>search\n<arg_key>query</arg_key><arg_value>x</arg_value></tool_call>'}
+            return super().complete(messages, tools)
+
+    r = chat.answer(TextCalls([]), library, "sequence generation?")
+    assert r["mode"] == "retrieval" and "<tool_call>" not in r["answer"]
