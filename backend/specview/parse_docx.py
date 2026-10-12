@@ -375,6 +375,31 @@ def html_to_clauses(doc_html: str) -> list[Clause]:
     return [c for c in clauses if c.title.strip().lower() not in ("contents", "table of contents")]
 
 
+def assign_keys(heads: list[tuple[str, str, int]]) -> list[str]:
+    """Keys for (number, title, level) headings in document order, as html_to_clauses gives them: a numbered
+    clause is its number ("Annex B" -> "B"), an unnumbered heading goes under the last numbered clause and
+    its enclosing unnumbered headings ("6.2.3/ue"), repeats get "~2", "~3"."""
+    keys: list[str] = []
+    seen: dict[str, int] = {}
+    numbered = ""
+    path: list[tuple[int, str]] = []
+    for number, title, level in heads:
+        if number:
+            key = number[6:] if number.startswith("Annex ") else number
+            numbered, path = key, []
+        else:
+            key = _split_heading(title)[0]
+            if numbered:
+                path = [(lv, k) for lv, k in path if lv < level]
+                slug = key
+                key = "/".join([numbered, *(k for _, k in path), slug])
+                path.append((level, slug))
+        n = seen.get(key, 0)
+        seen[key] = n + 1
+        keys.append(f"{key}~{n + 1}" if n else key)
+    return keys
+
+
 def guess_title(clauses: list[Clause]) -> str | None:
     # Cover page: ZT-styled lines "3rd Generation Partnership Project;" ... "NR;" "Physical channels ..."
     front = clauses[0].blocks if clauses else []
@@ -434,7 +459,6 @@ def _part_order(part: ParsedSpec) -> tuple:
 def merge_parts(parts: list[ParsedSpec]) -> ParsedSpec:
     """Concatenate split documents in order; text before a part's first heading continues the previous clause."""
     clauses: list[Clause] = []
-    seen: dict[str, int] = {}
     assets: dict[str, Asset] = {}
     for part in parts:
         assets.update(part.assets)
@@ -442,9 +466,11 @@ def merge_parts(parts: list[ParsedSpec]) -> ParsedSpec:
             if i == 0 and c.key == "front" and clauses:
                 clauses[-1].blocks.extend(c.blocks)
                 continue
-            base = c.key.split("~")[0]
-            n = seen.get(base, 0)
-            seen[base] = n + 1
-            clauses.append(Clause(f"{base}~{n + 1}" if n else base, c.number, c.title, c.level, list(c.blocks)))
+            clauses.append(Clause(c.key, c.number, c.title, c.level, list(c.blocks)))
+    # keys as one document would give them: a part that starts with unnumbered headings continues the last
+    # numbered clause of the part before ("6.2.3/gnb", not "gnb"), and repeats are numbered across parts
+    body = [c for c in clauses if c.key != "front"]
+    for c, k in zip(body, assign_keys([(c.number, c.title, c.level) for c in body])):
+        c.key = k
     title = next((p.title for p in parts if p.title), None)
     return ParsedSpec(title, clauses, assets)

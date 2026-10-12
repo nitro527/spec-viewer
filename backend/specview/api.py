@@ -180,7 +180,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 reader.close()
             if rekey:
                 with lock:
-                    todo |= set(lib.fix_lettered_clauses())
+                    todo |= set(lib.normalize_keys())
             for spec in sorted(todo):
                 lib.recompute_history(spec, lock=lock)
         except Exception:

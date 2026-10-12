@@ -156,7 +156,7 @@ def test_old_title_keys_are_renamed_to_numbers(library, tmp_path):
                            "WHERE version_id=? AND key='7.4.1.1.3'", (slug, vid))
             lib.db.execute("UPDATE block_ver SET clause_key=? WHERE version_id=? AND clause_key='7.4.1.1.3'", (slug, vid))
         lib.db.execute("INSERT INTO note VALUES ('99.211', ?, 1, 'x', NULL, '2026-01-01')", (slug,))
-    assert lib.fix_lettered_clauses() == ["99.211"] and lib.fix_lettered_clauses() == []
+    assert lib.normalize_keys() == ["99.211"] and lib.normalize_keys() == []
     lib.recompute_history("99.211")
     latest = lib.versions("99.211")[-1]["version"]
     e = next(t for t in lib.toc("99.211", latest) if t["key"] == "7.4.1.1.3")
@@ -177,3 +177,12 @@ def test_change_history_with_merged_cells_keeps_every_cr():
         "<td>First</td><td rowspan='2'>16.1.0</td></tr>"
         "<tr><td>RP-2</td><td>0002</td><td>1</td><td>B</td><td>Second</td></tr></table>")
     assert _rows(t)[2] == ["2020-03", "RAN#87", "RP-2", "0002", "1", "B", "Second", "16.1.0"]
+
+
+def test_a_part_starting_with_unnumbered_headings_continues_the_clause_before():
+    from specview.parse_docx import Clause, ParsedSpec, merge_parts
+
+    a = ParsedSpec("T", [Clause("6.2.3", "6.2.3", "Requirements", 3), Clause("6.2.3/ue", "", "UE", 4)], {})
+    b = ParsedSpec(None, [Clause("gnb", "", "gNB", 4), Clause("6.2.4", "6.2.4", "Next", 3), Clause("ue", "", "UE", 4)], {})
+    keys = [c.key for c in merge_parts([a, b]).clauses]
+    assert keys == ["6.2.3", "6.2.3/ue", "6.2.3/gnb", "6.2.4", "6.2.4/ue"]  # as one document gives them

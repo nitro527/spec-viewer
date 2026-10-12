@@ -272,43 +272,38 @@ class Library:
         finally:
             reader.close()
 
+    KEYS_VERSION = "2"  # bump when the parser starts keying clauses differently
+
     def needs_rekey(self) -> bool:
-        """Whether fix_lettered_clauses has anything to do (a quick read)."""
-        from .parse_docx import _split_heading
+        """Whether normalize_keys has to look at the library (once per key scheme)."""
+        return self.get_setting("keys_version") != self.KEYS_VERSION and bool(
+            self.db.execute("SELECT 1 FROM version LIMIT 1").fetchone())
 
-        return any(_split_heading(t)[1] for (t,) in self.db.execute(
-            "SELECT title FROM clause_ver WHERE number = '' AND title GLOB '[0-9]*[0-9]*'"))
-
-    def fix_lettered_clauses(self) -> list[str]:
-        """Libraries parsed before "5.2.1.5.1a" and "8.4.1.4." headings were recognised as numbered keyed such a
-        clause by its title ("5-2-1-5-1a-aperiodic-csi", no number) and its unnumbered sub-headings under that.
-        Give them the keys a fresh parse gives ("5.2.1.5.1a", "5.2.1.5.1a/ue"), so history continues into newly
-        downloaded versions and CRs reach them. Returns the specs changed (their history needs recomputing)."""
-        from .parse_docx import _split_heading
+    def normalize_keys(self) -> list[str]:
+        """Give every stored clause the key a parse today gives it. Libraries parsed before "5.2.1.5.1a" and
+        "8.4.1.4." headings were recognised keyed them by title (no number), and a split document's part that
+        began with unnumbered headings keyed those without their clause. Renamed rows keep their blocks and
+        notes; returns the specs changed (their history needs recomputing)."""
+        from .parse_docx import _split_heading, assign_keys
 
         TMP = "mig:"  # keys never start with it (numbers, "front", slugs of letters/digits/dashes)
-        rows = self.db.execute(
-            "SELECT c.version_id, c.key, c.title, v.spec FROM clause_ver c JOIN version v ON v.id = c.version_id "
-            "WHERE c.number = '' AND c.title GLOB '[0-9]*[0-9]*'").fetchall()
-        renames: dict[int, dict[str, tuple[str, str, str]]] = {}
-        specs: dict[int, str] = {}
-        for r in rows:
-            key, number, title = _split_heading(r["title"])
-            if number:  # what a parse today makes of this heading
-                renames.setdefault(r["version_id"], {})[r["key"]] = (key, number, title)
-                specs[r["version_id"]] = r["spec"]
-        changed = set()
+        changed: set[str] = set()
         with self.db:
-            for vid, ren in renames.items():
-                keys = {k for (k,) in self.db.execute("SELECT key FROM clause_ver WHERE version_id=?", (vid,))}
-                mapping: dict[str, str] = {}
-                for old, (new, _, _) in ren.items():
-                    if new in keys:
-                        continue  # already there (a duplicate heading): leave this one alone
-                    mapping[old] = new
-                    for k in keys:  # its sub-headings: "<old>/ue" -> "<new>/ue"
-                        if k.startswith(old + "/"):
-                            mapping[k] = new + k[len(old):]
+            for v in self.db.execute("SELECT id, spec FROM version").fetchall():
+                vid = v["id"]
+                rows = [r for r in self.db.execute(
+                    "SELECT key, number, title, level FROM clause_ver WHERE version_id=? ORDER BY ord", (vid,))
+                    if r["key"] != "front"]
+                heads, fixed = [], {}
+                for r in rows:
+                    number, title, level = r["number"], r["title"], r["level"]
+                    if not number:
+                        _, n, t = _split_heading(title)
+                        if n:  # a heading the parser numbers now
+                            number, title, level = n, t, n.count(".") + 1
+                            fixed[r["key"]] = (number, title, level)
+                    heads.append((number, title, level))
+                mapping = {r["key"]: k for r, k in zip(rows, assign_keys(heads)) if r["key"] != k}
                 if not mapping:
                     continue
                 for old, new in mapping.items():  # two steps: no clash while keys trade places
@@ -319,14 +314,14 @@ class Library:
                                 (len(TMP) + 1, vid, TMP + "%"))
                 self.db.execute("UPDATE block_ver SET clause_key=substr(clause_key, ?) WHERE version_id=? AND "
                                 "clause_key LIKE ?", (len(TMP) + 1, vid, TMP + "%"))
-                for old, (new, number, title) in ren.items():
-                    if mapping.get(old) == new:
-                        self.db.execute("UPDATE clause_ver SET number=?, title=?, level=? WHERE version_id=? AND key=?",
-                                        (number, title, number.count(".") + 1, vid, new))
-                spec = specs[vid]
+                for old, (number, title, level) in fixed.items():
+                    self.db.execute("UPDATE clause_ver SET number=?, title=?, level=? WHERE version_id=? AND key=?",
+                                    (number, title, level, vid, mapping.get(old, old)))
                 for old, new in mapping.items():  # notes are per spec: follow the rename
-                    self.db.execute("UPDATE OR IGNORE note SET clause_key=? WHERE spec=? AND clause_key=?", (new, spec, old))
-                changed.add(spec)
+                    self.db.execute("UPDATE OR IGNORE note SET clause_key=? WHERE spec=? AND clause_key=?",
+                                    (new, v["spec"], old))
+                changed.add(v["spec"])
+        self.set_setting("keys_version", self.KEYS_VERSION)
         if changed:
             self._compared.clear()
         return sorted(changed)
