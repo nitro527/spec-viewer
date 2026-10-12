@@ -1067,7 +1067,8 @@ class Library:
         version of every downloaded spec. One pass over the text (well under a second for several big specs),
         kept until a spec gets a new latest version."""
         latest = {x["number"]: self.versions(x["number"])[-1]["id"] for x in self.specs() if x["versions"]}
-        key = tuple(sorted(latest.items()))
+        # data_version: another connection's commit (a re-import reusing a rowid, the startup re-key) shows
+        key = (tuple(sorted(latest.items())), self.db.execute("PRAGMA data_version").fetchone()[0])
         cached = getattr(self, "_cite_cache", None)
         if cached and cached[0] == key:
             return cached[1]

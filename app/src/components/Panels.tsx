@@ -1,5 +1,6 @@
 // Side panels: table of contents (left) and change information (right).
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { api, cmpVersion, crKey, crTouches, tdocUrl, type CR, type CRAnalysis, type Note, type RefHit, type TocEntry } from "../api";
 import { askAboutParagraph } from "../ask";
 import { openCRDoc } from "./DocWindow";
@@ -16,24 +17,11 @@ export function Toc({ toc, active, baseline, highlight, changedOnly, bookmarks, 
   toc: TocEntry[]; active: number; baseline: string; highlight: boolean; changedOnly: boolean;
   bookmarks: Set<string>; bookmarkedOnly: boolean; onJump: (ord: number) => void;
 }) {
-  const navRef = useRef<HTMLElement>(null);
-  const shownActive = useRef(-1);
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const onJumpRef = useRef(onJump);
   onJumpRef.current = onJump;
   const jump = useCallback((ord: number) => onJumpRef.current(ord), []);
-  // scrolling the document changes `active` many times a second: mark the row in the DOM instead of
-  // rendering thousands of rows again (a 36.523-1 has ~9000 clauses)
-  useEffect(() => {
-    const nav = navRef.current;
-    if (!nav) return;
-    nav.querySelector(".toc-row.active")?.classList.remove("active");
-    const row = nav.querySelector<HTMLElement>(`.toc-row[data-ord="${active}"]`);
-    row?.classList.add("active");
-    if (shownActive.current !== active) row?.scrollIntoView({ block: "nearest" });
-    shownActive.current = active;
-  });
 
   const hasChildren = useMemo(() => {
     const s = new Set<string>();
@@ -57,6 +45,9 @@ export function Toc({ toc, active, baseline, highlight, changedOnly, bookmarks, 
     return out;
   }, [toc, query, collapsed]);
 
+  const rows = useMemo(() => visible.filter((t) => (!changedOnly || (highlight && newer(t.last_changed, baseline)))
+    && (!bookmarkedOnly || bookmarks.has(t.key))), [visible, changedOnly, highlight, baseline, bookmarkedOnly, bookmarks]);
+
   const toggle = useCallback((key: string) => setCollapsed((c) => {
     const n = new Set(c);
     if (n.has(key)) n.delete(key); else n.add(key);
@@ -70,38 +61,51 @@ export function Toc({ toc, active, baseline, highlight, changedOnly, bookmarks, 
         <button title="모두 접기" onClick={() => setCollapsed(new Set(toc.filter((t) => t.level === 1 && hasChildren.has(t.key)).map((t) => t.key)))}>−</button>
         <button title="모두 펼치기" onClick={() => setCollapsed(new Set())}>+</button>
       </div>
-      <TocRows visible={visible} highlight={highlight} baseline={baseline} changedOnly={changedOnly}
-               bookmarks={bookmarks} bookmarkedOnly={bookmarkedOnly} hasChildren={hasChildren} collapsed={collapsed}
-               query={query} toggle={toggle} jump={jump} navRef={navRef} />
+      <TocRows rows={rows} active={active} highlight={highlight} baseline={baseline} bookmarks={bookmarks}
+               hasChildren={hasChildren} collapsed={collapsed} query={query} toggle={toggle} jump={jump} />
     </>
   );
 }
 
-const TocRows = memo(function TocRows({ visible, highlight, baseline, changedOnly, bookmarks, bookmarkedOnly,
-  hasChildren, collapsed, query, toggle, jump, navRef }: {
-  visible: TocEntry[]; highlight: boolean; baseline: string; changedOnly: boolean; bookmarks: Set<string>;
-  bookmarkedOnly: boolean; hasChildren: Set<string>; collapsed: Set<string>; query: string;
-  toggle: (key: string) => void; jump: (ord: number) => void; navRef: React.RefObject<HTMLElement>;
+// Only the rows in view are rendered (a 36.523-1 has ~9000 clauses); the clause shown in the document is
+// kept in view as it scrolls.
+const TocRows = memo(function TocRows({ rows, active, highlight, baseline, bookmarks, hasChildren, collapsed, query,
+  toggle, jump }: {
+  rows: TocEntry[]; active: number; highlight: boolean; baseline: string; bookmarks: Set<string>;
+  hasChildren: Set<string>; collapsed: Set<string>; query: string;
+  toggle: (key: string) => void; jump: (ord: number) => void;
 }) {
+  const nav = useRef<HTMLElement>(null);
+  const virt = useVirtualizer({ count: rows.length, getScrollElement: () => nav.current, estimateSize: () => 24,
+    overscan: 12 });
+  const indexOf = useMemo(() => new Map(rows.map((t, i) => [t.ord, i])), [rows]);
+  useEffect(() => {
+    const i = indexOf.get(active);
+    if (i !== undefined) virt.scrollToIndex(i, { align: "auto" });
+  }, [active, indexOf]);  // eslint-disable-line react-hooks/exhaustive-deps
   return (
-    <nav className="toc" ref={navRef}>
-      {visible.map((t) => {
-        const changed = highlight && newer(t.last_changed, baseline);
-        if (changedOnly && !changed) return null;
-        if (bookmarkedOnly && !bookmarks.has(t.key)) return null;
-        return (
-          <div key={t.ord} className="toc-row" data-ord={t.ord} style={{ paddingLeft: (Math.max(t.level, 1) - 1) * 12 }}>
-            {hasChildren.has(t.key) && !query
-              ? <button className="twisty" onClick={() => toggle(t.key)}>{collapsed.has(t.key) ? "▸" : "▾"}</button>
-              : <span className="twisty" />}
-            <button className="toc-item" onClick={() => jump(t.ord)} title={`${t.number} ${t.title}`}>
-              {changed && <span className="dot" data-bv={t.last_changed!} />}
-              <span className="num">{t.number}</span> {t.title}
-              {bookmarks.has(t.key) && <span className="toc-star">★</span>}
-            </button>
-          </div>
-        );
-      })}
+    <nav className="toc" ref={nav}>
+      <div style={{ height: virt.getTotalSize(), position: "relative" }}>
+        {virt.getVirtualItems().map((it) => {
+          const t = rows[it.index];
+          const changed = highlight && newer(t.last_changed, baseline);
+          return (
+            <div key={t.ord} data-index={it.index} ref={virt.measureElement} data-ord={t.ord}
+                 className={`toc-row ${t.ord === active ? "active" : ""}`}
+                 style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${it.start}px)`,
+                          paddingLeft: (Math.max(t.level, 1) - 1) * 12 }}>
+              {hasChildren.has(t.key) && !query
+                ? <button className="twisty" onClick={() => toggle(t.key)}>{collapsed.has(t.key) ? "▸" : "▾"}</button>
+                : <span className="twisty" />}
+              <button className="toc-item" onClick={() => jump(t.ord)} title={`${t.number} ${t.title}`}>
+                {changed && <span className="dot" data-bv={t.last_changed!} />}
+                <span className="num">{t.number}</span> {t.title}
+                {bookmarks.has(t.key) && <span className="toc-star">★</span>}
+              </button>
+            </div>
+          );
+        })}
+      </div>
     </nav>
   );
 });
