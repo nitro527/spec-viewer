@@ -146,7 +146,19 @@ async function createWindow() {
 }
 
 app.on("web-contents-created", (_e, wc) => guard(wc));  // every window, the document viewers included
-app.whenReady().then(createWindow);
+// One app per user: a second launch would start a second backend on the same library (two downloads or two
+// overnight runs at once). It brings the open window to the front instead.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (mainWin && !mainWin.isDestroyed()) {
+      if (mainWin.isMinimized()) mainWin.restore();
+      mainWin.focus();
+    }
+  });
+  app.whenReady().then(createWindow);
+}
 app.on("window-all-closed", () => app.quit());
 app.on("before-quit", () => { quitting = true; });
 // The backend may be running pandoc or LibreOffice for a download: on Windows killing it alone leaves those
