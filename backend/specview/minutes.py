@@ -245,34 +245,53 @@ def parse_report(docx: Path) -> list[dict]:
 
 
 def fetch_report(folder: str, cache_dir: Path, session=None) -> dict | None:
-    """Parsed report of one meeting, cached as JSON (an empty file marks "no report")."""
+    """Parsed report of one meeting, cached as JSON ({"none": true} marks "no report").
+
+    Final minutes come out weeks after a meeting, so a meeting with no report yet, or only a draft, is looked
+    at again weekly for half a year after it was first asked for. A recheck that finds nothing better (or
+    cannot reach 3gpp.org) keeps what was cached."""
     import time
 
     cache = Path(cache_dir) / "minutes" / f"{folder_name(folder)}.json"
+    cached, first = None, time.time()
     if cache.exists():
         data = json.loads(cache.read_text(encoding="utf-8"))
-        final = bool(data) and "final" in (data.get("url") or "").lower()
-        # no report yet, or only a draft: final minutes come weeks after the meeting, so look again weekly
-        recheck = not final and time.time() - cache.stat().st_mtime > 7 * 86400
-        if (not data or data.get("v") == 2) and not recheck:
-            return data or None  # older cache entries lack the Tdoc list: fetch again
+        first = data.get("t0") or cache.stat().st_mtime
+        if not data or data.get("none") or data.get("v") == 2:  # older entries lack the Tdoc list: fetch again
+            cached = data if data.get("v") == 2 else None
+            final = cached is not None and "final" in (cached.get("url") or "").lower()
+            recheck = (not final and time.time() - cache.stat().st_mtime > 7 * 86400
+                       and time.time() - first < 180 * 86400)
+            if not recheck:
+                return cached
+
+    def keep() -> dict | None:  # nothing new: the cached report (if any) stays, and the week starts again
+        if cache.exists():
+            os.utime(cache)
+        return cached
+
     s = session or new_session()
     result = None
     try:
         url = report_url(folder, s)
         r = _get(s, url) if url else None
     except Unreachable:
-        return None  # not cached: the report may well be there
+        return cached  # not marked: asked again next time
     if r is not None and r.content[:2] == b"PK":
+        if cached and cached.get("url") == url:
+            return keep()  # the same draft as before
         work = cache.parent / folder_name(folder)
         work.mkdir(parents=True, exist_ok=True)
         zp = work / "report.zip"
         part = zp.with_name(f"report.{os.getpid()}.{threading.get_ident()}.part")
-        part.write_bytes(r.content)
-        os.replace(part, zp)  # never a half-written zip under the final name
+        try:
+            part.write_bytes(r.content)
+            os.replace(part, zp)  # never a half-written zip under the final name
+        finally:
+            part.unlink(missing_ok=True)
         if not zipfile.is_zipfile(zp):
             zp.unlink(missing_ok=True)
-            return None  # cut off: not cached, fetched again next time
+            return cached  # cut off: fetched again next time
         with zipfile.ZipFile(zp) as z:
             docs = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc")) and not n.startswith("__MACOSX")]
             if docs:
@@ -284,13 +303,15 @@ def fetch_report(folder: str, cache_dir: Path, session=None) -> dict | None:
                     try:
                         doc = _convert_doc(doc)
                     except LegacyDocError:
-                        return None  # not cached: may work once LibreOffice/Word is there
+                        return cached  # may work once LibreOffice/Word is there
                 xl = [n for n in z.namelist() if n.lower().endswith(".xlsx") and "tdoc" in n.lower()]
                 tdoc_list = parse_tdoc_list(z.read(xl[0])) if xl else []
                 result = {"v": 2, "meeting": meeting_label(folder), "folder": folder, "url": url,
-                          "items": parse_report(doc), "tdocs": tdoc_list}
+                          "items": parse_report(doc), "tdocs": tdoc_list, "t0": first}
+    if result is None and cached:
+        return keep()
     cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(result or {}, ensure_ascii=False), encoding="utf-8")
+    cache.write_text(json.dumps(result or {"none": True, "t0": first}, ensure_ascii=False), encoding="utf-8")
     return result
 
 

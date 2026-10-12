@@ -272,7 +272,7 @@ class Library:
         finally:
             reader.close()
 
-    KEYS_VERSION = "2"  # bump when the parser starts keying clauses differently
+    KEYS_VERSION = "3"  # bump when the parser starts keying clauses differently (3: "B.2a", "8. Foo")
 
     def needs_rekey(self) -> bool:
         """Whether normalize_keys has to look at the library (once per key scheme)."""

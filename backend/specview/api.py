@@ -1067,7 +1067,7 @@ def create_app(home: Path | None = None, static_dir: Path | None = None) -> Fast
                 jobs[job_id]["state"] = "error"
                 raise
         threading.Thread(target=_run_chat, args=(job_id, conv, req, model), daemon=True).start()
-        return {"job": jobs[job_id], "chat_id": conv["id"]}
+        return {"job": _public_job(jobs[job_id]), "chat_id": conv["id"]}  # a copy: the worker is changing it
 
     def _run_chat(job_id: str, conv: dict, req: ChatRequest, model: intent.OpenAICompatIntentModel):
         from . import chat as chatmod

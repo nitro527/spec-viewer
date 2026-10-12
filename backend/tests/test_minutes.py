@@ -86,3 +86,29 @@ def test_document_viewer_only_serves_meeting_documents(tmp_path):
                          ("https://www.3gpp.org/ftp/tsg_ran/WG1_RL1/TSGR1_95/../../x", None)]:
         with pytest.raises(ValueError):
             minutes.document_html(folder, tdoc, tmp_path)
+
+
+def test_a_draft_report_is_rechecked_but_kept_when_nothing_better_comes(tmp_path, monkeypatch):
+    import json
+    import os
+    import time
+
+    from specview import minutes
+
+    folder = "https://www.3gpp.org/ftp/tsg_ran/WG1_RL1/TSGR1_120"
+    cache = tmp_path / "minutes" / f"{minutes.folder_name(folder)}.json"
+    cache.parent.mkdir(parents=True)
+    draft = {"v": 2, "meeting": "RAN1#120", "folder": folder, "url": f"{folder}/Report/Draft_v010.zip",
+             "items": [{"x": 1}], "tdocs": []}
+    cache.write_text(json.dumps(draft))
+    old = time.time() - 8 * 86400
+    os.utime(cache, (old, old))
+
+    def offline(*a, **k):
+        raise minutes.Unreachable("down")
+
+    monkeypatch.setattr(minutes, "report_url", offline)
+    assert minutes.fetch_report(folder, tmp_path)["items"] == [{"x": 1}]  # offline: still the draft
+    monkeypatch.setattr(minutes, "report_url", lambda f, s=None: None)
+    assert minutes.fetch_report(folder, tmp_path)["items"] == [{"x": 1}]  # report gone: draft kept, timer reset
+    assert json.loads(cache.read_text())["items"] == [{"x": 1}] and cache.stat().st_mtime > old + 86400

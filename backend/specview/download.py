@@ -151,9 +151,12 @@ def _extract_docx(zip_path: Path, out_dir: Path) -> list[Path]:
             target = out_dir / Path(name).name
             # a half-written file must not count as cached; private name: two jobs may extract the same version
             part = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.part")
-            with z.open(name) as src, open(part, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-            os.replace(part, target)
+            try:
+                with z.open(name) as src, open(part, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                os.replace(part, target)
+            finally:
+                part.unlink(missing_ok=True)
             targets.append(target)
     return [_convert_doc(t) if t.suffix.lower() == ".doc" else t for t in targets]
 
@@ -253,12 +256,15 @@ def _download(s: requests.Session, url: str, dest: Path, progress: Callable[[int
         total = int(r.headers.get("content-length") or 0)
         done = 0
         tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{threading.get_ident()}.part")  # private per download
-        with open(tmp, "wb") as f:
-            for chunk in r.iter_content(1 << 16):
-                f.write(chunk)
-                done += len(chunk)
-                if progress:
-                    progress(done, total)
-        if total and done < total:  # the server closed early without an error
-            raise requests.exceptions.ChunkedEncodingError(f"{url}: {done}/{total} bytes")
-        tmp.replace(dest)
+        try:
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(1 << 16):
+                    f.write(chunk)
+                    done += len(chunk)
+                    if progress:
+                        progress(done, total)
+            if total and done < total:  # the server closed early without an error
+                raise requests.exceptions.ChunkedEncodingError(f"{url}: {done}/{total} bytes")
+            tmp.replace(dest)
+        finally:
+            tmp.unlink(missing_ok=True)  # a failed try leaves no tens-of-MB leftovers

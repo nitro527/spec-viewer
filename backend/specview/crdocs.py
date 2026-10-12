@@ -148,8 +148,11 @@ def _write_atomic(path: Path, data: bytes) -> None:
     import threading
 
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.part")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _zip_ok(path: Path) -> bool:
