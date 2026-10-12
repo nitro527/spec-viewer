@@ -1,6 +1,6 @@
 // TR 38.822 UE features related to the selected clause (via CR work items and parameter names).
-import { useEffect, useState } from "react";
-import { api, type ClauseFeatures, type FeatureSection, type UEFeature } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { api, followJob, type ClauseFeatures, type FeatureSection, type Job, type UEFeature } from "../api";
 
 export function FeaturePanel({ spec, version, clauseKey }: { spec: string; version: string; clauseKey: string }) {
   const [data, setData] = useState<ClauseFeatures | null>(null);
@@ -14,16 +14,22 @@ export function FeaturePanel({ spec, version, clauseKey }: { spec: string; versi
     return () => { live = false; };
   }, [spec, version, clauseKey, reload]);
 
+  const stopJob = useRef<() => void>();
+  useEffect(() => () => stopJob.current?.(), []);
   const fetchFeatures = async () => {
-    const j = await api.fetchFeatures();
+    let j: Job;
+    try {
+      j = await api.fetchFeatures();
+    } catch (e) {
+      return setJob(`실패: ${String(e).replace(/^Error: /, "")}`);
+    }
     setJob("38.822 받는 중…");
-    const t = setInterval(async () => {
-      const cur = (await api.jobs()).find((x) => x.id === j.id);
-      if (!cur || cur.state === "running") return setJob(`38.822: ${cur?.message ?? ""}`);
-      clearInterval(t);
+    stopJob.current?.();
+    stopJob.current = followJob(j.id, (cur) => {
+      if (cur.state === "running") return setJob(`38.822: ${cur.message ?? ""}`);
       setJob(cur.state === "error" ? `실패: ${cur.message}` : null);
       setReload((n) => n + 1);
-    }, 1000);
+    });
   };
 
   if (!data) return null;

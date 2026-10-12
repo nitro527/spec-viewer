@@ -22,8 +22,9 @@ SYSTEM = (
     "and earlier AI analyses), meeting agreements and work item summaries - not your own memory of the specs. "
     "Search with English 3GPP terms (PUSCH, msgA, DM-RS, parameter names) even when the question is in another "
     "language; read the clauses you rely on; for 'when/why did this change' use clause_history, compare_clause, "
-    "get_cr and work_item. Cite every fact with the source tag exactly as a tool gave it, e.g. "
-    "[[38.211 §6.3.3.2 v19.5.0]], [[CR 38.211 0023]], [[WI NR_2step_RACH-Core]]. When the material does not "
+    "get_cr and work_item; for 'what changed between versions / in this release' use crs_between. Cite every fact with the source tag exactly as a tool gave it, e.g. "
+    "[[38.211 §6.3.3.2 v19.5.0]], [[CR 38.211 0023]], [[WI NR_2step_RACH-Core]] - one source per tag "
+    "([[CR 38.211 0042]] [[CR 38.211 0045]], not [[CR 38.211 0042, 0045]]). When the material does not "
     "answer the question, say so plainly. Answer in {language}; keep 3GPP terms and parameter names in English; "
     "use short markdown (headings, bullet lists)."
 )
@@ -31,7 +32,8 @@ SYSTEM = (
 TOOLS = [
     {"type": "function", "function": {
         "name": "list_specs", "description": "The downloaded specifications with their titles and versions.",
-        "parameters": {"type": "object", "properties": {}}}},
+        "parameters": {"type": "object", "properties": {  # some servers reject an empty properties object
+            "series": {"type": "string", "description": "optional filter, e.g. 38"}}}}},
     {"type": "function", "function": {
         "name": "search", "description": "Full-text search in the specs (latest version of each, or the given "
         "spec/version). Use English 3GPP terms. Returns clauses with a snippet and a source tag.",
@@ -58,6 +60,19 @@ TOOLS = [
             "old": {"type": "string", "description": "older version, e.g. 15.9.0"},
             "new": {"type": "string", "description": "newer version (default latest)"}},
             "required": ["spec", "clause", "old"]}}},
+    {"type": "function", "function": {
+        "name": "crs_between", "description": "What changed between two versions of a spec: the CRs in between "
+        "(title, category, work item, clauses, stored AI analysis), the changed clauses and stored release notes.",
+        "parameters": {"type": "object", "properties": {
+            "spec": {"type": "string"}, "old": {"type": "string", "description": "older version, e.g. 16.1.0"},
+            "new": {"type": "string", "description": "newer version (default latest)"}},
+            "required": ["spec", "old"]}}},
+    {"type": "function", "function": {
+        "name": "referenced_by", "description": "Paragraphs that cite a clause, in the same spec and in the other "
+        "downloaded specs (latest versions): what else is affected when that clause changes.",
+        "parameters": {"type": "object", "properties": {
+            "spec": {"type": "string"}, "clause": {"type": "string", "description": "clause number, e.g. 4.5"}},
+            "required": ["spec", "clause"]}}},
     {"type": "function", "function": {
         "name": "search_crs", "description": "Find change requests by words in their title, work item code, "
         "clauses or AI analysis.",
@@ -152,18 +167,22 @@ class SpecTools:
         fn = getattr(self, f"t_{name}", None)
         if fn is None:
             return json.dumps({"error": f"unknown tool {name}"})
-        try:
-            out = fn(**{k: v for k, v in args.items() if v not in (None, "")})
+        try:  # small models pass numbers (clause 6.3, version 16.2): every argument is text here
+            out = fn(**{k: str(v) for k, v in args.items() if v not in (None, "")})
         except KeyError as e:
             out = {"error": str(e).strip("'\"")}
         except TypeError as e:
             out = {"error": f"bad arguments: {e}"}
+        except Exception as e:  # noqa: BLE001 - the model gets the error and can try again
+            out = {"error": f"{type(e).__name__}: {e}"}
         text = json.dumps(out, ensure_ascii=False)
         return text if len(text) <= _MAX_RESULT else text[:_MAX_RESULT] + "…(truncated)"
 
-    def t_list_specs(self) -> list[dict]:
+    def t_list_specs(self, series: str | None = None) -> list[dict]:
         out = []
         for s in self.lib.specs():
+            if series and not s["number"].startswith(series.strip().rstrip(".") + "."):
+                continue
             vs = self._versions(s["number"])
             out.append({"spec": s["number"], "title": s.get("title"), "versions": len(vs),
                         "first": vs[0] if vs else None, "latest": vs[-1] if vs else None})
@@ -271,6 +290,29 @@ class SpecTools:
         return {"source": self._clause_tag(spec, e_new, new), "old": old, "new": new,
                 "changes": [c[:1500] for c in changed[:40]] or ["(no change)"]}
 
+    def t_crs_between(self, spec: str, old: str, new: str | None = None) -> dict:
+        spec = _norm_spec(spec)
+        vs = self._versions(spec)
+        old, new = old.lstrip("v"), self._version(spec, new)
+        if old not in vs:
+            raise KeyError(f"{spec} v{old} 는 받은 버전이 아닙니다: {', '.join(vs)}")
+        data = self.lib.release_input(spec, old, new)
+        rows = {(c["cr"], c["tdoc"]): c for c in self.lib.crs(spec)}
+        note = self.lib.release_note(spec, old, new)
+        return {"old": old, "new": new, "changed_clauses": data["changed_clauses"][:80],
+                "release_notes": {k: note.get(k) for k in ("overview", "features", "corrections", "impact")}
+                if note else None,
+                "crs": [{"source": self._cr_tag(spec, rows[(c["cr"], c["tdoc"])]), "version": c["version"],
+                         "category": c["cat"], "title": c["title"], "work_item": c["wi"], "clauses": c["clauses"],
+                         "analysis": (c["analysis"] or {}).get("summary")} for c in data["crs"][:60]]}
+
+    def t_referenced_by(self, spec: str, clause: str) -> dict:
+        spec = _norm_spec(spec)
+        hits = self.lib.referenced_by(spec, clause.lstrip("§ "))
+        return {"clause": clause, "count": len(hits), "citing": [
+            {"source": self._clause_tag(h["spec"], h, h["version"]), "text": h["snippet"].replace("[[", "").replace("]]", "")}
+            for h in hits[:40]]}
+
     def t_search_crs(self, query: str, spec: str | None = None) -> dict:
         words = [w.lower() for w in re.findall(r"[\w\-.]+", query) if len(w) > 1]
         specs = [_norm_spec(spec)] if spec else [s["number"] for s in self.lib.specs()]
@@ -324,13 +366,15 @@ class SpecTools:
 
 
 def _step_label(name: str, args: dict) -> str:
-    a = {k: v for k, v in args.items() if v}
+    a = {k: str(v) for k, v in args.items() if v}
     return {
         "search": lambda: f"검색: {a.get('query', '')}" + (f" ({a['spec']})" if a.get("spec") else ""),
         "read_clause": lambda: f"읽기: {a.get('spec', '')} §{a.get('clause', '')}",
         "clause_history": lambda: f"변경 이력: {a.get('spec', '')} §{a.get('clause', '')}",
         "compare_clause": lambda: f"비교: {a.get('spec', '')} §{a.get('clause', '')} v{a.get('old', '')}→{a.get('new', '최신')}",
         "search_crs": lambda: f"CR 찾기: {a.get('query', '')}",
+        "referenced_by": lambda: f"인용하는 곳: {a.get('spec', '')} §{a.get('clause', '')}",
+        "crs_between": lambda: f"버전 사이 CR: {a.get('spec', '')} v{a.get('old', '')}→{a.get('new', '최신')}",
         "get_cr": lambda: f"CR: {a.get('spec', '')} CR{a.get('cr', '')}",
         "work_item": lambda: f"WI: {a.get('wi', '')}",
         "list_specs": lambda: "받은 스펙 목록",
@@ -362,16 +406,85 @@ def _user_text(question: str, context: dict | None, tag: str | None = None) -> s
     return f"{head}\n\nQuestion: {question}"
 
 
+_BUDGET = 60000  # characters of tool results kept in full; older ones shrink to a stub (context window)
+
+
+def _tool_calls(msg: dict, step: int) -> list[dict]:
+    """Tool calls as every OpenAI-compatible server accepts them back: an id, type "function", arguments as a
+    JSON string (some servers send a dict, leave out the id or the type); extra fields (e.g. Gemini's thought
+    signature) are kept."""
+    out = []
+    for i, tc in enumerate(msg.get("tool_calls") or []):
+        fn = dict(tc.get("function") or {})
+        args = fn.get("arguments")
+        if not isinstance(args, str):
+            fn["arguments"] = json.dumps(args if isinstance(args, dict) else {}, ensure_ascii=False)
+        out.append({**tc, "id": tc.get("id") or f"call_{step}_{i}", "type": "function", "function": fn})
+    return out
+
+
+def _args(tc: dict) -> dict:
+    try:
+        args = json.loads(tc["function"].get("arguments") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return args if isinstance(args, dict) else {}
+
+
+def _shrink(messages: list[dict]) -> None:
+    """Keep the newest tool results whole and shrink older ones once the total passes the budget."""
+    total = 0
+    for m in reversed(messages):
+        if m["role"] != "tool":
+            continue
+        total += len(m["content"])
+        if total > _BUDGET and not m["content"].startswith('{"omitted"'):
+            m["content"] = json.dumps({"omitted": "earlier result shortened to save space; call the tool again "
+                                                  "if you still need it"})
+
+
+_RAW_TOOL_CALL = re.compile(
+    r"<tool_call>|<\|tool[▁_]call|<function=|^\s*\{\s*\"name\"\s*:\s*\"(?:search|read_clause|clause_history|"
+    r"compare_clause|crs_between|search_crs|get_cr|work_item|list_specs|referenced_by)\"", re.M)
+
+
+def _cut_note(msg: dict) -> str:
+    """The answer, saying so when the server stopped it at its output limit (the text just ends otherwise)."""
+    text = msg.get("content") or ""
+    if msg.get("finish_reason") == "length" and text:
+        text += "\n\n_(답변이 모델의 출력 길이 제한에 걸려 잘렸습니다. 더 좁혀서 물어보세요.)_"
+    return text
+
+
+class Stopped(Exception):
+    """The user pressed stop: raised between model requests (the one in flight is not cut off)."""
+
+
 def answer(model, lib, question: str, history: list[dict] | None = None, context: dict | None = None,
-           language: str = "Korean", max_steps: int = 10, step: Callable[[str], None] | None = None) -> dict:
-    """Answer one question; ``history`` is the earlier turns ({role, content}). Returns
-    {"answer", "sources", "steps", "mode", "model"}."""
-    from .intent import ToolsUnsupported
+           language: str = "Korean", max_steps: int = 10, step: Callable[[str], None] | None = None,
+           known_sources: dict | None = None, should_stop: Callable[[], bool] | None = None,
+           on_partial: Callable[[str, dict], None] | None = None) -> dict:
+    """Answer one question; ``history`` is the earlier turns ({role, content}); ``known_sources`` the sources
+    earlier answers cited (a follow-up may cite them again). Returns {"answer", "sources", "steps", "mode",
+    "model"}."""
+    from .intent import LLMError, ToolsUnsupported
 
     tools = SpecTools(lib)
+    tools.sources.update(known_sources or {})
     steps: list[str] = []
 
+    def check():
+        if should_stop and should_stop():
+            raise Stopped()
+
+    def ask(msgs, tools_=None):  # stream the answer text when someone is watching (the chat window)
+        if not on_partial:
+            return model.complete(msgs, tools_)
+        on_partial("", tools.sources)  # a new request: what streamed before was a tool-calling turn
+        return model.complete(msgs, tools_, on_text=lambda t: on_partial(t, tools.sources))
+
     def note(s: str):
+        check()
         steps.append(s)
         if step:
             step(s)
@@ -382,29 +495,40 @@ def answer(model, lib, question: str, history: list[dict] | None = None, context
         messages.append({"role": m["role"], "content": m["content"][:4000]})
     messages.append({"role": "user", "content": _user_text(question, context, tag)})
     try:
-        for _ in range(max_steps):
-            msg = model.complete(messages, TOOLS)
-            calls = msg.get("tool_calls") or []
+        for n in range(max_steps):
+            check()
+            try:
+                msg = ask(messages, TOOLS)
+            except LLMError as e:  # context window: answer with what was found so far
+                if n == 0 or not re.search(r"context|token|length|too long|maximum", str(e), re.I):
+                    raise
+                break
+            calls = _tool_calls(msg, n)
+            if not calls and _RAW_TOOL_CALL.search(msg.get("content") or ""):
+                # a server without a tool-call parser (vLLM without --tool-call-parser): the model wrote its
+                # call as text. Answer from search results instead of showing that text.
+                raise ToolsUnsupported("tool call came back as text")
             if not calls:
-                return {"answer": msg["content"], "sources": tools.sources, "steps": steps, "mode": "tools",
+                return {"answer": _cut_note(msg), "sources": tools.sources, "steps": steps, "mode": "tools",
                         "model": msg.get("model")}
-            messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
+            messages.append({k: v for k, v in msg.items() if k not in ("model", "finish_reason")} | {"role": "assistant",
+                            "content": msg.get("content") or "", "tool_calls": calls})
             for tc in calls:
-                fn = tc.get("function") or {}
-                try:
-                    args = json.loads(fn.get("arguments") or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                note(_step_label(fn.get("name", ""), args))
-                messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "name": fn.get("name", ""),
-                                 "content": tools.call(fn.get("name", ""), args)})
+                name, args = tc["function"].get("name", ""), _args(tc)
+                note(_step_label(name, args))
+                messages.append({"role": "tool", "tool_call_id": tc["id"], "name": name,
+                                 "content": tools.call(name, args)})
+            _shrink(messages)
         messages.append({"role": "user", "content": f"Answer now with the material above, in {language}."})
-        msg = model.complete(messages)
-        return {"answer": msg["content"], "sources": tools.sources, "steps": steps, "mode": "tools",
+        _shrink(messages)
+        check()
+        msg = ask(messages)
+        return {"answer": _cut_note(msg), "sources": tools.sources, "steps": steps, "mode": "tools",
                 "model": msg.get("model")}
     except ToolsUnsupported:
         note("이 LLM 서버는 도구 호출을 지원하지 않아 검색 결과를 한 번에 넘겨 답합니다")
-        return _answer_without_tools(model, tools, question, history, context, language, note, steps, tag)
+        return _answer_without_tools(model, tools, question, history, context, language, note, steps, tag,
+                                     final=lambda m: ask(m))
 
 
 _QUERY_PROMPT = (
@@ -415,7 +539,7 @@ _QUERY_PROMPT = (
 
 
 def _answer_without_tools(model, tools: SpecTools, question, history, context, language, note, steps,
-                          tag: str | None = None) -> dict:
+                          tag: str | None = None, final=None) -> dict:
     from .intent import _parse_json
 
     msg = model.complete([{"role": "system", "content": _QUERY_PROMPT},
@@ -456,6 +580,6 @@ def _answer_without_tools(model, tools: SpecTools, question, history, context, l
     for m in (history or [])[-6:]:
         messages.append({"role": m["role"], "content": m["content"][:3000]})
     messages.append({"role": "user", "content": f"<material>\n{body}\n</material>\n\n{_user_text(question, context, tag)}"})
-    out = model.complete(messages)
-    return {"answer": out["content"], "sources": tools.sources, "steps": steps, "mode": "retrieval",
+    out = (final or model.complete)(messages)
+    return {"answer": _cut_note(out), "sources": tools.sources, "steps": steps, "mode": "retrieval",
             "model": out.get("model")}

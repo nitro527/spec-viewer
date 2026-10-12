@@ -1,6 +1,6 @@
 // One open specification: toolbar, TOC, reading/compare view, info panel and timeline.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, type CR, type Note, type SearchHit, type TocEntry, type VersionInfo } from "../api";
+import { api, followJob, type CR, type Job, type Note, type SearchHit, type TocEntry, type VersionInfo } from "../api";
 import { highlightCss, highlighted, versionColors } from "../colors";
 import { CommandPalette } from "./CommandPalette";
 import { CompareView, VersionSelect } from "./CompareView";
@@ -20,6 +20,7 @@ export interface TabState {
   label?: string;
   jumpTo?: string; // clause number to open at
   jumpVersion?: string; // ...in this version (switches the tab's version first)
+  jumpBaseline?: string; // ...highlighting changes after this version (a watched clause: "since I marked it")
 }
 
 interface Props {
@@ -34,6 +35,8 @@ interface Props {
 export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOpenSpec }: Props) {
   const spec = tab.spec!;
   const [versions, setVersions] = useState<VersionInfo[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
   const [version, setVersion] = useState<string | undefined>(tab.version);
   const [baseline, setBaseline] = useState<string>("");
   const [mode, setMode] = useState<Mode>("history");
@@ -47,28 +50,36 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
   const [cmp, setCmp] = useState<[string, string] | null>(null);
   const [crJob, setCrJob] = useState<string | null>(null);
   const [notes, setNotes] = useState<Map<string, Note>>(new Map());
+  const [notesLoaded, setNotesLoaded] = useState(false);
   const [bookmarkedOnly, setBookmarkedOnly] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const view = useRef<HistoryViewHandle>(null);
   const pendingJump = useRef<string | undefined>(tab.jumpTo);
+  const wantBaseline = useRef<string | undefined>(tab.jumpBaseline);
   const tocVersion = useRef<string | undefined>(undefined);
 
   useEffect(() => {
+    setLoadError(null);
+    const fail = (e: unknown) => setLoadError(String(e).replace(/^Error: /, ""));
     api.versions(spec).then((vs) => {
       setVersions(vs);
       if (!vs.length) return;
       setVersion((v) => v ?? vs[vs.length - 1].version);
-      setBaseline(vs[0].version);
-    });
-    api.crs(spec).then(setCrs);
-    api.notes(spec).then((ns) => setNotes(new Map(ns.map((n) => [n.clause_key, n]))));
-  }, [spec]);
+      const b = wantBaseline.current;
+      wantBaseline.current = undefined;
+      setBaseline(b && vs.some((v) => v.version === b) ? b : vs[0].version);
+    }, fail);
+    api.crs(spec).then(setCrs, () => undefined);  // the viewer works without them
+    api.notes(spec).then((ns) => { setNotes(new Map(ns.map((n) => [n.clause_key, n]))); setNotesLoaded(true); }, fail);
+  }, [spec, reload]);
 
   useEffect(() => {
     if (!version) return;
     onUpdate({ version, label: `${spec} v${version}` });
     setSelection(null);
-    api.toc(spec, version).then((t) => { tocVersion.current = version; setToc(t); });
+    let live = true;  // quick version steps (Alt+→): only the TOC of the version shown now may land
+    api.toc(spec, version).then((t) => { if (live) { tocVersion.current = version; setToc(t); } }, () => undefined);
+    return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spec, version]);
 
@@ -80,8 +91,14 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
       wantVersion.current = tab.jumpVersion;  // jump once that version's TOC is loaded
       setVersion(tab.jumpVersion);
     }
-    if (tab.jumpTo || tab.jumpVersion) onUpdate({ jumpTo: undefined, jumpVersion: undefined });  // consumed
-  }, [tab.jumpTo, tab.jumpVersion]);
+    if (tab.jumpBaseline) {
+      if (versions.some((v) => v.version === tab.jumpBaseline)) setBaseline(tab.jumpBaseline);
+      else wantBaseline.current = tab.jumpBaseline;  // versions not loaded yet
+    }
+    if (tab.jumpTo || tab.jumpVersion || tab.jumpBaseline) {
+      onUpdate({ jumpTo: undefined, jumpVersion: undefined, jumpBaseline: undefined });  // consumed
+    }
+  }, [tab.jumpTo, tab.jumpVersion, tab.jumpBaseline]);
   useEffect(() => {  // runs once the TOC is there, or right away when the tab is already open
     const target = pendingJump.current;
     if (!target || !toc.length) return;
@@ -90,15 +107,20 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
       wantVersion.current = undefined;
     }
     const e = toc.find((t) => t.number === target || t.key === target);
-    if (e) setTimeout(() => view.current?.scrollToOrd(e.ord), 50);
+    if (e) setTimeout(() => jump(e.ord), 50);  // jump() leaves CR / Compare / Statistics mode first
     pendingJump.current = undefined;
   }, [toc, tab.jumpTo]);
 
+  // Ctrl+F / Ctrl+P count up in App; a tab opens the bar only for a press made while it is the active tab.
+  const seenFind = useRef(findSignal);
+  const seenPalette = useRef(paletteSignal);
   useEffect(() => {
-    if (active && findSignal) setFindOpen(true);
+    if (active && findSignal !== seenFind.current) setFindOpen(true);
+    seenFind.current = findSignal;
   }, [findSignal, active]);
   useEffect(() => {
-    if (active && paletteSignal) setPaletteOpen(true);
+    if (active && paletteSignal !== seenPalette.current) setPaletteOpen(true);
+    seenPalette.current = paletteSignal;
   }, [paletteSignal, active]);
 
   // Alt+←/→ steps through versions.
@@ -141,20 +163,32 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
     if (e) jump(e.ord);
   }, [spec, toc, jump, onOpenSpec]);
 
+  const stopCrJob = useRef<() => void>();
+  useEffect(() => () => stopCrJob.current?.(), []);
   const fetchCrs = useCallback(async () => {
-    const job = await api.fetchCrs(spec);
+    let job: Job;
+    try {
+      job = await api.fetchCrs(spec);
+    } catch (e) {
+      return setCrJob(`실패: ${String(e).replace(/^Error: /, "")}`);
+    }
     setCrJob("CR 표지 받는 중…");
-    const t = setInterval(async () => {
-      const j = (await api.jobs()).find((x) => x.id === job.id);
-      if (!j) return;
+    stopCrJob.current?.();
+    stopCrJob.current = followJob(job.id, (j) => {
       setCrJob(j.state === "running" ? `CR 표지 받는 중 ${j.done}/${j.total || "?"}` : j.state === "error" ? `실패: ${j.message}` : null);
-      if (j.state !== "running") { clearInterval(t); api.crs(spec).then(setCrs); }
-    }, 1000);
+      if (j.state !== "running") api.crs(spec).then(setCrs, () => undefined);
+    });
   }, [spec]);
 
   const bookmarks = useMemo(() => new Set([...notes.values()].filter((n) => n.bookmark).map((n) => n.clause_key)), [notes]);
   const updateNote = useCallback(async (key: string, body: { bookmark?: boolean; text?: string }) => {
-    const saved = await api.saveNote(spec, key, { ...body, version });
+    let saved: Note | null;
+    try {
+      saved = await api.saveNote(spec, key, { ...body, version });
+    } catch (e) {
+      alert(`메모·북마크를 저장하지 못했습니다: ${String(e).replace(/^Error: /, "")}`);
+      return;
+    }
     setNotes((m) => {
       const next = new Map(m);
       if (saved) next.set(key, saved); else next.delete(key);
@@ -177,7 +211,13 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
   }, [mode, version, toc]);
 
   if (!versions.length || !version) {
-    return <div className="empty">{versions.length === 0 ? `${spec} 를 불러오는 중…` : ""}</div>;
+    return (
+      <div className="empty">
+        {loadError ? <>{spec} 를 불러오지 못했습니다: {loadError}{" "}
+          <button className="link" onClick={() => setReload((n) => n + 1)}>다시 시도</button></>
+          : versions.length === 0 ? `${spec} 를 불러오는 중…` : ""}
+      </div>
+    );
   }
   const [cmpOld, cmpNew] = cmp ?? [baseline === version ? versions[Math.max(0, versions.length - 2)].version : baseline, version];
 
@@ -255,7 +295,7 @@ export function SpecTab({ tab, active, findSignal, paletteSignal, onUpdate, onOp
           <InfoPanel spec={spec} selection={selection} version={version} baseline={baseline} crsByVersion={crsByVersion}
                      colors={colors} onClose={() => setSelection(null)} onFetchCrs={fetchCrs} fetching={crJob}
                      note={selection ? notes.get(selection.clause.key) : undefined}
-                     onSaveNote={(key, text) => updateNote(key, { text })} />
+                     onSaveNote={(key, text) => updateNote(key, { text })} onXref={onXref} notesReady={notesLoaded} />
         )}
       </div>
 

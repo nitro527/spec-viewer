@@ -46,7 +46,7 @@ export function SpecPicker({ active, onOpen, onOpenClause, onGoHome }: {
         {tabs}
         {specs.length > 6 && (
           <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="번호나 제목으로 찾기 (예: 38.21, PDSCH)"
-                 onKeyDown={(e) => e.key === "Enter" && shown.length === 1 && onOpen(shown[0].number)} />
+                 onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && shown.length === 1 && onOpen(shown[0].number)} />
         )}
       </div>
       <div className="picker-grid">

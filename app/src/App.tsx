@@ -1,6 +1,6 @@
 // Shell: a fixed main screen (downloads, settings) plus viewer tabs. A new viewer tab shows every downloaded
 // spec at a glance; cross-references open more viewer tabs.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type ChatContext } from "./api";
 import { ASK_EVENT } from "./ask";
 import { ChatView } from "./components/ChatView";
@@ -46,16 +46,25 @@ export function App() {
     setActiveId(HOME);
   }, []);
 
-  const openSpec = useCallback(async (spec: string, clause?: string, version?: string) => {
+  const opening = useRef(new Set<string>());
+  const openSpec = useCallback(async (spec: string, clause?: string, version?: string, baseline?: string) => {
     const existing = tabs.find((t) => t.spec === spec);
     if (existing) {
-      update(existing.id, { jumpTo: clause, jumpVersion: version });
+      update(existing.id, { jumpTo: clause, jumpVersion: version, jumpBaseline: baseline });
       setActiveId(existing.id);
       return;
     }
-    const known = (await api.specs()).some((s) => s.number === spec);
-    if (known) open(newTab({ spec, jumpTo: clause, version, label: spec }));
-    else goHome(spec); // not downloaded yet: suggest it on the main screen
+    if (opening.current.has(spec)) return;  // a double click: the first one is opening it
+    opening.current.add(spec);
+    try {
+      const known = (await api.specs()).some((s) => s.number === spec);
+      if (known) open(newTab({ spec, jumpTo: clause, version, label: spec, jumpBaseline: baseline }));
+      else goHome(spec); // not downloaded yet: suggest it on the main screen
+    } catch {
+      goHome(spec);
+    } finally {
+      opening.current.delete(spec);
+    }
   }, [tabs, open, update, goHome]);
 
   useEffect(() => {
@@ -73,14 +82,15 @@ export function App() {
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
       const k = e.key.toLowerCase();
-      if (k === "f" && activeId !== HOME && activeId !== CHAT) { e.preventDefault(); setFindSignal((n) => n + 1); }
-      if (k === "p" && activeId !== HOME && activeId !== CHAT) { e.preventDefault(); setPaletteSignal((n) => n + 1); }
+      const viewer = tabs.some((t) => t.id === activeId && t.spec);  // a tab still picking a spec has no find bar
+      if (k === "f" && viewer) { e.preventDefault(); setFindSignal((n) => n + 1); }
+      if (k === "p" && viewer) { e.preventDefault(); setPaletteSignal((n) => n + 1); }
       if (k === "t") { e.preventDefault(); open(newTab()); }
       if (k === "w" && activeId !== HOME && activeId !== CHAT) { e.preventDefault(); close(activeId); }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [activeId, open, close]);
+  }, [activeId, open, close, tabs]);
 
   return (
     <div className="app">
@@ -100,7 +110,7 @@ export function App() {
         <button className="tab-add" onClick={() => open(newTab())} title="새 뷰어 탭 (Ctrl+T)">+</button>
       </div>
       <div className="tabpane" style={{ display: activeId === HOME ? "flex" : "none" }}>
-        <Home prefill={homePrefill} active={activeId === HOME} onOpen={(spec) => openSpec(spec)} />
+        <Home prefill={homePrefill} active={activeId === HOME} onOpen={openSpec} />
       </div>
       {chatOpened && (
         <div className="tabpane" style={{ display: activeId === CHAT ? "flex" : "none" }}>
@@ -111,8 +121,8 @@ export function App() {
       {tabs.map((t) => (
         <div key={t.id} className="tabpane" style={{ display: t.id === activeId ? "flex" : "none" }}>
           {t.spec ? (
-            <SpecTab tab={t} active={t.id === activeId} findSignal={t.id === activeId ? findSignal : 0}
-                     paletteSignal={t.id === activeId ? paletteSignal : 0}
+            <SpecTab tab={t} active={t.id === activeId} findSignal={findSignal}
+                     paletteSignal={paletteSignal}
                      onUpdate={(p) => update(t.id, p)} onOpenSpec={openSpec} />
           ) : (
             <SpecPicker active={t.id === activeId} onOpen={(spec) => update(t.id, { spec, label: spec })}

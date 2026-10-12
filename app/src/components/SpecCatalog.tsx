@@ -1,5 +1,5 @@
 // Download picker: every TS/TR of a series as a button, grouped by area, with the common ones up front.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type CatalogSpec } from "../api";
 
 const SERIES = [
@@ -32,14 +32,22 @@ export function SpecCatalog({ selected, downloaded, focus, onToggle }: {
   const [series, setSeries] = useState("38");
   const [cat, setCat] = useState<Record<string, CatalogSpec[]>>({});
   const [error, setError] = useState<string | null>(null);
+  const shown = useRef(series);
+  shown.current = series;
+  const setSeriesError = (s: string, e: string) => { if (shown.current === s) setError(e); };  // not under another series
   const [q, setQ] = useState("");
   const [showWithdrawn, setShowWithdrawn] = useState(false);
 
-  useEffect(() => { if (focus) setSeries(focus.slice(0, 2)); }, [focus]);
+  // a reference to a spec of another series (21.905, 23.501) has no catalog here: the typed-number box takes it
+  useEffect(() => { if (focus && SERIES.some((s) => s.id === focus.slice(0, 2))) setSeries(focus.slice(0, 2)); }, [focus]);
+  const loading = useRef(new Set<string>());
   useEffect(() => {
-    if (cat[series]) return;
+    if (cat[series] || loading.current.has(series)) return;  // one request per series, also when switching back
     setError(null);
-    api.catalog(series).then((rows) => setCat((c) => ({ ...c, [series]: rows })), (e) => setError(String(e).replace(/^Error: /, "")));
+    loading.current.add(series);
+    const asked = series;
+    api.catalog(asked).then((rows) => setCat((c) => ({ ...c, [asked]: rows })),
+      (e) => setSeriesError(asked, String(e).replace(/^Error: /, ""))).finally(() => loading.current.delete(asked));
   }, [series, cat]);
 
   const [refreshing, setRefreshing] = useState(false);

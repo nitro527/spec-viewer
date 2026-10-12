@@ -11,25 +11,29 @@ export function FindBar({ spec, version, colors, onGo, onOpenAt, onClose }: {
   const [phrase, setPhrase] = useState<PhraseHistory | null>(null);
   const [q, setQ] = useState("");
   const [hits, setHits] = useState<SearchHit[] | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
   const [idx, setIdx] = useState(0);
   const jumped = useRef(false);
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => input.current?.focus(), []);
   useEffect(() => {
-    if (q.trim().length < 2) return setHits(null);
+    setHits(null);  // Enter must not jump to the hits of the previous query
+    setFailed(null);
+    if (q.trim().length < 2) return;
     let live = true;  // a slow reply for an earlier query must not replace the hits of this one
     const t = setTimeout(() => api.search(spec, version, q).then((h) => {
       if (!live) return;
       setHits(h); setIdx(0); jumped.current = false;
-    }), 200);
+    }, (e) => live && setFailed(String(e).replace(/^Error: /, ""))), 200);
     return () => { live = false; clearTimeout(t); };
   }, [q, spec, version]);
   useEffect(() => {
     setPhrase(null);
     if (!byVersion || q.trim().length < 2) return;
     let live = true;
-    const t = setTimeout(() => api.phraseHistory(spec, q).then((h) => live && setPhrase(h), () => {}), 250);
+    const t = setTimeout(() => api.phraseHistory(spec, q).then((h) => live && setPhrase(h),
+      (e) => live && setFailed(String(e).replace(/^Error: /, ""))), 250);
     return () => { live = false; clearTimeout(t); };
   }, [q, spec, byVersion]);
 
@@ -42,13 +46,12 @@ export function FindBar({ spec, version, colors, onGo, onOpenAt, onClose }: {
   };
 
   return (
-    <div className="findbar">
+    <div className="findbar" onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}>
       <div className="find-row">
         <input ref={input} value={q} placeholder="스펙 전체 검색 (Enter: 다음, Shift+Enter: 이전)"
                onChange={(e) => setQ(e.target.value)}
                onKeyDown={(e) => {
-                 if (e.key === "Enter") go(!jumped.current ? idx : e.shiftKey ? idx - 1 : idx + 1);
-                 if (e.key === "Escape") onClose();
+                 if (e.key === "Enter" && !e.nativeEvent.isComposing) go(!jumped.current ? idx : e.shiftKey ? idx - 1 : idx + 1);
                }} />
         <span className="muted small">{hits ? `${hits.length ? idx + 1 : 0}/${hits.length}` : ""}</span>
         <button onClick={() => go(idx - 1)} title="이전">↑</button>
@@ -57,7 +60,8 @@ export function FindBar({ spec, version, colors, onGo, onOpenAt, onClose }: {
                 title="이 문구(정확히 일치)가 버전마다 어느 절에 있었는지: 처음 나온 버전, 생기고 사라진 절">버전별</button>
         <button onClick={onClose} title="닫기">✕</button>
       </div>
-      {byVersion && q.trim().length >= 2 && (
+      {failed && <p className="small status-error">검색하지 못했습니다: {failed}</p>}
+      {byVersion && q.trim().length >= 2 && !failed && (
         phrase ? <PhraseTimeline h={phrase} colors={colors} onOpenAt={onOpenAt} />
           : <p className="muted small phrase-loading">버전별로 찾는 중…</p>
       )}

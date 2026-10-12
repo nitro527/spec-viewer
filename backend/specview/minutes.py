@@ -13,7 +13,9 @@ meetings' Tdoc number ranges).
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 import zipfile
 from pathlib import Path
 from urllib.parse import unquote
@@ -57,7 +59,14 @@ def tdoc_value(tdoc: str) -> int:
 
 # ---------------------------------------------------------------- meetings and Tdoc ranges
 
+class Unreachable(Exception):
+    """3gpp.org did not answer (network, timeout, 5xx): unlike a 404 nothing is known, so nothing is cached."""
+
+
 def _get(session, url: str) -> requests.Response | None:
+    """The response, or None when the file is not there (404/403); raises Unreachable when the server could not
+    be reached, so a network hiccup is never cached as "no such document"."""
+    last = None
     for _ in range(3):
         try:
             r = session.get(url, timeout=120)
@@ -65,14 +74,32 @@ def _get(session, url: str) -> requests.Response | None:
                 return r
             if r.status_code in (403, 404):
                 return None
-        except requests.RequestException:
-            pass
-    return None
+            last = f"HTTP {r.status_code}"
+        except requests.RequestException as e:
+            last = str(e)
+    raise Unreachable(f"{url}: {last}")
+
+
+_MEETINGS: dict[str, tuple[float, list[str]]] = {}  # wg -> (time, folders): listed once a day per process
 
 
 def list_meetings(wg: str, session=None) -> list[str]:
     """Regular meeting folders of a WG ("1".."5", or "P" for TSG RAN) in order (ad hoc meetings are left out)."""
-    s = session or new_session()
+    import time
+
+    hit = _MEETINGS.get(wg)
+    if hit and time.time() - hit[0] < 86400:
+        return hit[1]
+    try:
+        out = _list_meetings(wg, session or new_session())
+    except Unreachable:
+        return hit[1] if hit else []
+    if out:
+        _MEETINGS[wg] = (time.time(), out)
+    return out
+
+
+def _list_meetings(wg: str, s) -> list[str]:
     if wg == "P":
         r = _get(s, f"{FTP}/TSG_RAN/")
         names = {n for n in re.findall(r"/(TSGR_[0-9A-Za-z_-]+)/?\"", r.text) if _TSG_FOLDER.match(n)} if r else set()
@@ -94,28 +121,40 @@ class TdocIndex:
 
     def __init__(self, cache_dir: Path, session=None):
         self.file = Path(cache_dir) / "minutes" / "tdoc_ranges.json"
-        self.ranges: dict[str, list[int]] = json.loads(self.file.read_text()) if self.file.exists() else {}
+        raw = json.loads(self.file.read_text()) if self.file.exists() else {}
+        # folder -> {"r": [lowest, highest Tdoc] or [], "t": when listed}; files of older versions held bare lists
+        self.ranges: dict[str, dict] = {k: v if isinstance(v, dict) else {"r": v, "t": 0} for k, v in raw.items()}
         self.s = session or new_session()
 
-    def _range(self, folder: str) -> list[int] | None:
-        if folder not in self.ranges:
-            r = _get(self.s, f"{folder}/Docs/")
+    def _range(self, folder: str, recent: bool = False) -> list[int] | None:
+        """Lowest and highest Tdoc number in a meeting's Docs folder. A folder of one of the latest meetings
+        (still filling up during and after the meeting) is listed again after two days, an empty one after a
+        week; older meetings are final."""
+        import time
+
+        e = self.ranges.get(folder)
+        stale = e is not None and time.time() - e["t"] > (2 * 86400 if recent else 7 * 86400 if not e["r"] else 1e18)
+        if e is None or stale:
+            try:
+                r = _get(self.s, f"{folder}/Docs/")
+            except Unreachable:
+                return e["r"] or None if e else None  # not recorded: asked again next time
             vals = [tdoc_value(f"R{m[0]}-{m[1]}") for m in _ANY_TDOC.findall(r.text)] if r is not None else []
-            self.ranges[folder] = [min(vals), max(vals)] if vals else []
+            self.ranges[folder] = e = {"r": [min(vals), max(vals)] if vals else [], "t": time.time()}
             self.file.parent.mkdir(parents=True, exist_ok=True)
             self.file.write_text(json.dumps(self.ranges))
-        return self.ranges[folder] or None
+        return e["r"] or None
 
     def meeting_of(self, tdoc: str) -> str | None:
         m = _ANY_TDOC.match(tdoc)
         if not m:
             return None
         v = tdoc_value(tdoc)
-        meetings = list_meetings(m.group(1), self.s)
+        meetings = list(list_meetings(m.group(1), self.s))  # a copy: the list is shared, cached for a day
         lo, hi = 0, len(meetings) - 1
         while lo <= hi:
             mid = (lo + hi) // 2
-            rg = self._range(meetings[mid])
+            rg = self._range(meetings[mid], recent=mid >= len(meetings) - 3)
             if rg is None:  # empty folder: look at a neighbour instead
                 meetings.pop(mid)
                 hi -= 1
@@ -130,6 +169,13 @@ class TdocIndex:
 
 
 # ---------------------------------------------------------------- reports
+
+def _report_url_or_folder(folder: str) -> str:
+    try:
+        return report_url(folder) or f"{folder}/Report/"
+    except Unreachable:
+        return f"{folder}/Report/"
+
 
 def report_url(folder: str, session=None) -> str | None:
     """The final report of a meeting (else its latest draft)."""
@@ -199,21 +245,53 @@ def parse_report(docx: Path) -> list[dict]:
 
 
 def fetch_report(folder: str, cache_dir: Path, session=None) -> dict | None:
-    """Parsed report of one meeting, cached as JSON (an empty file marks "no report")."""
+    """Parsed report of one meeting, cached as JSON ({"none": true} marks "no report").
+
+    Final minutes come out weeks after a meeting, so a meeting with no report yet, or only a draft, is looked
+    at again weekly for half a year after it was first asked for. A recheck that finds nothing better (or
+    cannot reach 3gpp.org) keeps what was cached."""
+    import time
+
     cache = Path(cache_dir) / "minutes" / f"{folder_name(folder)}.json"
+    cached, first = None, time.time()
     if cache.exists():
         data = json.loads(cache.read_text(encoding="utf-8"))
-        if not data or data.get("v") == 2:
-            return data or None  # older cache entries lack the Tdoc list: fetch again
+        first = data.get("t0") or cache.stat().st_mtime
+        if not data or data.get("none") or data.get("v") == 2:  # older entries lack the Tdoc list: fetch again
+            cached = data if data.get("v") == 2 else None
+            final = cached is not None and "final" in (cached.get("url") or "").lower()
+            recheck = (not final and time.time() - cache.stat().st_mtime > 7 * 86400
+                       and time.time() - first < 180 * 86400)
+            if not recheck:
+                return cached
+
+    def keep() -> dict | None:  # nothing new: the cached report (if any) stays, and the week starts again
+        if cache.exists():
+            os.utime(cache)
+        return cached
+
     s = session or new_session()
-    url = report_url(folder, s)
     result = None
-    r = _get(s, url) if url else None
+    try:
+        url = report_url(folder, s)
+        r = _get(s, url) if url else None
+    except Unreachable:
+        return cached  # not marked: asked again next time
     if r is not None and r.content[:2] == b"PK":
+        if cached and cached.get("url") == url:
+            return keep()  # the same draft as before
         work = cache.parent / folder_name(folder)
         work.mkdir(parents=True, exist_ok=True)
         zp = work / "report.zip"
-        zp.write_bytes(r.content)
+        part = zp.with_name(f"report.{os.getpid()}.{threading.get_ident()}.part")
+        try:
+            part.write_bytes(r.content)
+            os.replace(part, zp)  # never a half-written zip under the final name
+        finally:
+            part.unlink(missing_ok=True)
+        if not zipfile.is_zipfile(zp):
+            zp.unlink(missing_ok=True)
+            return cached  # cut off: fetched again next time
         with zipfile.ZipFile(zp) as z:
             docs = [n for n in z.namelist() if n.lower().endswith((".docx", ".doc")) and not n.startswith("__MACOSX")]
             if docs:
@@ -225,13 +303,15 @@ def fetch_report(folder: str, cache_dir: Path, session=None) -> dict | None:
                     try:
                         doc = _convert_doc(doc)
                     except LegacyDocError:
-                        return None  # not cached: may work once LibreOffice/Word is there
+                        return cached  # may work once LibreOffice/Word is there
                 xl = [n for n in z.namelist() if n.lower().endswith(".xlsx") and "tdoc" in n.lower()]
                 tdoc_list = parse_tdoc_list(z.read(xl[0])) if xl else []
                 result = {"v": 2, "meeting": meeting_label(folder), "folder": folder, "url": url,
-                          "items": parse_report(doc), "tdocs": tdoc_list}
+                          "items": parse_report(doc), "tdocs": tdoc_list, "t0": first}
+    if result is None and cached:
+        return keep()
     cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(result or {}, ensure_ascii=False), encoding="utf-8")
+    cache.write_text(json.dumps(result or {"none": True, "t0": first}, ensure_ascii=False), encoding="utf-8")
     return result
 
 
@@ -305,7 +385,10 @@ def fetch_tdoc_text(folder: str, tdoc: str, cache_dir: Path, session=None) -> li
     if cache.exists():
         return json.loads(cache.read_text(encoding="utf-8")) or None
     s = session or new_session()
-    r = _get(s, f"{folder}/Docs/{tdoc}.zip")
+    try:
+        r = _get(s, f"{folder}/Docs/{tdoc}.zip")
+    except Unreachable:
+        return None  # not cached
     paras = None
     if r is not None and r.content[:2] == b"PK":
         import io
@@ -484,4 +567,4 @@ def document_html(folder: str, tdoc: str | None, cache_dir: Path) -> dict:
         title = f"{row['title']} ({row['source']})" if row else ""
     return {"meeting": meeting_label(folder), "tdoc": tdoc, "title": title or ("Meeting report" if not tdoc else ""),
             "html": cached.read_text(encoding="utf-8"),
-            "url": f"{folder}/Docs/{tdoc}.zip" if tdoc else report_url(folder)}
+            "url": f"{folder}/Docs/{tdoc}.zip" if tdoc else _report_url_or_folder(folder)}

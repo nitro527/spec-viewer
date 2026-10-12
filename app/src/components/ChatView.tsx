@@ -1,68 +1,40 @@
 // AI chat over the downloaded material. The model looks things up (search, clauses, history, CRs, work items)
 // and answers with source tags [[38.211 §6.3.3.2 v19.5.0]] / [[CR 38.211 0023]] that become links.
-import katex from "katex";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type Chat, type ChatContext, type ChatMessage, type ChatSource, type ChatSummary } from "../api";
 import { useLlmReady } from "./CRAnalysis";
 import { openCRDoc } from "./DocWindow";
+import { answerMarkdown, chatHtml, download } from "../export";
+import { renderAnswer } from "../markdown";
 
-const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const fileName = (s: string) => s.replace(/[\\/:*?"<>|\s]+/g, "_").slice(0, 60) || "chat";
 
-function tex(src: string, display: boolean) {
-  try {
-    return katex.renderToString(src, { displayMode: display, throwOnError: false });
-  } catch {
-    return esc(src);
-  }
+function copyMd(button: HTMLElement, text: string) {
+  navigator.clipboard?.writeText(text).then(() => {
+    const old = button.textContent;
+    button.textContent = "✓ 복사됨";
+    setTimeout(() => { button.textContent = old; }, 1200);
+  });
 }
 
-/** Inline markdown: code, math, bold, italics and source tags. */
-function inline(text: string, sources: Record<string, ChatSource>): string {
-  const keep: string[] = [];
-  const stash = (html: string) => `\u0000${keep.push(html) - 1}\u0000`;
-  let t = text
-    .replace(/`([^`]+)`/g, (_, c) => stash(`<code>${esc(c)}</code>`))
-    .replace(/\$\$([^$]+)\$\$/g, (_, m) => stash(tex(m, true)))
-    .replace(/\$([^$\n]+)\$/g, (_, m) => stash(tex(m, false)))
-    .replace(/\[\[([^\]]+)\]\]/g, (_, tag) => {
-      const s = sources[tag.trim()];
-      const kind = s ? s.type : "none";
-      const title = !s ? "답변이 근거로 든 자료 (목록에 없음)" : s.type === "clause" ? `${s.title} — 뷰어에서 열기`
-        : s.type === "cr" ? `${s.title} — CR 문서 열기` : "CR 모드에서 이 WI 를 고르면 요약을 볼 수 있습니다";
-      return stash(`<span class="src src-${kind}" data-src="${esc(tag.trim())}" title="${esc(title)}">${esc(tag.trim())}</span>`);
-    });
-  t = esc(t)
-    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
-    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<i>$2</i>");
-  return t.replace(/\u0000(\d+)\u0000/g, (_, i) => keep[Number(i)]);
-}
+// rendering markdown + KaTeX of every answer again on each poll of the running job was the slow part of a long chat
+const Answer = memo(function Answer({ m, onClick }: { m: ChatMessage; onClick: (e: React.MouseEvent, m: ChatMessage) => void }) {
+  const html = useMemo(() => renderAnswer(m.content, m.sources ?? {}), [m.content, m.sources]);
+  return <div className="answer" onClick={(e) => onClick(e, m)} dangerouslySetInnerHTML={{ __html: html }} />;
+});
 
-/** Small markdown: headings, bullet/numbered lists, paragraphs, display math. */
-export function renderAnswer(md: string, sources: Record<string, ChatSource>): string {
-  const out: string[] = [];
-  let list: "ul" | "ol" | null = null;
-  const close = () => { if (list) { out.push(`</${list}>`); list = null; } };
-  for (const raw of md.replace(/\r/g, "").split("\n")) {
-    const line = raw.trimEnd();
-    let m: RegExpMatchArray | null;
-    if (!line.trim()) { close(); continue; }
-    if ((m = line.match(/^\s*(#{1,4})\s+(.*)$/))) {
-      close();
-      out.push(`<h${Math.min(m[1].length + 2, 6)}>${inline(m[2], sources)}</h${Math.min(m[1].length + 2, 6)}>`);
-    } else if ((m = line.match(/^(\s*)[-*•]\s+(.*)$/)) || (m = line.match(/^(\s*)\d+[.)]\s+(.*)$/))) {
-      const kind = /^\s*\d/.test(line) ? "ol" : "ul";
-      if (list !== kind) { close(); out.push(`<${kind}>`); list = kind; }
-      out.push(`<li class="${m[1].length >= 2 ? "sub" : ""}">${inline(m[2], sources)}</li>`);
-    } else if ((m = line.match(/^\s*\$\$(.+)\$\$\s*$/))) {
-      close();
-      out.push(tex(m[1], true));
-    } else {
-      close();
-      out.push(`<p>${inline(line, sources)}</p>`);
-    }
-  }
-  close();
-  return out.join("");
+/** The answer while it streams in: rendered at most every 150 ms (KaTeX on every token would be the slow part). */
+function Streaming({ text, sources, onRendered }: {
+  text: string; sources: Record<string, ChatSource>; onRendered: () => void;
+}) {
+  const [shown, setShown] = useState(text);
+  useEffect(() => {
+    const t = setTimeout(() => setShown(text), 150);
+    return () => clearTimeout(t);
+  }, [text]);
+  const html = useMemo(() => renderAnswer(shown, sources), [shown, sources]);
+  useEffect(onRendered, [html, onRendered]);  // after the new text is on screen
+  return <div className="answer streaming" dangerouslySetInnerHTML={{ __html: html + '<span class="caret"></span>' }} />;
 }
 
 export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
@@ -74,7 +46,8 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
   const [chat, setChat] = useState<Chat | null>(null);
   const [question, setQuestion] = useState("");
   const [context, setContext] = useState<ChatContext | null>(null);
-  const [job, setJob] = useState<{ id: string; chatId: string; steps: string[] } | null>(null);
+  const [job, setJob] = useState<{ id: string; chatId: string; steps: string[]; stopping?: boolean; partial?: string;
+    sources?: Record<string, ChatSource> } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
@@ -89,25 +62,52 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
     setTimeout(() => input.current?.focus(), 50);
   }, [pending, onPendingTaken]);
   useEffect(() => { bottom.current?.scrollIntoView({ block: "end" }); }, [chat, job?.steps.length]);
+  // follow the streaming answer unless the user scrolled up to read (decided on scroll, before the text grows)
+  const stick = useRef(true);
+  const follow = useCallback(() => { if (stick.current) bottom.current?.scrollIntoView({ block: "end" }); }, []);
 
+  // follow the job: steps while it looks things up, then the answer text as it streams in
+  const jobId = job?.id;
+  const jobChat = useRef("");
+  jobChat.current = job?.chatId ?? jobChat.current;
   useEffect(() => {
-    if (!job) return;
+    if (!jobId) return;
+    let busy = false;
     const t = setInterval(async () => {
-      const j = (await api.jobs()).find((x) => x.id === job.id);
-      if (!j) return;
-      if (j.state === "running") return setJob((cur) => cur && { ...cur, steps: j.steps ?? [] });
-      setJob(null);
-      const done = await api.chat(job.chatId);
-      setChat((cur) => (!cur || cur.id === done.id ? done : cur));  // the user may have opened another one
-      loadList();
-    }, 1000);
+      if (busy) return;
+      busy = true;
+      try {
+        const j = await api.job(jobId);
+        if (!j) return;
+        if (j.state === "running") {
+          return setJob((cur) => cur && cur.id === jobId
+            ? { ...cur, steps: j.steps ?? [], partial: j.partial, sources: j.sources } : cur);
+        }
+        clearInterval(t);
+        if (j.state === "error" && j.message.startsWith("작업 정보가 없습니다")) setError(j.message);  // other errors are in the chat
+        const done = await api.chat(jobChat.current).catch(() => null);
+        setJob(null);
+        if (done) setChat((cur) => (cur?.id === done.id ? done : cur));  // not over another chat or a new one
+        loadList();
+      } finally {
+        busy = false;
+      }
+    }, 350);
     return () => clearInterval(t);
-  }, [job, loadList]);
+  }, [jobId, loadList]);
 
+  const opening = useRef("");
   const open = async (id: string) => {
     setError(null);
     setContext(null);
-    setChat(await api.chat(id));
+    opening.current = id;
+    try {
+      const c = await api.chat(id);
+      if (opening.current === id) setChat(c);  // a slower earlier click must not win
+    } catch (e) {
+      setError(String(e).replace(/^Error: /, ""));
+      loadList();
+    }
   };
   const send = async () => {
     const q = question.trim();
@@ -124,13 +124,13 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
       setError(String(e).replace(/^Error: /, ""));
     }
   };
-  const onAnswerClick = (e: React.MouseEvent, m: ChatMessage) => {
+  const onAnswerClick = useCallback((e: React.MouseEvent, m: ChatMessage) => {
     const el = (e.target as HTMLElement).closest<HTMLElement>("[data-src]");
     const s = el && m.sources?.[el.dataset.src!];
     if (!s) return;
     if (s.type === "clause") onOpenSpec(s.spec, s.clause, s.version);
     else if (s.type === "cr") openCRDoc(s.spec, s.cr, s.tdoc);
-  };
+  }, [onOpenSpec]);
 
   return (
     <div className="chat">
@@ -153,8 +153,19 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
         </ul>
       </aside>
       <main className="chat-main">
-        <div className="chat-msgs">
-          {!chat && !job && (
+        {chat && chat.messages.length > 1 && (
+          <div className="chat-head">
+            <b>{chat.title}</b>
+            <button className="link small" title="질문과 답, 출처를 HTML 파일로 저장합니다 (메일·위키 공유용)"
+                    onClick={() => download(`${fileName(chat.title)}.html`, chatHtml(chat.title, chat.messages))}>
+              ⬇ 대화 내보내기 (HTML)</button>
+          </div>
+        )}
+        <div className="chat-msgs" onScroll={(e) => {
+          const b = e.currentTarget;
+          stick.current = b.scrollHeight - b.scrollTop - b.clientHeight < 80;
+        }}>
+          {!chat && (
             <div className="chat-empty">
               <h2>받은 스펙에 대해 물어보세요</h2>
               <p className="muted">
@@ -172,7 +183,7 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
             </div>
           )}
           {chat?.messages.map((m, i) => (
-            <div key={i} className={`msg msg-${m.role} ${m.error ? "msg-error" : ""}`}>
+            <div key={i} className={`msg msg-${m.role} ${m.stopped ? "msg-stopped" : m.error ? "msg-error" : ""}`}>
               {m.role === "user" ? (
                 <>
                   {m.context && <div className="ctx">TS {m.context.spec} §{m.context.clause}{m.context.version ? ` v${m.context.version}` : ""} 에 대해</div>}
@@ -184,20 +195,36 @@ export function ChatView({ active, pending, onPendingTaken, onOpenSpec }: {
                     <details className="steps"><summary>찾아본 자료 {m.steps.length}건</summary>
                       <ol>{m.steps.map((s, k) => <li key={k}>{s}</li>)}</ol></details>
                   )}
-                  <div className="answer" onClick={(e) => onAnswerClick(e, m)}
-                       dangerouslySetInnerHTML={{ __html: renderAnswer(m.content, m.sources ?? {}) }} />
-                  {m.model && <p className="muted tiny">{m.model}{m.mode === "retrieval" ? " · 검색 결과 기반(도구 호출 미지원 서버)" : ""}
-                    {" · AI 답변은 출처의 원문으로 확인하세요"}</p>}
+                  <Answer m={m} onClick={onAnswerClick} />
+                  <p className="muted tiny msg-foot">
+                    {m.model && <>{m.model}{m.mode === "retrieval" ? " · 검색 결과 기반(도구 호출 미지원 서버)" : ""}
+                      {" · AI 답변은 출처의 원문으로 확인하세요 · "}</>}
+                    {!m.error && <>
+                      <button className="link tiny" title="답변과 출처를 Markdown 으로 복사합니다"
+                              onClick={(e) => copyMd(e.currentTarget, answerMarkdown(chat.messages[i - 1]?.content, m))}>⧉ Markdown 복사</button>
+                      {" · "}
+                      <button className="link tiny" title="이 질문과 답을 HTML 파일로 저장합니다"
+                              onClick={() => download(`${fileName(chat.messages[i - 1]?.content ?? chat.title)}.html`,
+                                chatHtml(chat.messages[i - 1]?.content ?? chat.title, chat.messages.slice(Math.max(0, i - 1), i + 1)))}>
+                        ⬇ HTML</button>
+                    </>}
+                  </p>
                 </>
               )}
             </div>
           ))}
-          {job && (
+          {job && job.chatId === chat?.id && (
             <div className="msg msg-assistant">
               <div className="thinking">
-                <span className="spinner" /> 자료를 찾아보는 중…
+                <span className="spinner" /> {job.stopping ? "중지하는 중 (지금 요청이 끝나면 멈춤)…" : job.partial ? "답을 쓰는 중…" : "자료를 찾아보는 중…"}
+                {!job.stopping && (
+                  <button className="link small" title="지금 진행 중인 AI 요청이 끝나면 멈춥니다"
+                          onClick={() => { setJob((j) => j && { ...j, stopping: true }); api.cancelJob(job.id).catch(() => undefined); }}>
+                    ■ 중지</button>
+                )}
                 <ol>{job.steps.map((s, k) => <li key={k}>{s}</li>)}</ol>
               </div>
+              {job.partial && <Streaming text={job.partial} sources={job.sources ?? {}} onRendered={follow} />}
             </div>
           )}
           <div ref={bottom} />

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
-from .diff import Token, align, opcodes, render_annotated, similarity, tokenize
+from .diff import Token, align, best_similar, opcodes, render_annotated, tokenize
 from .parse_docx import norm_text
 
 
@@ -40,6 +40,7 @@ class _BlockState:
     introduced: int
     changed: int | None
     history: list[tuple]  # (version index, change[, moved-from clause])
+    html: str | None = None  # rendered once: an unchanged block is the same state in every later version
 
 
 @dataclass
@@ -98,6 +99,12 @@ def _evolve(prev: _BlockState, b: InBlock, vi: int) -> _BlockState:
     return _BlockState(b, toks, origins, prev.introduced, vi, prev.history + [(vi, "modified")])
 
 
+def _html(b: _BlockState, labels: Sequence[str]) -> str:
+    if b.html is None:  # states are never changed after they are made, so the rendering stays valid
+        b.html = render_annotated(b.tokens, b.origins, labels)
+    return b.html
+
+
 _MOVE_MIN_CHARS = 40  # short blocks ("where", "-") match by accident
 _MOVE_SIMILARITY = 0.8
 
@@ -107,18 +114,15 @@ def _resolve_moves(added: list, gone: list[dict], vi: int) -> None:
     by_hash: dict[str, list[dict]] = {}
     for g in gone:
         by_hash.setdefault(g["state"].src.raw_hash, []).append(g)
+    long_gone = [g for g in gone if len(g["state"].src.text) >= _MOVE_MIN_CHARS]
+    words = {id(g): g["state"].src.text.split() for g in long_gone}
     for cs, idx, b, number in added:
         if len(b.text) < _MOVE_MIN_CHARS:
             continue
         cand = next((g for g in by_hash.get(b.raw_hash, []) if not g.get("used")), None)
         if cand is None:
-            best = 0.0
-            for g in gone:
-                if g.get("used") or len(g["state"].src.text) < _MOVE_MIN_CHARS:
-                    continue
-                sc = similarity(g["state"].src.text, b.text, max(_MOVE_SIMILARITY, best))
-                if sc >= _MOVE_SIMILARITY and sc > best:
-                    cand, best = g, sc
+            cand, _ = best_similar(((g, words[id(g)]) for g in long_gone if not g.get("used")), b.text.split(),
+                                   _MOVE_SIMILARITY, strict="first")
         if cand is None:
             continue
         cand["used"] = True
@@ -208,8 +212,7 @@ def compute(versions: Sequence[str], clauses_of: Iterable[Sequence[InClause]]) -
             key=c.key, number=c.number, title=c.title, level=c.level, status=status,
             introduced=labels[cs.introduced], last_changed=lbl(cs.last_changed),
             history=[(labels[i], t) for i, t in cs.history],
-            blocks=[OutBlock(b.src.kind, b.src.style, b.src.raw_hash,
-                             render_annotated(b.tokens, b.origins, labels),
+            blocks=[OutBlock(b.src.kind, b.src.style, b.src.raw_hash, _html(b, labels),
                              labels[b.introduced], lbl(b.changed),
                              [(labels[h[0]], *h[1:]) for h in b.history]) for b in cs.blocks],
             deleted=deleted,

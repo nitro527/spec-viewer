@@ -120,3 +120,37 @@ def test_whitespace_only_blocks_and_deep_anchor_nesting():
     a = [f"u{i}" if i % 2 else "x" for i in range(6000)]
     b = list(reversed(a))
     assert _patience(a, b) is not None
+
+
+def test_diff_keeps_both_sides_on_random_edits():
+    """Dropping <del> gives the new text, dropping <ins> the old one (whitespace aside), for random edits of
+    words, markup, entities and equations."""
+    import html as H
+    import random
+    import re
+
+    from specview.diff import render_diff
+
+    def text(s):
+        return "".join(H.unescape(re.sub(r"<[^>]+>", "", s)).split())
+
+    def side(d, drop):
+        return text(re.sub(rf"<{drop}>.*?</{drop}>", "", d, flags=re.S))
+
+    words = ["the", "UE", "shall", "PUSCH", "DM-RS", "<b>bold</b>", "x", "a,", "(1)", "<i>it</i>", "&amp;", "10.2",
+             "=", "$$x$$"]
+    rnd = random.Random(7)
+    for _ in range(600):
+        a = [rnd.choice(words) for _ in range(rnd.randint(0, 20))]
+        b = list(a)
+        for _ in range(rnd.randint(0, 6)):
+            r = rnd.random()
+            if r < .4 and b:
+                b.pop(rnd.randrange(len(b)))
+            elif r < .8:
+                b.insert(rnd.randint(0, len(b)), rnd.choice(words))
+            elif b:
+                b[rnd.randrange(len(b))] = rnd.choice(words)
+        old, new = f"<p>{' '.join(a)}</p>", f"<p>{' '.join(b)}</p>"
+        d = render_diff(old, new)
+        assert side(d, "del") == text(new) and side(d, "ins") == text(old), (old, new, d)

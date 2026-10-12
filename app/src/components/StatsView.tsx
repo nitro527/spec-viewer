@@ -1,5 +1,5 @@
 // Statistics: how much each version changed, and which clauses change most often.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Stats, type VersionStats } from "../api";
 import type { VersionColor } from "../colors";
 
@@ -9,9 +9,17 @@ export function StatsView({ spec, colors, onJump, onCompare }: {
 }) {
   const [stats, setStats] = useState<Stats | null>(null);
   const [hover, setHover] = useState<{ v: VersionStats; x: number; y: number } | null>(null);
+  const tip = useRef<HTMLDivElement>(null);
   const [limit, setLimit] = useState(25);
 
-  useEffect(() => { api.stats(spec).then(setStats); }, [spec]);
+  const [failed, setFailed] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    setFailed(null);
+    setStats(null);
+    api.stats(spec).then((x) => live && setStats(x), (e) => live && setFailed(String(e).replace(/^Error: /, "")));
+    return () => { live = false; };
+  }, [spec]);
 
   const versions = useMemo(() => stats?.versions.slice(1) ?? [], [stats]); // first version is the baseline
   const changed = (v: VersionStats) => v.added + v.modified + v.removed;
@@ -23,13 +31,18 @@ export function StatsView({ spec, colors, onJump, onCompare }: {
     .filter((c) => c.changes.length && c.key !== "front" && !/change history/i.test(c.title))
     .sort((a, b) => b.changes.length - a.changes.length || a.ord - b.ord), [stats]);
 
-  if (!stats) return <p className="empty">통계 계산 중…</p>;
+  if (!stats) return <p className="empty">{failed ? `통계를 계산하지 못했습니다: ${failed}` : "통계 계산 중…"}</p>;
 
   const bars = (value: (v: VersionStats) => number, max: number, colored: boolean) => (
     <div className="bars">
       {versions.map((v) => (
         <button key={v.version} className="bar-col" onClick={() => onCompare(v.version)}
-                onMouseMove={(e) => setHover({ v, x: e.clientX, y: e.clientY })} onMouseLeave={() => setHover(null)}>
+                onMouseMove={(e) => {
+                  // a new bar re-renders; moving within one only moves the tooltip (the table can be long)
+                  if (hover?.v !== v) return setHover({ v, x: e.clientX, y: e.clientY });
+                  const t = tip.current;
+                  if (t) { t.style.left = `${e.clientX + 12}px`; t.style.top = `${e.clientY + 12}px`; }
+                }} onMouseLeave={() => setHover(null)}>
           <span className="bar-val">{value(v) || ""}</span>
           <span className="bar" style={{ height: `${(value(v) / max) * 100}%`,
             background: colored ? colors.get(v.version)?.solid : "var(--muted)" }} />
@@ -69,7 +82,7 @@ export function StatsView({ spec, colors, onJump, onCompare }: {
         {ranked.length > limit && <button className="link" onClick={() => setLimit(limit + 50)}>더 보기</button>}
       </section>
       {hover && (
-        <div className="tooltip" style={{ left: hover.x + 12, top: hover.y + 12 }}>
+        <div ref={tip} className="tooltip" style={{ left: hover.x + 12, top: hover.y + 12 }}>
           <b>v{hover.v.version}</b>
           <div>추가 {hover.v.added} · 변경 {hover.v.modified} · 삭제 {hover.v.removed}</div>
           <div>CR {crCount(hover.v)}{Object.keys(hover.v.crs).length ? ` (${Object.entries(hover.v.crs).map(([k, n]) => `${k}:${n}`).join(", ")})` : ""}</div>

@@ -8,10 +8,12 @@ the units the history engine tracks across versions.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,7 +22,9 @@ from lxml import etree, html
 from .wmf import wmf_to_svg
 
 HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
-_NUM_RE = re.compile(r"^((?:[A-Z]\.)?\d+(?:\.\d+[A-Z]{0,2})*)\s+(.*)$", re.S)  # 7.4.1, A.2, 6.2A.1 (RF specs)
+# 7.4.1, A.2, AA.1, 6.2A.1 (RF specs), 5.2.1.5.1a (a clause added between two others)
+# "8.4.1.4." with a stray dot (38.211 v16) is 8.4.1.4; "B.2a" (annex clause with a letter)
+_NUM_RE = re.compile(r"^((?:[A-Z]{1,2}\.\d+[a-z]?|\d+)(?:\.\d+(?:[A-Z]{1,2}|[a-z])?)*)\.?\s+(.*)$", re.S)
 _ANNEX_RE = re.compile(r"^Annex\s+([A-Z]{1,2})\b\s*(.*)$", re.S)
 _WS = re.compile(r"\s+")
 _IMAGE_CONVERT = {".emf"}  # WMF is handled by specview.wmf
@@ -115,18 +119,70 @@ def _level_for(tag: str, number: str) -> int:
     return int(tag[1]) if tag in HEADING_TAGS else 1
 
 
+def convert_workers() -> int:
+    """How many pandoc conversions run at once: SPECVIEW_CONVERT_WORKERS, else half the CPU cores up to 4 (each
+    pandoc on a big spec can take a gigabyte or more of memory; 4 at once is ~3x faster than one)."""
+    default = max(1, min(4, (os.cpu_count() or 2) // 2))
+    try:
+        return max(1, min(8, int(os.environ.get("SPECVIEW_CONVERT_WORKERS", default))))
+    except ValueError:
+        return default
+
+
+_SLOTS: threading.BoundedSemaphore | None = None
+_SLOTS_LOCK = threading.Lock()
+
+
+def _pandoc_slot() -> threading.BoundedSemaphore:
+    """One limit for every pandoc in the process: versions converted in parallel, and the parts of a split
+    spec converted in parallel within each, never run more than convert_workers() at a time."""
+    global _SLOTS
+    with _SLOTS_LOCK:
+        if _SLOTS is None:
+            _SLOTS = threading.BoundedSemaphore(convert_workers())
+        return _SLOTS
+
+
 def _run_pandoc(docx: Path, media_dir: Path, track_changes: bool = False) -> str:
     if not shutil.which("pandoc"):
         raise RuntimeError("pandoc is required to convert .docx files (https://pandoc.org)")
-    proc = subprocess.run(
-        [
-            "pandoc", "-f", "docx+styles", "-t", "html", "--katex",
-            f"--extract-media={media_dir}", "--wrap=none", *(["--track-changes=all"] if track_changes else []),
-            str(docx),
-        ],
-        capture_output=True, check=True,
-    )
+    timeout = float(os.environ.get("SPECVIEW_PANDOC_TIMEOUT") or 1800)  # the biggest specs take a few minutes
+    try:
+        with _pandoc_slot():
+            proc = subprocess.run(
+                [
+                    "pandoc", "-f", "docx+styles", "-t", "html", "--katex",
+                    f"--extract-media={media_dir}", "--wrap=none", *(["--track-changes=all"] if track_changes else []),
+                    str(docx),
+                ],
+                capture_output=True, check=True, timeout=timeout,
+            )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"pandoc took more than {timeout:.0f} s on {Path(docx).name} (SPECVIEW_PANDOC_TIMEOUT)")
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError(f"pandoc failed on {Path(docx).name}: {err[-1] if err else e.returncode}")
     return proc.stdout.decode("utf-8")
+
+
+_SAFE_URL = re.compile(r"^\s*(https?:|mailto:|#|/api/asset/|data:image/(png|jpe?g|gif|webp|bmp);)", re.I)
+_UNSAFE_TAGS = ("script", "iframe", "frame", "object", "embed", "form", "base", "meta", "link", "style")
+
+
+def _make_safe(root) -> None:
+    """Documents come from 3gpp.org but CRs are written by anyone: a Word hyperlink to ``javascript:...`` comes
+    through pandoc as is. Keep only plain links and images; no scripts, frames or event handlers."""
+    for el in root.xpath("|".join(f"//{t}" for t in _UNSAFE_TAGS)):
+        el.drop_tree()
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        for a in list(el.attrib):
+            v = el.attrib[a]
+            if a.lower().startswith("on") or a.lower() in ("srcdoc", "formaction", "xlink:href"):
+                del el.attrib[a]
+            elif a.lower() in ("href", "src", "action", "poster", "background") and v and not _SAFE_URL.match(v):
+                del el.attrib[a]
 
 
 def docx_view_html(docx: Path, track_changes: bool = False) -> str:
@@ -138,6 +194,7 @@ def docx_view_html(docx: Path, track_changes: bool = False) -> str:
         media = Path(tmp) / "media"
         root = html.fragment_fromstring(_run_pandoc(Path(docx), media, track_changes), create_parent="div")
         assets = _rewrite_images(root, media)
+        _make_safe(root)  # after the images got their /api/asset/ addresses
         _fix_multiline_math(root)
         for img in root.xpath("//img[starts-with(@src, '/api/asset/')]"):
             a = assets.get(img.get("src").rsplit("/", 1)[-1])
@@ -164,10 +221,17 @@ def _convert_vector_images(paths: list[Path]) -> dict[Path, Path]:
     for p in paths:
         by_dir.setdefault(p.parent, []).append(p)
     for d, files in by_dir.items():
-        subprocess.run(
-            [soffice, "--headless", "--convert-to", "png", "--outdir", str(d), *map(str, files)],
-            capture_output=True, timeout=600,
-        )
+        # its own profile per run: versions convert in parallel, and a second LibreOffice on a shared profile
+        # quietly does nothing (images left as EMF in one version, PNG in the next: false changes)
+        with tempfile.TemporaryDirectory(prefix="specview-lo-") as profile:
+            try:
+                subprocess.run(
+                    [soffice, f"-env:UserInstallation={Path(profile).as_uri()}", "--headless", "--convert-to", "png",
+                     "--outdir", str(d), *map(str, files)],
+                    capture_output=True, timeout=600,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
         for f in files:
             png = f.with_suffix(".png")
             if png.exists():
@@ -311,6 +375,31 @@ def html_to_clauses(doc_html: str) -> list[Clause]:
     return [c for c in clauses if c.title.strip().lower() not in ("contents", "table of contents")]
 
 
+def assign_keys(heads: list[tuple[str, str, int]]) -> list[str]:
+    """Keys for (number, title, level) headings in document order, as html_to_clauses gives them: a numbered
+    clause is its number ("Annex B" -> "B"), an unnumbered heading goes under the last numbered clause and
+    its enclosing unnumbered headings ("6.2.3/ue"), repeats get "~2", "~3"."""
+    keys: list[str] = []
+    seen: dict[str, int] = {}
+    numbered = ""
+    path: list[tuple[int, str]] = []
+    for number, title, level in heads:
+        if number:
+            key = number[6:] if number.startswith("Annex ") else number
+            numbered, path = key, []
+        else:
+            key = _split_heading(title)[0]
+            if numbered:
+                path = [(lv, k) for lv, k in path if lv < level]
+                slug = key
+                key = "/".join([numbered, *(k for _, k in path), slug])
+                path.append((level, slug))
+        n = seen.get(key, 0)
+        seen[key] = n + 1
+        keys.append(f"{key}~{n + 1}" if n else key)
+    return keys
+
+
 def guess_title(clauses: list[Clause]) -> str | None:
     # Cover page: ZT-styled lines "3rd Generation Partnership Project;" ... "NR;" "Physical channels ..."
     front = clauses[0].blocks if clauses else []
@@ -328,7 +417,13 @@ def guess_title(clauses: list[Clause]) -> str | None:
 def parse_docx(docx: Path | list[Path]) -> ParsedSpec:
     """One spec from a .docx, or from the parts a large spec is split into (cover, s00-s05, s06-s08 ...)."""
     if isinstance(docx, (list, tuple)):
-        parts = [_parse_one(Path(p)) for p in docx]
+        if len(docx) > 1:  # each part is its own pandoc run: convert them side by side (38.101-1: 5 parts)
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(len(docx)) as ex:
+                parts = list(ex.map(lambda p: _parse_one(Path(p)), docx))
+        else:
+            parts = [_parse_one(Path(p)) for p in docx]
         return merge_parts(sorted(parts, key=_part_order)) if len(parts) > 1 else parts[0]
     return _parse_one(Path(docx))
 
@@ -339,6 +434,7 @@ def _parse_one(docx: Path) -> ParsedSpec:
         doc_html = _run_pandoc(Path(docx), media)
         root = html.fragment_fromstring(doc_html, create_parent="div")
         assets = _rewrite_images(root, media)
+        _make_safe(root)  # after the images got their /api/asset/ addresses
         _fix_multiline_math(root)
         doc_html = "".join(_serialize(el) for el in root)
     clauses = html_to_clauses(doc_html)
@@ -363,7 +459,6 @@ def _part_order(part: ParsedSpec) -> tuple:
 def merge_parts(parts: list[ParsedSpec]) -> ParsedSpec:
     """Concatenate split documents in order; text before a part's first heading continues the previous clause."""
     clauses: list[Clause] = []
-    seen: dict[str, int] = {}
     assets: dict[str, Asset] = {}
     for part in parts:
         assets.update(part.assets)
@@ -371,9 +466,11 @@ def merge_parts(parts: list[ParsedSpec]) -> ParsedSpec:
             if i == 0 and c.key == "front" and clauses:
                 clauses[-1].blocks.extend(c.blocks)
                 continue
-            base = c.key.split("~")[0]
-            n = seen.get(base, 0)
-            seen[base] = n + 1
-            clauses.append(Clause(f"{base}~{n + 1}" if n else base, c.number, c.title, c.level, list(c.blocks)))
+            clauses.append(Clause(c.key, c.number, c.title, c.level, list(c.blocks)))
+    # keys as one document would give them: a part that starts with unnumbered headings continues the last
+    # numbered clause of the part before ("6.2.3/gnb", not "gnb"), and repeats are numbered across parts
+    body = [c for c in clauses if c.key != "front"]
+    for c, k in zip(body, assign_keys([(c.number, c.title, c.level) for c in body])):
+        c.key = k
     title = next((p.title for p in parts if p.title), None)
     return ParsedSpec(title, clauses, assets)

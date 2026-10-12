@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -148,8 +149,14 @@ def _extract_docx(zip_path: Path, out_dir: Path) -> list[Path]:
         targets = []
         for name in names:
             target = out_dir / Path(name).name
-            with z.open(name) as src, open(target, "wb") as dst:
-                shutil.copyfileobj(src, dst)
+            # a half-written file must not count as cached; private name: two jobs may extract the same version
+            part = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.part")
+            try:
+                with z.open(name) as src, open(part, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                os.replace(part, target)
+            finally:
+                part.unlink(missing_ok=True)
             targets.append(target)
     return [_convert_doc(t) if t.suffix.lower() == ".doc" else t for t in targets]
 
@@ -158,8 +165,11 @@ def _cached_parts(zip_path: Path, out_dir: Path) -> list[Path] | None:
     """The extracted documents of an earlier run, if all of them are there (older runs kept only the largest part)."""
     if not zip_path.exists():
         return None
-    with zipfile.ZipFile(zip_path) as z:
-        want = [out_dir / Path(n).with_suffix(".docx").name for n in _word_parts(z)]
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            want = [out_dir / Path(n).with_suffix(".docx").name for n in _word_parts(z)]
+    except zipfile.BadZipFile:
+        return None
     return want if want and all(p.exists() for p in want) else None
 
 
@@ -169,10 +179,14 @@ $ErrorActionPreference = 'Stop'
 $w = New-Object -ComObject Word.Application
 try {
     $w.Visible = $false; $w.DisplayAlerts = 0
+    $w.AutomationSecurity = 3  # msoAutomationSecurityForceDisable: never run a document's macros
     $d = $w.Documents.Open($env:SPECVIEW_DOC_SRC, $false, $true, $false)
     try { $d.SaveAs2($env:SPECVIEW_DOC_DST, 16) } finally { $d.Close($false) }
 } finally { $w.Quit() }
 """
+
+
+_WORD_LOCK = __import__("threading").Lock()
 
 
 def _convert_doc(src: Path) -> Path:
@@ -193,9 +207,10 @@ def _convert_doc(src: Path) -> Path:
     if os.name == "nt":
         env = {**os.environ, "SPECVIEW_DOC_SRC": str(src.resolve()), "SPECVIEW_DOC_DST": str(dst.resolve())}
         try:
-            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _WORD_PS],
-                           capture_output=True, check=True, timeout=600, env=env,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            with _WORD_LOCK:  # versions convert in parallel; Word automation does not like that
+                subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _WORD_PS],
+                               capture_output=True, check=True, timeout=600, env=env,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except (OSError, subprocess.SubprocessError):
             try:
                 dst.unlink(missing_ok=True)  # a half-written file would be picked up as cached
@@ -220,6 +235,8 @@ def fetch(remote: RemoteVersion, cache_dir: Path, session: requests.Session | No
     zip_path = d / remote.filename
     if cached := _cached_parts(zip_path, d):
         return cached
+    if zip_path.exists() and not zipfile.is_zipfile(zip_path):
+        zip_path.unlink()  # damaged cache (disk full, an antivirus cutting it): download again
     if not zip_path.exists():
         for attempt in range(1, 4):  # the session retries the request; this also covers a body cut off midway
             try:
@@ -238,13 +255,16 @@ def _download(s: requests.Session, url: str, dest: Path, progress: Callable[[int
         r.raise_for_status()
         total = int(r.headers.get("content-length") or 0)
         done = 0
-        tmp = dest.with_suffix(".part")
-        with open(tmp, "wb") as f:
-            for chunk in r.iter_content(1 << 16):
-                f.write(chunk)
-                done += len(chunk)
-                if progress:
-                    progress(done, total)
-        if total and done < total:  # the server closed early without an error
-            raise requests.exceptions.ChunkedEncodingError(f"{url}: {done}/{total} bytes")
-        tmp.replace(dest)
+        tmp = dest.with_name(f"{dest.name}.{os.getpid()}.{threading.get_ident()}.part")  # private per download
+        try:
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(1 << 16):
+                    f.write(chunk)
+                    done += len(chunk)
+                    if progress:
+                        progress(done, total)
+            if total and done < total:  # the server closed early without an error
+                raise requests.exceptions.ChunkedEncodingError(f"{url}: {done}/{total} bytes")
+            tmp.replace(dest)
+        finally:
+            tmp.unlink(missing_ok=True)  # a failed try leaves no tens-of-MB leftovers

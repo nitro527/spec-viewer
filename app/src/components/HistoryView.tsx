@@ -28,6 +28,8 @@ interface Props {
 
 const isNewer = (v: string | null | undefined, baseline: string) => !!v && cmpVersion(v, baseline) > 0;
 
+const KEEP = 1500;  // clauses kept in memory
+
 export const HistoryView = forwardRef<HistoryViewHandle, Props>(function HistoryView(
   { spec, version, citeLabel, baseline, toc, highlight, selected, onSelect, onVisible, onXref, bookmarks, onBookmark }, ref,
 ) {
@@ -51,6 +53,9 @@ export const HistoryView = forwardRef<HistoryViewHandle, Props>(function History
   });
   const items = virt.getVirtualItems();
 
+  const shown = useRef({ lo: 0, hi: 0 });
+  if (items.length) shown.current = { lo: items[0].index, hi: items[items.length - 1].index };
+
   // Load whichever pages the visible window needs.
   useEffect(() => {
     const pages = new Set(items.map((it) => Math.floor(it.index / PAGE)));
@@ -63,11 +68,26 @@ export const HistoryView = forwardRef<HistoryViewHandle, Props>(function History
         setCache((old) => {
           const next = new Map(old);
           for (const c of cs) next.set(c.ord, c);
+          if (next.size > KEEP) {  // a big conformance spec scrolled end to end: drop what is far from view
+            const { lo, hi } = shown.current;  // where the view is now, not when this page was asked for
+            for (const ord of next.keys()) {
+              if (ord < lo - KEEP / 2 || ord > hi + KEEP / 2) {
+                next.delete(ord);
+                loading.current.delete(Math.floor(ord / PAGE));
+              }
+            }
+          }
           return next;
         });
+      }, () => {
+        // the backend was busy or restarting: allow another try instead of a skeleton for good
+        setTimeout(() => { if (key === current.current) { loading.current.delete(p); setCache((c) => new Map(c)); } }, 2000);
       });
     }
-    if (items.length) onVisible(items[Math.min(1, items.length - 1)].index);
+    // the clause at the top of the view (the virtual items also include a few rendered above it)
+    const top = virt.scrollOffset ?? 0;
+    const first = items.find((it) => it.end > top + 8);
+    if (first) onVisible(first.index);
   }, [items, spec, version, cache, onVisible]);
 
   useImperativeHandle(ref, () => ({

@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import Iterator
 
-from . import changehistory, history
+from . import changehistory, crdocs, history, secret
 from .diff import render_diff
 from .parse_docx import ParsedSpec, content_hash
 from .versions import Version
@@ -109,6 +109,9 @@ CREATE TABLE IF NOT EXISTS cr_analysis (     -- LLM analysis of one CR as a whol
 CREATE TABLE IF NOT EXISTS wi_summary (      -- LLM summary of one work item across every downloaded spec
   wi TEXT PRIMARY KEY, data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS release_note (    -- LLM summary of the CRs between two versions of a spec
+  spec TEXT NOT NULL, old TEXT NOT NULL, new TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (spec, old, new)
+);
 CREATE TABLE IF NOT EXISTS chat (            -- AI chat conversations (chat.py)
   id TEXT PRIMARY KEY, title TEXT NOT NULL, updated TEXT NOT NULL, data TEXT NOT NULL
 );
@@ -130,7 +133,7 @@ def _mark_moves(clauses: list[dict]) -> None:
     spec has thousands of each)."""
     import bisect
 
-    from .diff import strip_tags, word_similarity
+    from .diff import best_similar, strip_tags
 
     dels = [(c, b) for c in clauses for b in c["blocks"] if b["op"] == "delete"]
     ins = [(c, b) for c in clauses for b in c["blocks"] if b["op"] == "insert"]
@@ -163,14 +166,9 @@ def _mark_moves(clauses: list[dict]) -> None:
     for ic, ib in fuzzy:
         w = text[id(ib)].split()
         lo, hi = len(w) * floor / (2 - floor), len(w) * (2 - floor) / floor  # 2·min/(a+b) ≥ floor
-        best, best_s = None, floor
-        for _, i in by_len[bisect.bisect_left(lens, lo):bisect.bisect_right(lens, hi)]:
-            dc, db = dels[i]
-            if id(db) in used or dc is ic:
-                continue
-            sc = word_similarity(words[id(db)], w, best_s)
-            if sc >= best_s:
-                best, best_s = (dc, db), sc
+        cands = ((dels[i], words[id(dels[i][1])]) for _, i in by_len[bisect.bisect_left(lens, lo):bisect.bisect_right(lens, hi)]
+                 if id(dels[i][1]) not in used and dels[i][0] is not ic)
+        best, _ = best_similar(cands, w, floor, strict=False)
         if best is not None:
             pair(ic, ib, *best)
 
@@ -190,7 +188,7 @@ class Library:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path, check_same_thread=False)
+        self.db = sqlite3.connect(self.path, check_same_thread=False, timeout=30)  # waits for a writer
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
@@ -244,12 +242,100 @@ class Library:
         return [history.InClause(r["key"], r["number"], r["title"], r["level"], blocks.get(r["key"], []))
                 for r in self.db.execute("SELECT * FROM clause_ver WHERE version_id=? ORDER BY ord", (vid,))]
 
-    def recompute_history(self, spec: str) -> None:
-        self._compared.clear()
-        vers = self.versions(spec)
-        if not vers:
+    def recompute_history(self, spec: str, lock=None) -> None:
+        """Version history of every paragraph of a spec. With ``lock`` (the API's), the slow part reads and
+        computes on its own connection without holding the lock; only the writes take it."""
+        if lock is None:
+            self._compared.clear()
+            vers = self.versions(spec)
+            if vers:
+                self._write_history(vers, self._compute_history(vers))
             return
-        results = history.compute([v["version"] for v in vers], (self._load_clauses(v["id"]) for v in vers))
+        reader = Library(self.path)
+        try:
+            for _ in range(3):
+                reader.db.execute("BEGIN")  # one snapshot for the version list and every clause
+                try:
+                    vers = reader.versions(spec)
+                    results = reader._compute_history(vers) if vers else []
+                finally:
+                    reader.db.commit()
+                with lock:
+                    if [v["id"] for v in self.versions(spec)] != [v["id"] for v in vers]:
+                        continue  # a version came or went meanwhile: compute again
+                    self._compared.clear()
+                    if vers:
+                        self._write_history(vers, results)
+                    return
+            with lock:  # still changing after three tries: do it under the lock
+                self.recompute_history(spec)
+        finally:
+            reader.close()
+
+    KEYS_VERSION = "3"  # bump when the parser starts keying clauses differently (3: "B.2a", "8. Foo")
+
+    def needs_rekey(self) -> bool:
+        """Whether normalize_keys has to look at the library (once per key scheme)."""
+        return self.get_setting("keys_version") != self.KEYS_VERSION and bool(
+            self.db.execute("SELECT 1 FROM version LIMIT 1").fetchone())
+
+    def normalize_keys(self) -> list[str]:
+        """Give every stored clause the key a parse today gives it. Libraries parsed before "5.2.1.5.1a" and
+        "8.4.1.4." headings were recognised keyed them by title (no number), and a split document's part that
+        began with unnumbered headings keyed those without their clause. Renamed rows keep their blocks and
+        notes; returns the specs changed (their history needs recomputing)."""
+        from .parse_docx import _split_heading, assign_keys
+
+        TMP = "mig:"  # keys never start with it (numbers, "front", slugs of letters/digits/dashes)
+        changed: set[str] = set()
+        with self.db:
+            for v in self.db.execute("SELECT id, spec FROM version").fetchall():
+                vid = v["id"]
+                rows = [r for r in self.db.execute(
+                    "SELECT key, number, title, level FROM clause_ver WHERE version_id=? ORDER BY ord", (vid,))
+                    if r["key"] != "front"]
+                heads, fixed = [], {}
+                for r in rows:
+                    number, title, level = r["number"], r["title"], r["level"]
+                    if not number:
+                        _, n, t = _split_heading(title)
+                        if n:  # a heading the parser numbers now
+                            number, title, level = n, t, n.count(".") + 1
+                            fixed[r["key"]] = (number, title, level)
+                    heads.append((number, title, level))
+                mapping = {r["key"]: k for r, k in zip(rows, assign_keys(heads)) if r["key"] != k}
+                if not mapping:
+                    continue
+                for old, new in mapping.items():  # two steps: no clash while keys trade places
+                    self.db.execute("UPDATE clause_ver SET key=? WHERE version_id=? AND key=?", (TMP + new, vid, old))
+                    self.db.execute("UPDATE block_ver SET clause_key=? WHERE version_id=? AND clause_key=?",
+                                    (TMP + new, vid, old))
+                self.db.execute("UPDATE clause_ver SET key=substr(key, ?) WHERE version_id=? AND key LIKE ?",
+                                (len(TMP) + 1, vid, TMP + "%"))
+                self.db.execute("UPDATE block_ver SET clause_key=substr(clause_key, ?) WHERE version_id=? AND "
+                                "clause_key LIKE ?", (len(TMP) + 1, vid, TMP + "%"))
+                for old, (number, title, level) in fixed.items():
+                    self.db.execute("UPDATE clause_ver SET number=?, title=?, level=? WHERE version_id=? AND key=?",
+                                    (number, title, level, vid, mapping.get(old, old)))
+                for old, new in mapping.items():  # notes are per spec: follow the rename
+                    self.db.execute("UPDATE OR IGNORE note SET clause_key=? WHERE spec=? AND clause_key=?",
+                                    (new, v["spec"], old))
+                changed.add(v["spec"])
+        self.set_setting("keys_version", self.KEYS_VERSION)
+        if changed:
+            self._compared.clear()
+        return sorted(changed)
+
+    def specs_missing_history(self) -> list[str]:
+        """Specs with versions whose history was never computed (an import cut off before that step)."""
+        return [r[0] for r in self.db.execute(
+            "SELECT DISTINCT v.spec FROM version v WHERE EXISTS "
+            "(SELECT 1 FROM block_ver b WHERE b.version_id = v.id AND b.annot_hash IS NULL)")]
+
+    def _compute_history(self, vers: list[dict]) -> list:
+        return list(history.compute([v["version"] for v in vers], (self._load_clauses(v["id"]) for v in vers)))
+
+    def _write_history(self, vers: list[dict], results: list) -> None:
         db = self.db
         with db:
             for v, res in zip(vers, results):
@@ -333,6 +419,8 @@ class Library:
         for r in self.db.execute(q, args):
             d = dict(r)
             cover = json.loads(d.pop("cover") or "null")
+            if cover and cover.get("clauses_raw"):  # covers saved by older versions parsed "Annex A.2" as A and 2
+                cover["clauses"] = crdocs.parse_clauses(cover["clauses_raw"])
             d["detail"] = cover
             rows.append(d)
         rows.sort(key=lambda r: Version.parse(r["new_version"]).sort_key)
@@ -582,15 +670,71 @@ class Library:
 
     def get_setting(self, key: str, default: str | None = None) -> str | None:
         r = self.db.execute("SELECT value FROM setting WHERE key=?", (key,)).fetchone()
-        return r["value"] if r else default
+        if not r:
+            return default
+        return secret.unprotect(r["value"]) if key.endswith("api_key") else r["value"]
 
     def set_setting(self, key: str, value: str) -> None:
+        if key.endswith("api_key"):  # API keys are encrypted for the Windows user (secret.py)
+            value = secret.protect(value)
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO setting VALUES (?,?)", (key, value))
+
+    def protect_secrets(self) -> int:
+        """Encrypt API keys saved in plain text by earlier versions."""
+        if not secret.available():
+            return 0
+        rows = self.db.execute("SELECT key, value FROM setting WHERE key LIKE '%api_key'").fetchall()
+        todo = [(r["key"], r["value"]) for r in rows if r["value"] and not r["value"].startswith(secret.PREFIX)]
+        for k, v in todo:
+            self.set_setting(k, v)
+        return len(todo)
 
     def notes(self, spec: str) -> list[dict]:
         return [dict(r) for r in self.db.execute(
             "SELECT clause_key, bookmark, text, version, updated FROM note WHERE spec=? ORDER BY updated DESC", (spec,))]
+
+    def watch_report(self) -> list[dict]:
+        """Bookmarked or annotated clauses that changed after the version they were marked in (or are gone from
+        the latest version): what to re-read after downloading a new version."""
+        out = []
+        for (spec,) in self.db.execute("SELECT DISTINCT spec FROM note").fetchall():
+            vers = self.versions(spec)
+            if not vers:
+                continue
+            latest = vers[-1]["version"]
+            toc = {t["key"]: t for t in self.toc(spec, latest)}
+            for n in self.notes(spec):
+                t = toc.get(n["clause_key"])
+                if t is None:
+                    if n["version"] == latest:  # already seen at the latest version ("확인함")
+                        continue
+                    status = "removed"
+                else:
+                    try:
+                        newer = bool(n["version"] and t["last_changed"]
+                                     and Version.parse(t["last_changed"]) > Version.parse(n["version"]))
+                    except ValueError:
+                        newer = False
+                    if not newer:
+                        continue
+                    status = "changed"
+                out.append({"spec": spec, "clause_key": n["clause_key"], "number": t["number"] if t else "",
+                            "title": t["title"] if t else n["clause_key"], "status": status, "since": n["version"],
+                            "changed_in": t["last_changed"] if t else None, "latest": latest,
+                            "bookmark": bool(n["bookmark"]), "note": n["text"][:120]})
+        return out
+
+    def mark_watch_seen(self, spec: str, key: str | None = None) -> None:
+        """The user has read the change: compare against the latest version from now on."""
+        vers = self.versions(spec)
+        if not vers:
+            return
+        q, args = "UPDATE note SET version=? WHERE spec=?", [vers[-1]["version"], spec]
+        if key:
+            q, args = q + " AND clause_key=?", args + [key]
+        with self.db:
+            self.db.execute(q, args)
 
     def save_note(self, spec: str, key: str, bookmark: bool | None = None, text: str | None = None,
                   version: str | None = None) -> dict | None:
@@ -717,6 +861,82 @@ class Library:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO wi_summary VALUES (?,?)", (wi, json.dumps(data, ensure_ascii=False)))
 
+    # ------------------------------------------------------------ analysis status / release notes
+
+    def analysis_status(self) -> dict:
+        """How far the AI analysis got: per spec and version the paragraphs that changed, how many a CR explains
+        (what the full analysis summarises by default) and how many have a summary; CR analyses; WI summaries."""
+        out = []
+        for sp in self.specs():
+            spec = sp["number"]
+            vers = self.versions(spec)
+            crs = [c for c in self.crs(spec) if c["detail"] and c["cr"]]
+            done: dict[str, set[str]] = {}
+            for r in self.db.execute("SELECT version, raw_hash FROM annotation WHERE spec=? AND "
+                                     "json_extract(data, '$.intent.summary') IS NOT NULL", (spec,)):
+                done.setdefault(r["version"], set()).add(r["raw_hash"])
+            rows = []
+            for v in vers[1:]:
+                clauses = {x for c in crs if c["lib_version"] == v["version"] for x in c["detail"].get("clauses", []) if x}
+                # _touches(x, n) for any x, as set lookups: n itself, a parent of n, or a child of n is listed
+                parents = {x.rsplit(".", k)[0] for x in clauses for k in range(1, x.count(".") + 1)}
+                touched: dict[str, bool] = {}
+
+                def covers(n: str) -> bool:
+                    if n not in touched:
+                        parts = n.split(".")
+                        touched[n] = bool(n) and (n in parents or any(".".join(parts[:i]) in clauses
+                                                                       for i in range(1, len(parts) + 1)))
+                    return touched[n]
+                changed = covered = summarised = 0
+                for r in self.db.execute(
+                        "SELECT b.raw_hash, c.number FROM block_ver b JOIN annot a ON a.hash=b.annot_hash "
+                        "JOIN clause_ver c ON c.version_id=b.version_id AND c.key=b.clause_key "
+                        "WHERE b.version_id=? AND a.changed=?", (v["id"], v["version"])):
+                    changed += 1
+                    covered += covers(r["number"])
+                    summarised += r["raw_hash"] in done.get(v["version"], ())
+                rows.append({"version": v["version"], "changed": changed, "covered": covered, "summarised": summarised})
+            analysed = self.db.execute("SELECT count(*) FROM cr_analysis WHERE spec=?", (spec,)).fetchone()[0]
+            out.append({"spec": spec, "title": sp.get("title"), "versions": rows, "crs": len(crs),
+                        "cr_analyses": analysed,
+                        "changed": sum(r["changed"] for r in rows), "covered": sum(r["covered"] for r in rows),
+                        "summarised": sum(r["summarised"] for r in rows)})
+        wis = self.work_items()
+        last = self.get_setting("last_full_analysis")
+        return {"specs": out, "work_items": len(wis), "wi_summaries": sum(1 for w in wis if w["summary"]),
+                "last_full": json.loads(last) if last else None}
+
+    def release_input(self, spec: str, old: str, new: str) -> dict:
+        """What a release note between two versions is built from: the CRs in between (cover + stored analysis)
+        and the clauses that changed."""
+        lo, hi = Version.parse(old), Version.parse(new)
+        crs = []
+        for c in self.crs(spec):
+            if not c["cr"] or not (lo < Version.parse(c["new_version"]) <= hi):
+                continue
+            d = c["detail"] or {}
+            a = self.cr_analysis(spec, c["cr"], c["rev"], c["tdoc"]) if c["detail"] else None
+            crs.append({"cr": c["cr"], "tdoc": c["tdoc"], "version": c["new_version"], "meeting": c["meeting"],
+                        "cat": c["cat"], "title": d.get("title") or c["subject"], "wi": d.get("wi_code", ""),
+                        "clauses": d.get("clauses_raw", ""), "reason": d.get("reason", ""), "summary": d.get("summary", ""),
+                        "analysis": {k: a.get(k) for k in ("summary", "decision", "impact")} if a else None})
+        vid = self.version_id(spec, new)
+        changed = []
+        for r in self.db.execute("SELECT number, title, history FROM clause_ver WHERE version_id=? ORDER BY ord", (vid,)):
+            if any(lo < Version.parse(h[0]) <= hi for h in json.loads(r["history"] or "[]")):
+                changed.append(f"{r['number']} {r['title']}".strip())
+        return {"spec": spec, "old": old, "new": new, "crs": crs, "changed_clauses": changed}
+
+    def release_note(self, spec: str, old: str, new: str) -> dict | None:
+        r = self.db.execute("SELECT data FROM release_note WHERE spec=? AND old=? AND new=?", (spec, old, new)).fetchone()
+        return json.loads(r["data"]) if r else None
+
+    def save_release_note(self, spec: str, old: str, new: str, data: dict) -> None:
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO release_note VALUES (?,?,?,?)",
+                            (spec, old, new, json.dumps(data, ensure_ascii=False)))
+
     # ------------------------------------------------------------ chat
 
     def chats(self) -> list[dict]:
@@ -818,6 +1038,165 @@ class Library:
                   "snippet": r["snip"]} for r in rows]
         hits.sort(key=lambda h: (h["ord"], -1 if h["block"] is None else h["block"]))
         return hits
+
+    # ------------------------------------------------------------ citation map
+
+    _CITE = None
+
+    @classmethod
+    def _cite_patterns(cls):
+        import re
+
+        if cls._CITE is None:
+            spec = r"(\d{2}\.\d{3}(?:-\d{1,2})?)"
+            num = r"([A-Z](?:\.\d+)+|\d+(?:\.\d+)*[a-z]?)"
+            cl = r"(?:[Ss]ub)?[Cc]lauses?|[Aa]nnex|[Ss]ection"
+            cls._CITE = (
+                # clause X of [4, TS 38.211] / clause X in TS 38.211
+                re.compile(rf"(?:{cl})\s+{num}(?![.\-]?\d)\s+(?:of|in)\s+(?:\[\d+\]\s*,?\s*)?\[?(?:\d+\s*,\s*)?"
+                           rf"(?:3GPP\s+)?T[SR]\s*{spec}"),
+                # TS 38.211 [4], clause X
+                re.compile(rf"T[SR]\s*{spec}\]?\s*(?:\[\d+\])?\s*,?\s*(?:{cl})\s+{num}(?![.\-]?\d)"),
+                re.compile(rf"(?:{cl})\s+{num}(?![.\-]?\d)"),  # clause X: this spec
+                re.compile(rf"T[SR]\s*{spec}"),  # the spec as a whole
+            )
+        return cls._CITE
+
+    def _citations(self) -> list[tuple]:
+        """(from_spec, from_number, from_title, from_key, to_spec, to_clause or "") for every citation in the latest
+        version of every downloaded spec. One pass over the text (well under a second for several big specs),
+        kept until a spec gets a new latest version."""
+        latest = {x["number"]: self.versions(x["number"])[-1]["id"] for x in self.specs() if x["versions"]}
+        # data_version: another connection's commit (a re-import reusing a rowid, the startup re-key) shows
+        key = (tuple(sorted(latest.items())), self.db.execute("PRAGMA data_version").fetchone()[0])
+        cached = getattr(self, "_cite_cache", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        of, tscl, same, specref = self._cite_patterns()
+        edges = set()
+        for sp, vid in latest.items():
+            for r in self.db.execute(
+                    "SELECT c.number, c.title, c.key, x.text FROM block_ver b JOIN blob x ON x.hash = b.raw_hash "
+                    "JOIN clause_ver c ON c.version_id = b.version_id AND c.key = b.clause_key WHERE b.version_id = ?",
+                    (vid,)):
+                title = r["title"] or ""
+                if "change history" in title.lower() or title.lower() in ("references", "normative references"):
+                    continue
+                t, frm, spans = r["text"], (sp, r["number"], title, r["key"]), []
+                for m in of.finditer(t):
+                    edges.add(frm + (m.group(2), m.group(1)))
+                    spans.append(m.span())
+                for m in tscl.finditer(t):
+                    edges.add(frm + (m.group(1), m.group(2)))
+                    spans.append(m.span())
+                for m in same.finditer(t):
+                    if not any(a <= m.start() < b for a, b in spans) and m.group(1) != r["number"]:
+                        edges.add(frm + (sp, m.group(1)))
+                for m in specref.finditer(t):
+                    if m.group(1) != sp:
+                        edges.add(frm + (m.group(1), ""))
+        out = sorted(edges)
+        self._cite_cache = (key, out)
+        return out
+
+    def citation_map(self, top: int = 40) -> dict:
+        """Which downloaded spec cites which, counted in citing clauses; the most cited clauses; and the specs
+        cited that are not downloaded."""
+        from collections import defaultdict
+
+        edges = self._citations()
+        mine = [x["number"] for x in self.specs() if x["versions"]]
+        citing: dict[tuple, set] = defaultdict(set)
+        cited: dict[tuple, set] = defaultdict(set)
+        external: dict[str, set] = defaultdict(set)
+        for fs, fn, _ft, fk, ts, tc in edges:
+            if ts in mine:
+                citing[(fs, ts)].add(fk)
+                if tc and (fs, fn) != (ts, tc):
+                    cited[(ts, tc)].add((fs, fk))
+            else:
+                external[ts].add((fs, fk))
+        titles = {}
+        for sp in mine:
+            v = self.versions(sp)[-1]["version"]
+            titles.update({(sp, t["number"]): t["title"] for t in self.toc(sp, v) if t["number"]})
+        ranked = sorted(cited.items(), key=lambda kv: -len(kv[1]))[:top]
+        return {
+            "specs": mine,
+            "matrix": [{"from": f, "to": t, "clauses": len(k)} for (f, t), k in sorted(citing.items())],
+            "top_cited": [{"spec": sp, "clause": c, "title": titles.get((sp, c), ""), "count": len(by),
+                           "from_specs": sorted({f for f, _ in by})} for (sp, c), by in ranked],
+            "external": [{"spec": sp, "count": len(by)}
+                         for sp, by in sorted(external.items(), key=lambda kv: -len(kv[1]))[:30]],
+        }
+
+    def citation_pairs(self, frm: str, to: str) -> list[dict]:
+        """The clauses of ``frm`` that cite ``to``, with the clauses they cite (empty: the spec as a whole)."""
+        out: dict[str, dict] = {}
+        for fs, fn, ft, fk, ts, tc in self._citations():
+            if fs == frm and ts == to:
+                e = out.setdefault(fk, {"number": fn, "title": ft, "key": fk, "cites": []})
+                if tc and tc not in e["cites"]:
+                    e["cites"].append(tc)
+        import re
+
+        nat = lambda x: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", x)]  # noqa: E731 - 5.2 before 5.10
+        for e in out.values():
+            e["cites"].sort(key=nat)
+        return sorted(out.values(), key=lambda e: nat(e["number"] or e["title"]))
+
+    def referenced_by(self, spec: str, clause: str, limit: int = 300) -> list[dict]:
+        """Paragraphs (latest version of every downloaded spec) that cite ``clause`` of ``spec``: "clause 6.3.3.2"
+        inside the spec itself, "clause 6.3.3.2 of TS 38.211" / "TS 38.211 ... 6.3.3.2" in the others. What to
+        re-check when that clause changes."""
+        import re
+
+        num = re.sub(r"^(annex|clause)\s+", "", clause.strip(), flags=re.I)  # "Annex A" -> "A"
+        if not re.fullmatch(r"[A-Z]?\d*(\.\w+)*", num) or not num:
+            raise ValueError(f"not a clause number: {clause}")
+        tokens = re.findall(r"\w+", num)
+        exact = re.compile(rf"(?<![\w.\-]){re.escape(num)}(?![.\-]?\d)(?!\.[A-Za-z]\b)")  # not "Table 4.2-1"
+        cue = re.compile(r"(?:sub)?clauses?|annex|section", re.I)
+        out = []
+        for row in self.specs():
+            other = row["number"]
+            vers = self.versions(other)
+            if not vers:
+                continue
+            vid, latest = vers[-1]["id"], vers[-1]["version"]
+            q = '"' + " ".join(tokens) + '"'
+            if other != spec:
+                q += ' AND "' + " ".join(re.findall(r"\w+", spec)) + '"'
+            rows = self.db.execute(
+                "SELECT c.number, c.title, c.key, c.ord, b.ord AS block, x.text FROM blob_fts f "
+                "JOIN blob x ON x.hash = f.hash JOIN block_ver b ON b.raw_hash = f.hash AND b.version_id = ? "
+                "JOIN clause_ver c ON c.version_id = b.version_id AND c.key = b.clause_key "
+                "WHERE blob_fts MATCH ? ORDER BY c.ord, b.ord", (vid, q)).fetchall()
+            for r in rows:
+                own = re.sub(r"^annex\s+", "", r["number"] or "", flags=re.I)
+                if other == spec and (own == num or own.startswith(num + ".")):
+                    continue  # the clause itself and its sub-clauses
+                if "change history" in (r["title"] or "").lower() or r["title"].lower() == "references":
+                    continue
+                t = r["text"]
+                hit = None
+                for m in exact.finditer(t):
+                    before = t[max(0, m.start() - 60):m.start()]
+                    if other != spec and spec not in t[max(0, m.start() - 160):m.end() + 160]:
+                        continue  # another spec's clause with the same number
+                    if re.search(rf"(?:{cue.pattern})\s+(?:[\w.]+(?:,\s*|\s+and\s+|\s+or\s+))*$", before, re.I):
+                        hit = m  # "clause 4.5", "clauses 4.4.2 and 5.3", "Annex A"
+                        break
+                if not hit:
+                    continue
+                a, b = max(0, hit.start() - 90), min(len(t), hit.end() + 90)
+                out.append({"spec": other, "version": latest, "number": r["number"], "title": r["title"],
+                            "key": r["key"], "ord": r["ord"],
+                            "snippet": ("…" if a else "") + t[a:hit.start()] + "[[" + t[hit.start():hit.end()] + "]]"
+                                       + t[hit.end():b] + ("…" if b < len(t) else "")})
+                if len(out) >= limit:
+                    return out
+        return out
 
     def phrase_history(self, spec: str, query: str, per_event: int = 60, max_rows: int = 20000) -> dict:
         """Where an exact phrase occurs in every version: how many paragraphs and clauses, the first version that

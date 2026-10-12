@@ -1,12 +1,13 @@
 // Every CR of the spec's Change history in one list: filter by text, release, category, work item and AI
 // analysis; open the CR document, jump to the clauses it changed, and analyse the filtered CRs in one go.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { api, crKey, tdocUrl, type CR, type CRAnalysis, type TocEntry } from "../api";
 import type { VersionColor } from "../colors";
 import { announceAnalysesChanged, useCRAnalyses, useLlmReady } from "./CRAnalysis";
 import { openCRDoc } from "./DocWindow";
 import { CAT } from "./Panels";
 import { WISummaryPanel } from "./WISummary";
+import { crCsv, download } from "../export";
 
 const wiCodes = (c: CR) => (c.detail?.wi_code ?? "").split(/[,;\s]+/).filter(Boolean);
 const release = (c: CR) => c.detail?.release?.replace(/^Rel-?/i, "") || c.new_version.split(".")[0];
@@ -35,8 +36,9 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
   }, [rows]);
   const byNumber = useMemo(() => new Map(toc.map((t) => [t.number, t])), [toc]);
 
+  const fq = useDeferredValue(q);  // typing stays smooth; the long list follows a moment later
   const shown = useMemo(() => {
-    const low = q.trim().toLowerCase();
+    const low = fq.trim().toLowerCase();
     return rows.filter((c) => {
       const a = analyses.get(crKey(c.cr, c.tdoc));
       if (rel && release(c) !== rel) return false;
@@ -48,7 +50,18 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
       return [c.cr, c.tdoc, c.subject, c.meeting, c.detail?.wi_code, c.detail?.clauses_raw, c.detail?.wg_tdoc,
         a?.summary].some((x) => x?.toLowerCase().includes(low));
     });
-  }, [rows, analyses, q, rel, cat, wi, only]);
+  }, [rows, analyses, fq, rel, cat, wi, only]);
+  // a big spec has over a thousand CRs (38.101-1: 1280): render 200 and more as the list is scrolled
+  const [limit, setLimit] = useState(200);
+  useEffect(() => setLimit(200), [fq, rel, cat, wi, only]);
+  const more = useRef<HTMLTableRowElement>(null);
+  useEffect(() => {
+    const el = more.current;
+    if (!el) return;
+    const io = new IntersectionObserver((es) => es[0].isIntersecting && setLimit((n) => n + 200), { rootMargin: "600px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [limit, shown.length]);
   const todo = shown.filter((c) => c.detail && !analyses.has(crKey(c.cr, c.tdoc)));
   const covers = rows.filter((c) => c.detail).length;
 
@@ -64,15 +77,20 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
       setBatch({ done: i, total: list.length, current: `CR${c.cr}`, failed });
       try {
         const job = await api.analyzeCR(spec, c.cr, c.tdoc);
-        for (;;) {
+        for (let misses = 0; !stop.current;) {  // stop: leave this CR's job to finish on its own
           await new Promise((r) => setTimeout(r, 1500));
-          const j = (await api.jobs()).find((x) => x.id === job.id);
-          if (!j || j.state !== "running") {
-            if (j?.state !== "done") failed++;
+          const j = await api.job(job.id);
+          if (!j && ++misses > 40) { failed++; break; }  // the backend is gone
+          if (j && j.state !== "running") {
+            if (j.state !== "done") failed++;
             break;
           }
         }
-      } catch {
+      } catch (e) {
+        if (String(e).includes("이미 진행 중")) {  // another AI job (e.g. the full analysis) has the server
+          alert(`다른 AI 작업이 진행 중이라 일괄 분석을 멈췄습니다 (${i}/${list.length} 완료). 끝난 뒤에 다시 누르세요.`);
+          break;
+        }
         failed++;
       }
       announceAnalysesChanged();
@@ -112,7 +130,7 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
           <option value="not">분석 없음</option>
         </select>
       </div>
-      {wi && <WISummaryPanel wi={wi} spec={spec} byNumber={byNumber} llmReady={llmReady} onJump={onJump}
+      {wi && <WISummaryPanel key={wi} wi={wi} spec={spec} byNumber={byNumber} llmReady={llmReady} onJump={onJump}
                              onOpenSpec={onOpenSpec} />}
       <p className="small muted cr-browser-status">
         {shown.length} / {rows.length}개 CR · 표지 {covers}개
@@ -125,6 +143,10 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
                        onClick={() => confirm(`CR ${todo.length}개를 차례로 AI 분석합니다. 진행할까요?`) && runBatch(todo)}>
             분석 없는 {todo.length}개 AI 분석</button></>
         )}
+        {" · "}<button className="link" title="지금 목록(필터 적용)을 Excel 에서 열 수 있는 CSV 로 저장합니다 (표지·AI 분석 포함)"
+                        onClick={() => download(`TS${spec}_CR${rel ? `_Rel-${rel}` : ""}${wi ? `_${wi}` : ""}.csv`,
+                          crCsv(shown.map((c) => ({ cr: c, analysis: analyses.get(crKey(c.cr, c.tdoc)) }))), "text/csv")}>
+          ⬇ CSV (Excel)</button>
         {batch && (
           <> · <span className="job">AI 분석 {batch.done + 1}/{batch.total} ({batch.current})</span>{" "}
             <button className="link" onClick={() => { stop.current = true; }}>중지</button></>
@@ -139,7 +161,7 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
           <tr><th>버전</th><th>CR</th><th>Cat</th><th>제목</th><th>WI</th><th>회의</th><th /></tr>
         </thead>
         <tbody>
-          {shown.map((c) => {
+          {shown.slice(0, limit).map((c) => {
             const k = `${c.new_version}/${c.tdoc}/${c.cr}/${c.rev}`;  // the same CR can be listed twice
             const a = analyses.get(crKey(c.cr, c.tdoc));
             const isOpen = open === k;
@@ -162,6 +184,9 @@ export function CRBrowser({ spec, crs, toc, colors, onJump, onOpenSpec, onFetchC
               ),
             ];
           })}
+          {shown.length > limit && (
+            <tr ref={more}><td colSpan={7} className="muted small">… {shown.length - limit}개 더 (스크롤하면 이어서 표시)</td></tr>
+          )}
         </tbody>
       </table>
     </div>

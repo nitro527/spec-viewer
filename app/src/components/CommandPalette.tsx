@@ -42,19 +42,22 @@ export function CommandPalette({ spec, toc, versions, onJump, onVersion, onMode,
   }, [q, toc, versions, specs, spec, onJump, onVersion, onMode, onOpenSpec]);
 
   useEffect(() => setSel(0), [q]);
+  const list = useRef<HTMLUListElement>(null);
+  useEffect(() => { list.current?.children[sel]?.scrollIntoView({ block: "nearest" }); }, [sel]);
   const pick = (i: number) => { const it = items[i]; if (it) { it.run(); onClose(); } };
 
   return (
     <div className="palette-backdrop" onClick={onClose}>
-      <div className="palette" onClick={(e) => e.stopPropagation()}>
+      <div className="palette" onClick={(e) => e.stopPropagation()}
+           onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}>
         <input ref={input} value={q} onChange={(e) => setQ(e.target.value)} placeholder="절 번호·제목, 38.213 10.1, v16.2, compare…"
                onKeyDown={(e) => {
+                 if (e.nativeEvent.isComposing) return;  // Enter that ends a Hangul syllable is not a pick
                  if (e.key === "ArrowDown") { e.preventDefault(); setSel((s) => Math.min(s + 1, items.length - 1)); }
                  if (e.key === "ArrowUp") { e.preventDefault(); setSel((s) => Math.max(s - 1, 0)); }
                  if (e.key === "Enter") pick(sel);
-                 if (e.key === "Escape") onClose();
                }} />
-        <ul>
+        <ul ref={list}>
           {items.map((it, i) => (
             <li key={i} className={i === sel ? "on" : ""} onMouseEnter={() => setSel(i)} onClick={() => pick(i)}>
               <span>{it.label}</span><span className="muted small">{it.hint}</span>

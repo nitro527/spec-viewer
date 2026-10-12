@@ -89,5 +89,80 @@ def test_chat_api_keeps_the_conversation(library, tmp_path, monkeypatch):
     assert [m["role"] for m in conv["messages"]] == ["user", "assistant", "user", "assistant"]
     assert conv["title"] == "Q1" and conv["messages"][0]["context"]["clause"] == "4.3.1"
     assert [x["id"] for x in c.get("/api/chats").json()] == [cid]
+    # a question left without an answer (the app closed meanwhile) does not shift the turns after it
+    from specview.store import Library
+    lib = Library(tmp_path / "library.sqlite")
+    msgs = c.get(f"/api/chats/{cid}").json()["messages"] + [{"role": "user", "content": "lost"}]
+    lib.save_chat(cid, "Q1", msgs, "2026-01-01T00:00:00")
+    ask({"question": "Q3", "chat_id": cid})
+    ask({"question": "Q4", "chat_id": cid})  # the old pairing sent ("lost", "Q3") as a turn here
+    assert seen[-1][1] == ["Q1", "A:Q1", "Q2", "A:Q2", "Q3", "A:Q3"]
     c.delete(f"/api/chats/{cid}")
     assert c.get("/api/chats").json() == []
+
+
+@needs_pandoc
+def test_tool_calls_from_loose_servers_are_normalised(library):
+    sent = []
+
+    class Loose:
+        model = name = "loose"
+
+        def __init__(self):
+            self.n = 0
+
+        def complete(self, messages, tools=None):
+            sent.append([dict(m) for m in messages])
+            self.n += 1
+            if self.n == 1:  # dict arguments, no id, no type, a number for the clause
+                return {"content": "", "tool_calls": [{"function": {"name": "read_clause",
+                                                                    "arguments": {"spec": 99.211, "clause": 7.4}}}]}
+            if self.n == 2:  # arguments that are not an object
+                return {"content": "", "tool_calls": [{"id": "x", "function": {"name": "search", "arguments": "null"}}]}
+            return {"content": "끝"}
+
+    r = chat.answer(Loose(), library, "q")
+    assert r["answer"] == "끝"
+    echoed = [m for m in sent[1] if m["role"] == "assistant"][0]["tool_calls"][0]
+    assert echoed["id"] and echoed["type"] == "function" and isinstance(echoed["function"]["arguments"], str)
+    tool_reply = [m for m in sent[1] if m["role"] == "tool"][0]
+    assert tool_reply["tool_call_id"] == echoed["id"] and "error" in tool_reply["content"] or "text" in tool_reply["content"]
+
+
+@needs_pandoc
+def test_stop_ends_the_answer_between_requests(library):
+    import pytest
+
+    m = FakeModel([("list_specs", {}), ("list_specs", {}), ("list_specs", {})])
+    asked = []
+    with pytest.raises(chat.Stopped):
+        chat.answer(m, library, "스펙 목록?", should_stop=lambda: len(m.seen) >= 2, step=asked.append)
+    assert len(m.seen) == 2  # no request after the stop
+
+
+@needs_pandoc
+def test_referenced_by_finds_citing_paragraphs(library):
+    # the fixture's 7.4.1.1.1 says "... clause 5.2.1 of [4, TS 38.211]"; "Table 4.2-1" is no citation of clause 1
+    assert library.referenced_by("99.211", "1") == []
+    hits = library.referenced_by("38.211", "5.2.1")
+    assert [(h["spec"], h["number"]) for h in hits] == [("99.211", "7.4.1.1.1")] and "[[5.2.1]]" in hits[0]["snippet"]
+    out = json.loads(chat.SpecTools(library).call("referenced_by", {"spec": "38.211", "clause": "5.2.1"}))
+    assert out["count"] == 1 and out["citing"][0]["source"].startswith("99.211 §7.4.1.1.1")
+
+
+def test_answer_cut_at_the_length_limit_says_so():
+    assert chat._cut_note({"content": "절반", "finish_reason": "length"}).startswith("절반\n\n_(답변이")
+    assert chat._cut_note({"content": "전부", "finish_reason": "stop"}) == "전부"
+
+
+@needs_pandoc
+def test_tool_call_written_as_text_falls_back_to_search_results(library):
+    class TextCalls(FakeModel):
+        def complete(self, messages, tools=None):
+            if tools:
+                self.seen.append(messages)
+                return {"content": '<tool_call>search\n<arg_key>query</arg_key><arg_value>x</arg_value></tool_call>'}
+            return super().complete(messages, tools)
+
+    r = chat.answer(TextCalls([]), library, "sequence generation?")
+    assert r["mode"] == "retrieval" and "<tool_call>" not in r["answer"]

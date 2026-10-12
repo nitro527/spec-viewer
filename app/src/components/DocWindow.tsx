@@ -74,7 +74,7 @@ export function DocWindow() {
         </div>
         <div className="row">
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="문서 안에서 찾기"
-                 onKeyDown={(e) => e.key === "Enter" && search(e.shiftKey)} />
+                 onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && search(e.shiftKey)} />
           <button onClick={() => search()}>다음</button>
           {doc?.url && <a href={doc.url} target="_blank" rel="noreferrer" className="small">원문 받기</a>}
           {cr && tdoc && <a href={tdocUrl(tdoc)} target="_blank" rel="noreferrer" className="small">3GPP 포털</a>}
@@ -88,9 +88,11 @@ export function DocWindow() {
           // a Tdoc of the same meeting (R1-1812056) opens in another viewer window instead of the browser
           const a = (e.target as HTMLElement).closest("a");
           const id = a?.textContent?.trim() ?? "";
-          if (a && folder && /^R[1-4]-\d{6,7}$/.test(id)) {
+          if (a && folder && /^R[1-5]-\d{6,7}$/.test(id)) {
             e.preventDefault();
-            openMeetingDoc(folder, id);
+            // a Tdoc of an earlier meeting links into that meeting's folder (the backend checks it is 3GPP's)
+            const linked = a.getAttribute("href")?.match(/^(https?:\/\/.+)\/Docs\/R[1-5]-\d{6,7}\.zip$/i)?.[1];
+            openMeetingDoc(linked ?? folder, id);
           }
         }}>
           {cr && <p className="muted small">CR 의 수정 내용: <ins>추가</ins> · <del>삭제</del></p>}

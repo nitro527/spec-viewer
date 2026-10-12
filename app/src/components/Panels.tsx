@@ -1,6 +1,7 @@
 // Side panels: table of contents (left) and change information (right).
-import { useEffect, useMemo, useRef, useState } from "react";
-import { cmpVersion, crKey, crTouches, tdocUrl, type CR, type CRAnalysis, type Note, type TocEntry } from "../api";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { api, cmpVersion, crKey, crTouches, tdocUrl, type CR, type CRAnalysis, type Note, type RefHit, type TocEntry } from "../api";
 import { askAboutParagraph } from "../ask";
 import { openCRDoc } from "./DocWindow";
 import { useCRAnalyses } from "./CRAnalysis";
@@ -16,10 +17,11 @@ export function Toc({ toc, active, baseline, highlight, changedOnly, bookmarks, 
   toc: TocEntry[]; active: number; baseline: string; highlight: boolean; changedOnly: boolean;
   bookmarks: Set<string>; bookmarkedOnly: boolean; onJump: (ord: number) => void;
 }) {
-  const activeRef = useRef<HTMLButtonElement>(null);
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  useEffect(() => activeRef.current?.scrollIntoView({ block: "nearest" }), [active]);
+  const onJumpRef = useRef(onJump);
+  onJumpRef.current = onJump;
+  const jump = useCallback((ord: number) => onJumpRef.current(ord), []);
 
   const hasChildren = useMemo(() => {
     const s = new Set<string>();
@@ -43,11 +45,14 @@ export function Toc({ toc, active, baseline, highlight, changedOnly, bookmarks, 
     return out;
   }, [toc, query, collapsed]);
 
-  const toggle = (key: string) => setCollapsed((c) => {
+  const rows = useMemo(() => visible.filter((t) => (!changedOnly || (highlight && newer(t.last_changed, baseline)))
+    && (!bookmarkedOnly || bookmarks.has(t.key))), [visible, changedOnly, highlight, baseline, bookmarkedOnly, bookmarks]);
+
+  const toggle = useCallback((key: string) => setCollapsed((c) => {
     const n = new Set(c);
     if (n.has(key)) n.delete(key); else n.add(key);
     return n;
-  });
+  }), []);
 
   return (
     <>
@@ -56,19 +61,43 @@ export function Toc({ toc, active, baseline, highlight, changedOnly, bookmarks, 
         <button title="모두 접기" onClick={() => setCollapsed(new Set(toc.filter((t) => t.level === 1 && hasChildren.has(t.key)).map((t) => t.key)))}>−</button>
         <button title="모두 펼치기" onClick={() => setCollapsed(new Set())}>+</button>
       </div>
-      <nav className="toc">
-        {visible.map((t) => {
+      <TocRows rows={rows} active={active} highlight={highlight} baseline={baseline} bookmarks={bookmarks}
+               hasChildren={hasChildren} collapsed={collapsed} query={query} toggle={toggle} jump={jump} />
+    </>
+  );
+}
+
+// Only the rows in view are rendered (a 36.523-1 has ~9000 clauses); the clause shown in the document is
+// kept in view as it scrolls.
+const TocRows = memo(function TocRows({ rows, active, highlight, baseline, bookmarks, hasChildren, collapsed, query,
+  toggle, jump }: {
+  rows: TocEntry[]; active: number; highlight: boolean; baseline: string; bookmarks: Set<string>;
+  hasChildren: Set<string>; collapsed: Set<string>; query: string;
+  toggle: (key: string) => void; jump: (ord: number) => void;
+}) {
+  const nav = useRef<HTMLElement>(null);
+  const virt = useVirtualizer({ count: rows.length, getScrollElement: () => nav.current, estimateSize: () => 24,
+    overscan: 12 });
+  const indexOf = useMemo(() => new Map(rows.map((t, i) => [t.ord, i])), [rows]);
+  useEffect(() => {
+    const i = indexOf.get(active);
+    if (i !== undefined) virt.scrollToIndex(i, { align: "auto" });
+  }, [active, indexOf]);  // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <nav className="toc" ref={nav}>
+      <div style={{ height: virt.getTotalSize(), position: "relative" }}>
+        {virt.getVirtualItems().map((it) => {
+          const t = rows[it.index];
           const changed = highlight && newer(t.last_changed, baseline);
-          if (changedOnly && !changed) return null;
-          if (bookmarkedOnly && !bookmarks.has(t.key)) return null;
           return (
-            <div key={t.ord} className={`toc-row ${t.ord === active ? "active" : ""}`}
-                 style={{ paddingLeft: (Math.max(t.level, 1) - 1) * 12 }}>
+            <div key={t.ord} data-index={it.index} ref={virt.measureElement} data-ord={t.ord}
+                 className={`toc-row ${t.ord === active ? "active" : ""}`}
+                 style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${it.start}px)`,
+                          paddingLeft: (Math.max(t.level, 1) - 1) * 12 }}>
               {hasChildren.has(t.key) && !query
                 ? <button className="twisty" onClick={() => toggle(t.key)}>{collapsed.has(t.key) ? "▸" : "▾"}</button>
                 : <span className="twisty" />}
-              <button ref={t.ord === active ? activeRef : undefined} className="toc-item"
-                      onClick={() => onJump(t.ord)} title={`${t.number} ${t.title}`}>
+              <button className="toc-item" onClick={() => jump(t.ord)} title={`${t.number} ${t.title}`}>
                 {changed && <span className="dot" data-bv={t.last_changed!} />}
                 <span className="num">{t.number}</span> {t.title}
                 {bookmarks.has(t.key) && <span className="toc-star">★</span>}
@@ -76,10 +105,54 @@ export function Toc({ toc, active, baseline, highlight, changedOnly, bookmarks, 
             </div>
           );
         })}
-      </nav>
-    </>
+      </div>
+    </nav>
+  );
+});
+
+/** Paragraphs that cite this clause, here and in the other downloaded specs: what else to re-check when it
+ *  changes. Looked up when opened. */
+function ReferencedBy({ spec, clause, onXref }: {
+  spec: string; clause: string; onXref: (clause: string | undefined, spec: string | undefined) => void;
+}) {
+  const [refs, setRefs] = useState<RefHit[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = () => {
+    if (refs) return;
+    setError(null);
+    api.referencedBy(spec, clause).then(setRefs, (e) => setError(String(e).replace(/^Error: /, "")));
+  };
+  const bySpec = useMemo(() => {
+    const m = new Map<string, RefHit[]>();
+    (refs ?? []).forEach((r) => m.set(r.spec, [...(m.get(r.spec) ?? []), r]));
+    return [...m].sort(([a], [b]) => (a === spec ? -1 : b === spec ? 1 : a.localeCompare(b)));
+  }, [refs, spec]);
+  return (
+    <details className="refby" onToggle={(e) => (e.target as HTMLDetailsElement).open && load()}>
+      <summary className="small">이 절(§{clause})을 인용하는 곳{refs ? ` ${refs.length}` : ""}
+        <span className="muted"> · 받은 스펙의 최신 버전</span></summary>
+      {error && <p className="small status-error">{error}</p>}
+      {refs && !refs.length && <p className="small muted">인용하는 문단을 찾지 못했습니다.</p>}
+      {bySpec.map(([sp, hits]) => (
+        <div key={sp}>
+          <p className="small"><b>TS {sp}</b>{sp === spec ? " (이 스펙)" : ""} · {hits.length}곳 <span className="muted">v{hits[0].version}</span></p>
+          <ul>
+            {hits.map((h, i) => (
+              <li key={i} className="small">
+                <button className="link" onClick={() => onXref(h.number || h.key, sp === spec ? undefined : sp)}>
+                  §{h.number || h.title}</button>{" "}
+                <span className="muted" dangerouslySetInnerHTML={{
+                  __html: escapeHtml(h.snippet).replace(/\[\[/g, "<mark>").replace(/\]\]/g, "</mark>") }} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </details>
   );
 }
+
+const escapeHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 /** Scrollbar-side overview: one tick per changed clause, like an editor's minimap markers. */
 export function ChangeRuler({ toc, baseline, onJump }: { toc: TocEntry[]; baseline: string; onJump: (ord: number) => void }) {
@@ -132,20 +205,22 @@ function CRItemView({ cr, hit, analysis }: { cr: CR; hit?: boolean; analysis?: C
 function CRList({ crs, clause }: { crs: CR[]; clause?: string }) {
   const analyses = useCRAnalyses(crs[0]?.spec ?? "");
   if (!crs.length) return <p className="muted small">Change history 에 CR 기록 없음</p>;
-  const CRItem = (p: { cr: CR; hit?: boolean }) => <CRItemView {...p} analysis={analyses.get(crKey(p.cr.cr, p.cr.tdoc))} />;
+  // a plain function, not a component made during render (that remounted every item and closed its details)
+  const CRItem = (p: { cr: CR; hit?: boolean; key: number }) =>
+    <CRItemView key={p.key} cr={p.cr} hit={p.hit} analysis={analyses.get(crKey(p.cr.cr, p.cr.tdoc))} />;
   const haveDetail = crs.some((c) => c.detail);
-  if (!clause || !haveDetail) return <ul className="cr-list">{crs.map((cr, i) => <CRItem key={i} cr={cr} />)}</ul>;
+  if (!clause || !haveDetail) return <ul className="cr-list">{crs.map((cr, i) => CRItem({ key: i, cr }))}</ul>;
   const hits = crs.filter((c) => crTouches(c, clause));
   const rest = crs.filter((c) => !crTouches(c, clause));
   return (
     <>
       {hits.length > 0
-        ? <ul className="cr-list">{hits.map((cr, i) => <CRItem key={i} cr={cr} hit />)}</ul>
+        ? <ul className="cr-list">{hits.map((cr, i) => CRItem({ key: i, cr, hit: true }))}</ul>
         : <p className="muted small">이 절을 “Clauses affected”에 적은 CR이 없습니다.</p>}
       {rest.length > 0 && (
         <details className="cr-rest">
           <summary className="muted small">이 버전의 다른 CR ({rest.length})</summary>
-          <ul className="cr-list">{rest.map((cr, i) => <CRItem key={i} cr={cr} />)}</ul>
+          <ul className="cr-list">{rest.map((cr, i) => CRItem({ key: i, cr }))}</ul>
         </details>
       )}
     </>
@@ -155,11 +230,15 @@ function CRList({ crs, clause }: { crs: CR[]; clause?: string }) {
 function NoteEditor({ initial, meta, onSave }: { initial: string; meta?: Note; onSave: (text: string) => void }) {
   const [text, setText] = useState(initial);
   const dirty = text !== initial;
+  const latest = useRef({ text, dirty, onSave });
+  latest.current = { text, dirty, onSave };
+  // closing the panel or picking another paragraph unmounts the editor without a blur: save what was typed
+  useEffect(() => () => { const l = latest.current; if (l.dirty) l.onSave(l.text); }, []);
   return (
     <section className="note-editor">
       <h4>내 메모 <span className="muted small">버전이 바뀌어도 이 절에 유지</span></h4>
       <textarea value={text} rows={3} placeholder="구현 메모, 확인할 점…" onChange={(e) => setText(e.target.value)}
-                onBlur={() => dirty && onSave(text)} />
+                onBlur={() => { if (dirty) { latest.current.dirty = false; onSave(text); } }} />
       <div className="tiny muted">{dirty ? "포커스를 옮기면 저장" : meta ? `저장됨 · ${meta.updated.replace("T", " ")}${meta.version ? ` (v${meta.version} 보던 중)` : ""}` : ""}</div>
     </section>
   );
@@ -171,10 +250,12 @@ export const CAT: Record<string, string> = {
 };
 
 export function InfoPanel({ spec, selection, version, baseline, crsByVersion, colors, onClose, onFetchCrs, fetching,
-  note, onSaveNote }: {
+  note, onSaveNote, onXref, notesReady = true }: {
   spec: string; selection: Selection | null; version: string; baseline: string; crsByVersion: Map<string, CR[]>;
   colors: Map<string, VersionColor>; onClose: () => void; onFetchCrs?: () => void; fetching?: string | null;
   note?: Note; onSaveNote: (key: string, text: string) => void;
+  onXref: (clause: string | undefined, spec: string | undefined) => void;
+  notesReady?: boolean;
 }) {
   const hasDetail = [...crsByVersion.values()].some((l) => l.some((c) => c.detail_status));
   const block = selection && selection.block !== null ? selection.clause.blocks[selection.block] : null;
@@ -199,7 +280,7 @@ export function InfoPanel({ spec, selection, version, baseline, crsByVersion, co
       {selection ? (
         <>
           {block && (
-            <ParagraphHistory spec={spec} version={version} clauseKey={selection.clause.key} rawHash={block.raw_hash}
+            <ParagraphHistory key={`${selection.clause.key}/${block.raw_hash}`} spec={spec} version={version} clauseKey={selection.clause.key} rawHash={block.raw_hash}
                               colors={colors} />
           )}
           <p className="muted small">{block ? "이 문단이 바뀐 버전에 반영된 CR" : "절 전체의 변경 이력"}</p>
@@ -223,9 +304,14 @@ export function InfoPanel({ spec, selection, version, baseline, crsByVersion, co
             <p className="small note">CR 표지(변경 이유·Clauses affected)를 아직 받지 않았습니다.{" "}
               <button className="link" onClick={onFetchCrs}>CR 표지 받기</button></p>
           )}
-          <NoteEditor key={selection.clause.key} initial={note?.text ?? ""} meta={note}
-                      onSave={(t) => onSaveNote(selection.clause.key, t)} />
-          <AnnotationPanel spec={spec} version={version} clauseKey={selection.clause.key} rawHash={block?.raw_hash} />
+          {selection.clause.number && (
+            <ReferencedBy key={selection.clause.key} spec={spec} clause={selection.clause.number} onXref={onXref} />
+          )}
+          {notesReady && (  // an editor opened before the notes arrive would save "" over a stored note
+            <NoteEditor key={selection.clause.key} initial={note?.text ?? ""} meta={note}
+                        onSave={(t) => onSaveNote(selection.clause.key, t)} />
+          )}
+          <AnnotationPanel key={`${version}/${selection.clause.key}/${block?.raw_hash ?? ""}`} spec={spec} version={version} clauseKey={selection.clause.key} rawHash={block?.raw_hash} />
           <FeaturePanel spec={spec} version={version} clauseKey={selection.clause.key} />
         </>
       ) : (

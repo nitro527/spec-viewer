@@ -203,6 +203,12 @@ def test_fetch_job_goes_on_after_a_timeout_and_a_second_run_fetches_only_what_fa
     j = run()
     assert asked == [flaky] and "받지 못함" not in j["message"] and f"이미 받은 {len(docs) - 1}개" in j["message"]
     assert len(c.get("/api/specs/99.211/versions").json()) == len(docs)
+    # "새 버전 받기": nothing newer than what is there
+    asked.clear()
+    job = c.post("/api/fetch", json={"specs": ["99.211"], "with_crs": False, "only_newer": True}).json()
+    while next(x for x in c.get("/api/jobs").json() if x["id"] == job["id"])["state"] == "running":
+        time.sleep(0.05)
+    assert asked == []
 
 
 def test_download_retries_a_body_cut_off_midway(tmp_path, monkeypatch):
@@ -221,3 +227,84 @@ def test_download_retries_a_body_cut_off_midway(tmp_path, monkeypatch):
     monkeypatch.setattr(download, "_download", flaky)
     rv = download.RemoteVersion("38.211", download.Version.parse("17.0.0"), "https://x/38211-h00.zip")
     assert [p.name for p in download.fetch(rv, tmp_path)] == ["38211-h00.docx"] and len(calls) == 3
+
+
+def test_static_files_stay_inside_the_ui_folder(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from specview.api import create_app
+
+    ui = tmp_path / "ui"
+    (ui / "assets").mkdir(parents=True)
+    (ui / "index.html").write_text("INDEX")
+    (tmp_path / "secret.txt").write_text("SECRET")
+    c = TestClient(create_app(tmp_path / "home", ui))
+    for p in ("/..%2fsecret.txt", "/%2e%2e/secret.txt", "/..%2f..%2fsecret.txt"):
+        assert "SECRET" not in c.get(p).text
+    assert c.get("/index.html").text == "INDEX"
+    assert c.get("/api/specs", headers={"Host": "evil.example"}).status_code == 400
+
+
+def test_damaged_zip_in_cache_is_downloaded_again(tmp_path, monkeypatch):
+    rv = download.RemoteVersion("38.211", download.Version.parse("17.0.0"), "https://x/38211-h00.zip")
+    d = tmp_path / "38.211" / "17.0.0"
+    d.mkdir(parents=True)
+    (d / "38211-h00.zip").write_bytes(b"PK\x03\x04 cut off")  # an earlier download that was cut short
+
+    def good(s, url, dest, progress):
+        with zipfile.ZipFile(dest, "w") as z:
+            z.writestr("38211-h00.docx", b"x")
+
+    monkeypatch.setattr(download, "_download", good)
+    assert [p.name for p in download.fetch(rv, tmp_path)] == ["38211-h00.docx"]
+    assert not list(d.glob("*.part"))
+
+
+@needs_pandoc
+def test_history_missing_after_an_interrupted_import_is_repaired(tmp_path, fixture_docs):
+    import threading
+
+    from specview.parse_docx import parse_docx
+    from specview.store import Library
+    from specview.versions import parse_archive_name
+
+    lib = Library(tmp_path / "library.sqlite")
+    for p in fixture_docs:
+        spec, version = parse_archive_name(p.name)
+        lib.add_version(spec, version, parse_docx(p), recompute=False)  # the app closed before history
+    assert lib.specs_missing_history() == ["99.211"]
+    lib.recompute_history("99.211", lock=threading.Lock())  # computed on its own connection, written under the lock
+    assert lib.specs_missing_history() == []
+    assert any(c["status"] for c in lib.toc("99.211", lib.versions("99.211")[-1]["version"]))
+
+
+def test_other_sites_cannot_change_settings_and_pages_get_a_csp(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from specview.api import create_app
+
+    ui = tmp_path / "ui"
+    (ui / "assets").mkdir(parents=True)
+    (ui / "index.html").write_text("INDEX")
+    c = TestClient(create_app(tmp_path / "home", ui))
+    body = {"provider": "openai", "base_url": "http://attacker.example/v1", "model": "x"}
+    for origin in ("http://evil.example", "null"):
+        assert c.put("/api/llm", json=body, headers={"Origin": origin}).status_code == 403
+    assert c.put("/api/llm", json=body, headers={"Origin": "http://testserver"}).status_code == 200  # the app itself
+    assert c.put("/api/llm", json=body).status_code == 200  # no Origin: not a browser page
+    csp = c.get("/").headers["content-security-policy"]
+    assert "script-src 'self'" in csp and "unsafe-inline" not in csp.split("script-src")[1].split(";")[0]
+
+
+@needs_pandoc
+def test_script_links_in_documents_are_removed(tmp_path):
+    import subprocess
+
+    from specview.parse_docx import docx_view_html, parse_docx
+
+    md = tmp_path / "x.md"
+    md.write_text("# 1 Scope\n\n[bad](javascript:alert(1)) [good](https://www.3gpp.org) [mail](mailto:a@b.c)\n")
+    docx = tmp_path / "x.docx"
+    subprocess.run(["pandoc", str(md), "-o", str(docx)], check=True)
+    for h in (docx_view_html(docx), "".join(b.html for c in parse_docx(docx).clauses for b in c.blocks)):
+        assert "javascript:" not in h and 'href="https://www.3gpp.org"' in h and "mailto:a@b.c" in h

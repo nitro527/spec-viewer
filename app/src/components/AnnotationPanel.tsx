@@ -27,7 +27,7 @@ export function AnnotationPanel({ spec, version, clauseKey, rawHash }: {
   useEffect(() => {
     if (!jobId) return;
     const t = setInterval(async () => {
-      const j = (await api.jobs()).find((x) => x.id === jobId);
+      const j = await api.job(jobId);
       if (!j) return;
       if (j.state === "running") return setMsg(j.total ? `AI 요약 중 ${j.done}/${j.total}…` : "AI 요약 준비 중…");
       setMsg(j.message);

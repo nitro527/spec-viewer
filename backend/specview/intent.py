@@ -10,6 +10,7 @@ import json
 import os
 import re
 import time
+from typing import Callable
 
 import requests
 
@@ -59,20 +60,30 @@ CR_SYSTEM = (
 )
 
 
+def _cap(text: str, n: int) -> str:
+    """One prompt section at most ``n`` characters: a huge CR or a long agreement list must not push the
+    request past the model's context (the server then answers 400 and the whole item fails)."""
+    return text if len(text) <= n else text[:n] + f"\n… ({len(text) - n} more characters omitted)"
+
+
+def _js(x) -> str:
+    return json.dumps(x, ensure_ascii=False, indent=1)
+
+
 def cr_prompt(ev: dict) -> str:
     parts = [f"Spec {ev['spec']} CR{ev['cr']} ({ev.get('tdoc', '')}).",
-             f"<cover>\n{json.dumps(ev['cover'], ensure_ascii=False, indent=1)}\n</cover>"]
+             f"<cover>\n{_cap(_js(ev['cover']), 12000)}\n</cover>"]
     if ev.get("changes"):
-        parts.append("<cr_changes>\n" + "\n".join(
-            f"[{c['clause']}]\n" + "\n".join(c["lines"]) for c in ev["changes"]) + "\n</cr_changes>")
+        parts.append("<cr_changes>\n" + _cap("\n".join(
+            f"[{c['clause']}]\n" + "\n".join(c["lines"]) for c in ev["changes"]), 30000) + "\n</cr_changes>")
     if ev.get("drafts"):
-        parts.append(f"<draft_crs>\n{json.dumps(ev['drafts'], ensure_ascii=False, indent=1)}\n</draft_crs>")
+        parts.append(f"<draft_crs>\n{_cap(_js(ev['drafts']), 10000)}\n</draft_crs>")
     if ev.get("agreements"):
         ag = [{k: a.get(k) for k in ("meeting", "agenda", "kind", "text")} for a in ev["agreements"]]
-        parts.append(f"<wg_agreements>\n{json.dumps(ag, ensure_ascii=False, indent=1)}\n</wg_agreements>")
+        parts.append(f"<wg_agreements>\n{_cap(_js(ag), 10000)}\n</wg_agreements>")
     if ev.get("fl_summaries"):
         fl = [{k: f.get(k) for k in ("tdoc", "title", "meeting", "excerpt")} for f in ev["fl_summaries"]]
-        parts.append(f"<feature_lead_summaries>\n{json.dumps(fl, ensure_ascii=False, indent=1)}\n"
+        parts.append(f"<feature_lead_summaries>\n{_cap(_js(fl), 8000)}\n"
                      "</feature_lead_summaries>")
     return "\n\n".join(parts)
 
@@ -131,6 +142,55 @@ def wi_prompt(wi: dict, max_chars: int = 60000) -> str:
     return f"Work item {wi['wi']}: {len(rows)} CRs.\n<crs>\n" + "\n".join(rows) + "\n</crs>"
 
 
+RN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "overview": {"type": "string", "description": "What changed between the two versions, 3-5 sentences."},
+        "features": {"type": "array", "description": "New or changed functionality (category B/C CRs), grouped by "
+                                                     "work item.",
+                     "items": {"type": "object",
+                               "properties": {"wi": {"type": "string"}, "what": {"type": "string"},
+                                              "crs": {"type": "string", "description": "CR numbers, e.g. 0023, 0031"},
+                                              "clauses": {"type": "string"}},
+                               "required": ["wi", "what", "crs", "clauses"], "additionalProperties": False}},
+        "corrections": {"type": "array", "description": "Corrections (category F/A) worth knowing, most important first.",
+                        "items": {"type": "object",
+                                  "properties": {"what": {"type": "string"}, "crs": {"type": "string"},
+                                                 "clauses": {"type": "string"}},
+                                  "required": ["what", "crs", "clauses"], "additionalProperties": False}},
+        "impact": {"type": "string", "description": "What a UE/modem implementer has to look at, across the CRs."},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    },
+    "required": ["overview", "features", "corrections", "impact", "confidence"],
+    "additionalProperties": False,
+}
+
+RN_SYSTEM = (
+    "You write release notes of a 3GPP specification between two versions for physical-layer modem engineers, "
+    "from the change requests (CRs) in between: their cover pages (category B/C = feature, F/A = correction, "
+    "D = editorial), the clauses they changed, and earlier analyses where available. Group features by work item, "
+    "list the corrections that matter (skip editorial ones), and say what an implementer has to check. Use only the "
+    "provided material and name the CRs you rely on. Write in {language}; keep 3GPP terms in English."
+)
+
+
+def rn_prompt(data: dict, max_chars: int = 60000) -> str:
+    rows, used = [], 0
+    for c in data["crs"]:
+        row = {k: c[k] for k in ("cr", "version", "meeting", "cat", "title", "wi", "clauses")}
+        row.update(reason=(c["reason"] or "")[:500], summary=(c["summary"] or "")[:700])
+        if c.get("analysis"):
+            row["analysis"] = {k: (v or "")[:500] for k, v in c["analysis"].items()}
+        text = json.dumps(row, ensure_ascii=False)
+        if used + len(text) > max_chars:
+            text = json.dumps({k: c[k] for k in ("cr", "version", "cat", "title", "wi", "clauses")}, ensure_ascii=False)
+        used += len(text)
+        rows.append(text)
+    return (f"TS {data['spec']} from v{data['old']} to v{data['new']}: {len(rows)} CRs, "
+            f"{len(data['changed_clauses'])} clauses changed.\n<crs>\n" + "\n".join(rows) + "\n</crs>\n"
+            "<changed_clauses>\n" + "\n".join(data["changed_clauses"][:300]) + "\n</changed_clauses>")
+
+
 SYSTEM = (
     "You explain changes in 3GPP specifications to physical-layer modem engineers. "
     "<changes> lists exactly which words were removed (-) and added (+) in the paragraph. "
@@ -155,23 +215,23 @@ def user_prompt(ch: dict) -> str:
               for c in ch.get("draft_covers", [])]
     parts = [f"Spec clause {ch['clause']} ({ch['title']}), change type: {ch['change']}."]
     if ch.get("changes"):
-        parts.append("<changes>\n" + "\n".join(ch["changes"]) + "\n</changes>")
-    parts.append(f"<old_text>\n{ch.get('old_text') or '(none - newly added)'}\n</old_text>")
-    parts.append(f"<new_text>\n{ch['text']}\n</new_text>")
+        parts.append("<changes>\n" + _cap("\n".join(ch["changes"]), 20000) + "\n</changes>")
+    parts.append(f"<old_text>\n{_cap(ch.get('old_text') or '(none - newly added)', 15000)}\n</old_text>")
+    parts.append(f"<new_text>\n{_cap(ch['text'], 15000)}\n</new_text>")
     if drafts:
-        parts.append(f"<draft_crs>\n{json.dumps(drafts, ensure_ascii=False, indent=1)}\n</draft_crs>")
+        parts.append(f"<draft_crs>\n{_cap(_js(drafts), 10000)}\n</draft_crs>")
     if ch.get("agreements"):
         ag = [{k: a.get(k) for k in ("meeting", "agenda", "kind", "text")} for a in ch["agreements"]]
-        parts.append(f"<wg_agreements>\n{json.dumps(ag, ensure_ascii=False, indent=1)}\n</wg_agreements>")
+        parts.append(f"<wg_agreements>\n{_cap(_js(ag), 10000)}\n</wg_agreements>")
     if ch.get("fl_summaries"):
         fl = [{k: f.get(k) for k in ("tdoc", "title", "meeting", "excerpt")} for f in ch["fl_summaries"]]
-        parts.append(f"<feature_lead_summaries>\n{json.dumps(fl, ensure_ascii=False, indent=1)}\n</feature_lead_summaries>")
+        parts.append(f"<feature_lead_summaries>\n{_cap(_js(fl), 8000)}\n</feature_lead_summaries>")
     if ch.get("cr_analyses"):
         ca = [{k: a.get(k) for k in ("cr", "summary", "background", "changes", "decision")} for a in ch["cr_analyses"]]
-        parts.append(f"<cr_analysis>\n{json.dumps(ca, ensure_ascii=False, indent=1)}\n</cr_analysis>")
+        parts.append(f"<cr_analysis>\n{_cap(_js(ca), 10000)}\n</cr_analysis>")
     if ch.get("relevant_lines"):
-        parts.append("<relevant_cr_lines>\n" + "\n".join(ch["relevant_lines"]) + "\n</relevant_cr_lines>")
-    parts.append(f"<cr_cover_pages>\n{json.dumps(covers, ensure_ascii=False, indent=1)}\n</cr_cover_pages>")
+        parts.append("<relevant_cr_lines>\n" + _cap("\n".join(ch["relevant_lines"]), 10000) + "\n</relevant_cr_lines>")
+    parts.append(f"<cr_cover_pages>\n{_cap(_js(covers), 12000)}\n</cr_cover_pages>")
     return "\n\n".join(parts)
 
 
@@ -206,16 +266,32 @@ _THINK = re.compile(r"<think>.*?</think>", re.S)
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.S)
 
 
+def strip_think(text: str) -> str:
+    """Drop reasoning: <think>...</think> blocks, everything up to a closing </think> whose opening tag was part
+    of the prompt template (GLM / Qwen3 on vLLM without a reasoning parser), and an unterminated <think>."""
+    t = _THINK.sub("", text or "")
+    if "</think>" in t:
+        t = t.rsplit("</think>", 1)[1]
+    if t.lstrip().startswith("<think>"):
+        return ""
+    return t.strip()
+
+
 def _parse_json(text: str) -> dict:
-    """Reasoning models may prepend <think> blocks or wrap JSON in fences."""
-    t = _FENCE.sub("", _THINK.sub("", text).strip()).strip()
+    """Reasoning models may prepend <think> blocks, wrap JSON in fences or add prose around it."""
+    t = _FENCE.sub("", strip_think(text)).strip()
     try:
         return json.loads(t)
     except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", t, re.S)
-        if not m:
-            raise
-        return json.loads(m.group(0))
+        dec = json.JSONDecoder()
+        for m in re.finditer(r"\{", t):  # the first complete object, wherever it starts
+            try:
+                obj, _ = dec.raw_decode(t, m.start())
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                return obj
+        raise
 
 
 def _error_body(r) -> dict:
@@ -271,6 +347,7 @@ class OpenAICompatIntentModel:
         self.timeout = timeout
         self.session = session or requests.Session()
         self._schema_mode = "json_schema"  # downgraded to json_object if the server rejects it
+        self._stream_ok = True  # set False when the server rejects "stream": answers then come in one piece
 
     @classmethod
     def from_preset(cls, preset: str, model: str | None = None, base_url: str | None = None,
@@ -287,10 +364,13 @@ class OpenAICompatIntentModel:
             h["Authorization"] = f"Bearer {self.api_key}"
         return h
 
-    def _post(self, body: dict):
+    def _post(self, body: dict, stream: bool = False):
         try:
             return self.session.post(f"{self.base_url}/chat/completions", json=body, headers=self._headers(),
-                                     timeout=self.timeout)
+                                     timeout=(20, self.timeout), **({"stream": True} if stream else {}))
+        except requests.ReadTimeout as e:
+            raise LLMError(f"LLM 서버가 {int(self.timeout)}초 안에 답하지 않았습니다 (모델이 느리거나 입력이 김; "
+                           "SPECVIEW_LLM_TIMEOUT 으로 늘릴 수 있음)") from e
         except requests.RequestException as e:
             raise LLMError(f"LLM 서버에 연결할 수 없습니다 (주소·네트워크·프록시 확인): {e}") from e
 
@@ -305,7 +385,8 @@ class OpenAICompatIntentModel:
         for attempt in range(4):
             r = self._post(body)
             if (r.status_code == 400 and structured and self._schema_mode == "json_schema"
-                    and not re.search(r"api[ _-]?key", str(_error_body(r).get("message", "")), re.I)):
+                    and not re.search(r"api[ _-]?key|context|token|length|too long|maximum",
+                                      str(_error_body(r).get("message", "")), re.I)):
                 raise _NoJsonSchema(_http_error(r))
             if r.status_code == 429:
                 err = _error_body(r)
@@ -314,7 +395,7 @@ class OpenAICompatIntentModel:
                 if attempt < 3:  # per-minute limit: wait as long as the server asks
                     time.sleep(min(_retry_delay(err) or 2 ** attempt * 2, 60))
                     continue
-            elif r.status_code in (500, 502, 503) and attempt < 3:
+            elif r.status_code in (408, 500, 502, 503, 504) and attempt < 3:
                 time.sleep(2 ** attempt * 2)
                 continue
             if r.status_code >= 400:
@@ -322,16 +403,27 @@ class OpenAICompatIntentModel:
             return r.json()
         raise _http_error(r)
 
-    def complete(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
+    def complete(self, messages: list[dict], tools: list[dict] | None = None,
+                 on_text: Callable[[str], None] | None = None) -> dict:
         """One chat completion, optionally with function tools; returns the assistant message
-        (``content`` with any <think> block removed, ``tool_calls`` when the model asks for tools)."""
+        (``content`` with any <think> block removed, ``tool_calls`` when the model asks for tools).
+        With ``on_text`` the answer is streamed: it gets the visible text so far (reasoning hidden) as it grows."""
         body = {"model": self.model, "messages": messages, "temperature": 0.2}
         if tools:
             body["tools"], body["tool_choice"] = tools, "auto"
+        stream = bool(on_text) and self._stream_ok
         for attempt in range(4):
-            r = self._post(body)
-            if r.status_code == 400 and tools and not re.search(
-                    r"api[ _-]?key|context|token", str(_error_body(r).get("message", "")), re.I):
+            if stream:
+                body["stream"] = True
+            else:
+                body.pop("stream", None)
+            r = self._post(body, stream=stream)
+            msg400 = str(_error_body(r).get("message", "")) if r.status_code == 400 else ""
+            if stream and r.status_code == 400 and re.search(r"stream", msg400, re.I):
+                self._stream_ok = stream = False  # an older server: ask again in one piece
+                continue
+            if tools and r.status_code == 400 and re.search(r"tool|function", msg400, re.I) \
+                    and not re.search(r"context|token|length|maximum", msg400, re.I):
                 raise ToolsUnsupported(str(_http_error(r)))
             if r.status_code == 429:
                 err = _error_body(r)
@@ -340,17 +432,70 @@ class OpenAICompatIntentModel:
                 if attempt < 3:
                     time.sleep(min(_retry_delay(err) or 2 ** attempt * 2, 60))
                     continue
-            elif r.status_code in (500, 502, 503) and attempt < 3:
+            elif r.status_code in (408, 500, 502, 503, 504) and attempt < 3:
                 time.sleep(2 ** attempt * 2)
                 continue
             if r.status_code >= 400:
                 raise _http_error(r)
-            data = r.json()
-            msg = dict((data.get("choices") or [{}])[0].get("message") or {})
-            msg["content"] = _THINK.sub("", msg.get("content") or "").strip()
+            if stream and "event-stream" in r.headers.get("Content-Type", ""):
+                return self._read_stream(r, on_text)
+            data = r.json()  # not streamed (or a server that ignores "stream")
+            choice = (data.get("choices") or [{}])[0]
+            msg = dict(choice.get("message") or {})
+            msg["finish_reason"] = choice.get("finish_reason")
+            msg["content"] = strip_think(msg.get("content") or "")
             msg["model"] = data.get("model") or self.model
+            if on_text and msg["content"]:
+                on_text(msg["content"])
             return msg
         raise _http_error(r)
+
+    def _read_stream(self, r, on_text: Callable[[str], None]) -> dict:
+        """Server-sent events of a streamed completion, merged into one assistant message."""
+        text, model, calls, finish = "", self.model, {}, None
+        r.encoding = "utf-8"  # SSE is UTF-8; without a charset requests would decode it as Latin-1 (broken Korean)
+        try:
+            for line in r.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except ValueError:
+                    continue
+                if err := chunk.get("error"):
+                    raise LLMError(f"LLM 오류: {err.get('message', err) if isinstance(err, dict) else err}")
+                model = chunk.get("model") or model
+                choice = (chunk.get("choices") or [{}])[0]
+                finish = choice.get("finish_reason") or finish
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    text += delta["content"]
+                    on_text(strip_think(text))
+                for tc in delta.get("tool_calls") or []:  # tool calls arrive in pieces, by index
+                    idx = tc.get("index")
+                    if idx is None:  # servers that leave it out: a piece with an id or a name starts a call
+                        starts = tc.get("id") or (tc.get("function") or {}).get("name")
+                        idx = len(calls) if starts or not calls else max(calls)
+                    cur = calls.setdefault(idx,
+                                           {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                    cur["id"] = tc.get("id") or cur["id"]
+                    # anything else rides along unchanged: Gemini 3 sends extra_content.google.thought_signature
+                    # and rejects the next request (as "tools unsupported") if it is not sent back
+                    cur.update({k: v for k, v in tc.items() if k not in ("index", "id", "function") and v is not None})
+                    f = tc.get("function") or {}
+                    cur["function"]["name"] += f.get("name") or ""
+                    cur["function"]["arguments"] += f.get("arguments") or ""
+        except requests.RequestException as e:
+            raise LLMError(f"LLM 응답이 중간에 끊겼습니다: {e}") from e
+        finally:
+            r.close()
+        msg = {"role": "assistant", "content": strip_think(text), "model": model, "finish_reason": finish}
+        if calls:
+            msg["tool_calls"] = [calls[k] for k in sorted(calls)]
+        return msg
 
     def _intent_messages(self, change: dict) -> list[dict]:
         system = SYSTEM.format(language=self.language)
@@ -375,7 +520,7 @@ class OpenAICompatIntentModel:
 
     def intent(self, change: dict) -> dict | None:
         data = self._structured(lambda: self._intent_messages(change), ("change_intent", INTENT_SCHEMA))
-        return self._answer(data)
+        return self._answer(data, INTENT_SCHEMA)
 
     def analyze_cr(self, evidence: dict) -> dict | None:
         def messages():
@@ -384,7 +529,7 @@ class OpenAICompatIntentModel:
                 system += "\nReply with only a JSON object matching this schema:\n" + json.dumps(CR_SCHEMA)
             return [{"role": "system", "content": system},
                     {"role": "user", "content": cr_prompt(evidence) + f"\n\nWrite every field in {self.language}."}]
-        return self._answer(self._structured(messages, ("cr_analysis", CR_SCHEMA)))
+        return self._answer(self._structured(messages, ("cr_analysis", CR_SCHEMA)), CR_SCHEMA)
 
     def summarize_wi(self, wi: dict) -> dict | None:
         def messages():
@@ -393,14 +538,35 @@ class OpenAICompatIntentModel:
                 system += "\nReply with only a JSON object matching this schema:\n" + json.dumps(WI_SCHEMA)
             return [{"role": "system", "content": system},
                     {"role": "user", "content": wi_prompt(wi) + f"\n\nWrite every field in {self.language}."}]
-        return self._answer(self._structured(messages, ("wi_summary", WI_SCHEMA)))
+        return self._answer(self._structured(messages, ("wi_summary", WI_SCHEMA)), WI_SCHEMA)
 
-    def _answer(self, data: dict) -> dict | None:
+    def release_notes(self, data: dict) -> dict | None:
+        def messages():
+            system = RN_SYSTEM.format(language=self.language)
+            if self._schema_mode != "json_schema":
+                system += "\nReply with only a JSON object matching this schema:\n" + json.dumps(RN_SCHEMA)
+            return [{"role": "system", "content": system},
+                    {"role": "user", "content": rn_prompt(data) + f"\n\nWrite every field in {self.language}."}]
+        return self._answer(self._structured(messages, ("release_notes", RN_SCHEMA)), RN_SCHEMA)
+
+    def _answer(self, data: dict, schema: dict | None = None) -> dict:
+        """The JSON object of a structured reply. An empty, cut-off or non-object reply is an error (never
+        None: a batch would ask for the same paragraph again forever); missing fields get empty defaults."""
         choice = (data.get("choices") or [{}])[0]
-        text = (choice.get("message") or {}).get("content")
+        reason = choice.get("finish_reason")
+        text = strip_think((choice.get("message") or {}).get("content") or "")
         if not text:
-            return None
-        out = _parse_json(text)
+            raise LLMError(f"AI 응답이 비어 있습니다 (finish_reason={reason}; 안전 필터·출력 길이 제한·추론만 하고 끝남)")
+        try:
+            out = _parse_json(text)
+        except json.JSONDecodeError as e:
+            if reason == "length":
+                raise LLMError("AI 응답이 출력 길이 제한에서 잘렸습니다 (finish_reason=length)") from e
+            raise LLMError(f"AI 응답이 JSON 이 아닙니다: {text[:120]}") from e
+        if not isinstance(out, dict):
+            raise LLMError("AI 응답이 JSON 객체가 아닙니다")
+        for k, spec in ((schema or {}).get("properties") or {}).items():
+            out.setdefault(k, [] if spec.get("type") == "array" else "")
         out["model"] = data.get("model") or self.model
         return out
 
@@ -409,7 +575,7 @@ class OpenAICompatIntentModel:
         t = time.monotonic()
         data = self._request([{"role": "user", "content": "Reply with the single word: OK"}], structured=False)
         text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-        return {"model": data.get("model") or self.model, "reply": _THINK.sub("", text).strip()[:100],
+        return {"model": data.get("model") or self.model, "reply": strip_think(text)[:100],
                 "seconds": round(time.monotonic() - t, 1)}
 
     def list_models(self) -> list[str]:

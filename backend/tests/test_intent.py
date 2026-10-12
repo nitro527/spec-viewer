@@ -1,3 +1,4 @@
+import json
 import time
 
 import pytest
@@ -109,6 +110,9 @@ def test_llm_settings_and_intent_job(library, monkeypatch, tmp_path):
     s = c.put("/api/llm", json={"provider": "openai", "base_url": "http://llm:8000/v1", "model": "glm-5.3"}).json()
     assert s["provider"] == "openai" and not s["has_key"] and s["providers"]["gemini"]["key_hint"] == "…1234"
     assert c.post("/api/llm/test", json={"provider": "gemini"}).json()["key"] == "AIza-secret-1234"
+    # nor to an address typed into the form but not saved
+    r = c.post("/api/llm/test", json={"provider": "gemini", "base_url": "http://evil.example/v1"}).json()
+    assert r == {"key": None, "url": "http://evil.example/v1"}
     assert c.put("/api/llm", json={"provider": "gemini", "clear_key": True}).json()["has_key"] is False
 
 
@@ -184,3 +188,86 @@ def test_change_evidence_helpers():
     assert crdocs.listed_tdocs(cover) == ["R1-1813585"]
     assert crdocs.wg_meetings("from RAN1#94bis and RAN1#95") == [
         "https://www.3gpp.org/ftp/tsg_ran/WG1_RL1/TSGR1_94b", "https://www.3gpp.org/ftp/tsg_ran/WG1_RL1/TSGR1_95"]
+
+
+class _Resp:
+    encoding = None
+
+    def __init__(self, status=200, lines=None, data=None, ctype="text/event-stream"):
+        self.status_code, self._lines, self._data = status, lines or [], data
+        self.headers = {"Content-Type": ctype}
+        self.content = json.dumps(data or {}).encode()
+        self.text = self.content.decode()
+
+    def iter_lines(self, decode_unicode=False):  # like requests: bytes decoded with .encoding (Latin-1 if unset)
+        for line in self._lines:
+            yield line.encode("utf-8").decode(self.encoding or "latin-1")
+
+    def json(self):
+        return self._data
+
+    def close(self):
+        pass
+
+
+def _sse(*chunks):
+    return [f"data: {json.dumps(c)}" for c in chunks] + ["data: [DONE]"]
+
+
+def test_streamed_answer_and_tool_calls_are_merged():
+    m = intent.OpenAICompatIntentModel("http://llm/v1", "glm")
+    seen = []
+    m.session.post = lambda url, **kw: _Resp(lines=_sse(
+        {"model": "glm-5", "choices": [{"delta": {"content": "<think>hmm"}}]},
+        {"choices": [{"delta": {"content": "</think>답은 "}}]},
+        {"choices": [{"delta": {"content": "42"}}]}))
+    msg = m.complete([{"role": "user", "content": "q"}], on_text=seen.append)
+    assert msg["content"] == "답은 42" and msg["model"] == "glm-5"
+    assert seen == ["", "답은", "답은 42"]  # the reasoning is never shown
+    m.session.post = lambda url, **kw: _Resp(lines=_sse(
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "search", "arguments": "{\"qu"}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "ery\": \"x\"}"}}]}}]}))
+    msg = m.complete([{"role": "user", "content": "q"}], tools=[{}], on_text=seen.append)
+    assert msg["tool_calls"] == [{"id": "c1", "type": "function", "function": {"name": "search", "arguments": '{"query": "x"}'}}]
+
+
+def test_server_without_streaming_answers_in_one_piece():
+    m = intent.OpenAICompatIntentModel("http://llm/v1", "glm")
+    bodies = []
+
+    def post(url, json=None, **kw):
+        bodies.append(dict(json))
+        if json.get("stream"):
+            return _Resp(400, data={"error": {"message": "stream is not supported"}}, ctype="application/json")
+        return _Resp(data={"choices": [{"message": {"content": "한 번에"}}]}, ctype="application/json")
+
+    m.session.post = post
+    seen = []
+    assert m.complete([{"role": "user", "content": "q"}], on_text=seen.append)["content"] == "한 번에"
+    assert seen == ["한 번에"] and [b.get("stream") for b in bodies] == [True, None]
+    m.complete([{"role": "user", "content": "q"}], on_text=seen.append)
+    assert bodies[-1].get("stream") is None  # remembered
+
+
+def test_streamed_tool_calls_keep_provider_fields_and_string_errors_are_llm_errors():
+    m = intent.OpenAICompatIntentModel("http://llm/v1", "gemini")
+    sig = {"google": {"thought_signature": "abc"}}
+    m.session.post = lambda url, **kw: _Resp(lines=_sse(
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "type": "function", "extra_content": sig,
+                                                "function": {"name": "search", "arguments": "{}"}}]}}]}))
+    msg = m.complete([{"role": "user", "content": "q"}], tools=[{}], on_text=lambda t: None)
+    assert msg["tool_calls"][0]["extra_content"] == sig  # Gemini 3 needs it back with the tool result
+    m.session.post = lambda url, **kw: _Resp(lines=["data: " + json.dumps({"error": "overloaded"})])
+    with pytest.raises(intent.LLMError, match="overloaded"):
+        m.complete([{"role": "user", "content": "q"}], on_text=lambda t: None)
+
+
+def test_streamed_tool_call_pieces_without_index_are_joined():
+    m = intent.OpenAICompatIntentModel("http://llm/v1", "glm")
+    m.session.post = lambda url, **kw: _Resp(lines=_sse(
+        {"choices": [{"delta": {"tool_calls": [{"id": "a", "function": {"name": "search", "arguments": "{\"q"}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"function": {"arguments": "\": 1}"}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"id": "b", "function": {"name": "get_cr", "arguments": "{}"}}]}}]}))
+    msg = m.complete([{"role": "user", "content": "q"}], tools=[{}], on_text=lambda t: None)
+    assert [(c["id"], c["function"]["name"], c["function"]["arguments"]) for c in msg["tool_calls"]] == [
+        ("a", "search", '{"q": 1}'), ("b", "get_cr", "{}")]

@@ -33,6 +33,7 @@ class IntentModel(Protocol):
 
 
 def _touches(cl: str, number: str) -> bool:
+    number = number[6:] if number.startswith("Annex ") else number  # an annex heading is "Annex B"; CRs say "B"
     return cl == number or number.startswith(cl + ".") or cl.startswith(number + ".")
 
 
@@ -196,11 +197,15 @@ def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None 
                clause_key: str | None = None, skip_uncovered: bool = False,
                skip_hashes: set[str] | frozenset = frozenset(), only_hashes: set[str] | None = None,
                resolve_drafts: bool = True, find_agreements: bool = True,
-               cr_analyzer: Callable[[list[dict]], list[dict]] | None = None) -> dict:
+               cr_analyzer: Callable[[list[dict]], list[dict]] | None = None,
+               on_change: Callable[[dict], None] | None = None,
+               should_stop: Callable[[], str | None] | None = None) -> dict:
     """``limit`` caps the LLM requests; ``skip_uncovered`` leaves changes no CR explains (front matter,
     copyright year ...) to the rules; ``skip_hashes`` are blocks that already have a summary;
     ``only_hashes`` restricts the pack to those blocks (e.g. the texts a clause shows today);
-    ``cr_analyzer`` returns the (stored or new) analyses of the CRs behind a change, given their rows."""
+    ``cr_analyzer`` returns the (stored or new) analyses of the CRs behind a change, given their rows;
+    ``on_change`` gets each change right after its request (to save it at once); ``should_stop`` is asked
+    before each request and stops the requests when it returns a reason."""
     crs = [c for c in lib.crs(spec, version) if c["detail"]]
     changes = changed_blocks(lib, spec, version, clause_key)
     if only_hashes is not None:
@@ -214,13 +219,19 @@ def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None 
         hit = [c for c in crs if any(_touches(x, ch["clause"]) for x in c["detail"]["clauses"])]
         ch["crs"] = [{"cr": c["cr"], "rev": c["rev"], "tdoc": c["tdoc"], "wg_tdoc": c["detail"]["wg_tdoc"],
                       "wi_code": c["detail"]["wi_code"], "category": c["cat"], "subject": c["subject"]} for c in hit]
-        wis = {w.strip() for c in hit for w in c["detail"]["wi_code"].split(",")}
-        feats = lib.clause_features(spec, version, ch["clause_key"])
-        ch["features"] = sorted({f"{s['section']}:{f['index']}" for w in feats.get("work_items", [])
-                                 if w["wi_code"] in wis
-                                 for s in w["sections"] for f in s["features"] if f.get("shared")})
+        ch["features"] = []
         ch["agreements"] = []  # TODO: chairman's notes (see annotation_server/chairnotes.py)
         ch["intent"] = None
+        if not stopped and should_stop and (why := should_stop()):
+            stopped = why
+        asks = model is not None and not stopped and not (not hit and skip_uncovered) \
+            and not (limit is not None and asked >= limit)
+        if hit and (model is None or asks):  # features: costly per call, only for the changes that use them
+            wis = {w.strip() for c in hit for w in c["detail"]["wi_code"].split(",")}
+            feats = lib.clause_features(spec, version, ch["clause_key"])
+            ch["features"] = sorted({f"{s['section']}:{f['index']}" for w in feats.get("work_items", [])
+                                     if w["wi_code"] in wis
+                                     for s in w["sections"] for f in s["features"] if f.get("shared")})
         if model is not None and not hit and skip_uncovered:
             uncovered += 1
         elif model is not None and not stopped and limit is not None and asked >= limit:
@@ -243,14 +254,21 @@ def build_pack(lib: Library, spec: str, version: str, model: IntentModel | None 
                                       | {"excerpt": f["excerpt"][:1200]} for f in ctx["fl_summaries"]]
             try:
                 if cr_analyzer and hit:  # the CRs first: analysed once, reused by every paragraph they touch
-                    ctx["cr_analyses"] = cr_analyzer(hit)
-                    ch["cr_analyses"] = [{k: a[k] for k in ("cr", "rev", "tdoc")} for a in ctx["cr_analyses"]]
+                    try:
+                        ctx["cr_analyses"] = cr_analyzer(hit)
+                        ch["cr_analyses"] = [{k: a[k] for k in ("cr", "rev", "tdoc")} for a in ctx["cr_analyses"]]
+                    except QuotaExceeded:
+                        raise
+                    except Exception:  # a CR that cannot be analysed must not cost the paragraph summary
+                        ctx.pop("cr_analyses", None)
                 ch["intent"] = model.intent(ctx)
             except QuotaExceeded as e:  # every later request would fail the same way
                 stopped = str(e)
                 ch["intent_error"] = stopped
             except Exception as e:  # one bad response must not lose the whole pack
                 ch["intent_error"] = str(e)[:300]
+            if on_change:
+                on_change(ch)
         if progress:
             progress(n, len(changes))
     for ch in changes:

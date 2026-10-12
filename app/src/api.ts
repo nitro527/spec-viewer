@@ -126,10 +126,23 @@ export type ChatSource =
 export interface ChatContext { spec: string; version?: string; clause?: string; text?: string }
 export interface ChatMessage {
   role: "user" | "assistant"; content: string; time?: string; context?: ChatContext | null;
-  sources?: Record<string, ChatSource>; steps?: string[]; mode?: "tools" | "retrieval"; model?: string; error?: boolean;
+  sources?: Record<string, ChatSource>; steps?: string[]; mode?: "tools" | "retrieval"; model?: string; error?: boolean; stopped?: boolean;
 }
 export interface ChatSummary { id: string; title: string; updated: string }
 export interface Chat extends ChatSummary { messages: ChatMessage[] }
+export interface VersionStatus { version: string; changed: number; covered: number; summarised: number }
+export interface AnalysisStatus {
+  specs: { spec: string; title: string | null; versions: VersionStatus[]; crs: number; cr_analyses: number;
+    changed: number; covered: number; summarised: number }[];
+  work_items: number; wi_summaries: number;
+  last_full: { started?: string; finished?: string; state?: string; message?: string; stopped?: boolean;
+    counts?: { intents: number; cr_analyses: number; wi_summaries: number; failed: number } } | null;
+}
+export interface ReleaseNote {
+  overview: string; features: { wi: string; what: string; crs: string; clauses: string }[];
+  corrections: { what: string; crs: string; clauses: string }[]; impact: string; confidence: string;
+  model?: string; generated?: string; crs: number; analysed: number;
+}
 export interface SearchHit { ord: number; key: string; number: string; title: string; block: number | null; snippet: string }
 export interface LlmProviderSettings {
   base_url: string; model: string; has_key: boolean; key_hint: string; key_source: "saved" | "env" | null;
@@ -149,13 +162,32 @@ export interface MeetingDoc { meeting: string; tdoc: string | null; title: strin
 export interface Job {
   id: string; state: "running" | "done" | "error"; done: number; total: number; message: string; specs: string[]; kind?: "intent";
   full?: boolean; started?: string; finished?: string; stopped?: boolean; chat_id?: string; steps?: string[];
+  partial?: string; sources?: Record<string, ChatSource>;
   counts?: { intents: number; cr_analyses: number; wi_summaries: number; failed: number };
+}
+export interface CitationMap {
+  specs: string[];
+  matrix: { from: string; to: string; clauses: number }[];
+  top_cited: { spec: string; clause: string; title: string; count: number; from_specs: string[] }[];
+  external: { spec: string; count: number }[];
+}
+export interface CitationPair { number: string; title: string; key: string; cites: string[] }
+export interface RefHit { spec: string; version: string; number: string; title: string; key: string; ord: number; snippet: string }
+export interface Updates { specs: { spec: string; latest: string; new: string[] }[]; errors: string[]; checked: string | null }
+export interface WatchItem {
+  spec: string; clause_key: string; number: string; title: string; status: "changed" | "removed";
+  since: string | null; changed_in: string | null; latest: string; bookmark: boolean; note: string;
 }
 export interface FullAnalysisRequest { specs: string[] | null; skip_uncovered: boolean; cr_analyses: boolean; wi_summaries: boolean }
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path);
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  if (!r.ok) {  // the backend's readable "detail", not a JSON dump
+    const text = await r.text();
+    let detail: unknown = text;
+    try { detail = JSON.parse(text).detail ?? text; } catch { /* not JSON */ }
+    throw new Error(typeof detail === "string" ? detail : `${r.status} ${JSON.stringify(detail)}`);
+  }
   return r.json();
 }
 
@@ -182,6 +214,11 @@ export const api = {
   search: (spec: string, v: string, q: string) => get<SearchHit[]>(`/api/specs/${s(spec)}/${s(v)}/search?q=${s(q)}`),
   phraseHistory: (spec: string, q: string) => get<PhraseHistory>(`/api/specs/${s(spec)}/phrase-history?q=${s(q)}`),
   crs: (spec: string) => get<CR[]>(`/api/specs/${s(spec)}/crs`),
+  analysisStatus: () => get<AnalysisStatus>("/api/analysis-status"),
+  releaseNotes: (spec: string, oldV: string, newV: string) => get<{ note: ReleaseNote | null; crs: number; analysed: number;
+    changed_clauses: number }>(`/api/specs/${s(spec)}/release-notes?old=${s(oldV)}&new=${s(newV)}`),
+  makeReleaseNotes: (spec: string, oldV: string, newV: string, force = false) =>
+    send<Job>("POST", "/api/release-notes", { spec, old: oldV, new: newV, force }),
   chats: () => get<ChatSummary[]>("/api/chats"),
   chat: (id: string) => get<Chat>(`/api/chats/${s(id)}`),
   deleteChat: (id: string) => send<{ ok: boolean }>("DELETE", `/api/chats/${s(id)}`, {}),
@@ -192,13 +229,36 @@ export const api = {
   compare: (spec: string, oldV: string, newV: string, changedOnly = true) =>
     get<CompareResult>(`/api/specs/${s(spec)}/compare?old=${s(oldV)}&new=${s(newV)}&changed_only=${changedOnly}`),
   stats: (spec: string) => get<Stats>(`/api/specs/${s(spec)}/stats`),
+  citations: () => get<CitationMap>("/api/citations"),
+  citationPairs: (frm: string, to: string) =>
+    get<CitationPair[]>(`/api/citations/pairs?frm=${s(frm)}&to=${s(to)}`),
+  referencedBy: (spec: string, clause: string) =>
+    get<RefHit[]>(`/api/specs/${s(spec)}/referenced-by?clause=${s(clause)}`),
+  updates: (refresh = false) => get<Updates>(`/api/updates${refresh ? "?refresh=true" : ""}`),
+  watch: () => get<WatchItem[]>("/api/watch"),
+  watchSeen: (spec: string, clauseKey?: string) =>
+    send<WatchItem[]>("POST", "/api/watch/seen", { spec, clause_key: clauseKey ?? null }),
   jobs: () => get<Job[]>("/api/jobs"),
+  /** One job; a job the backend no longer knows (it restarted) comes back as an error instead of polling forever.
+   *  null when the backend could not be reached this time (keep polling). */
+  job: async (id: string): Promise<Job | null> => {
+    try {
+      const r = await fetch(`/api/jobs/${s(id)}`);
+      if (r.status === 404) {
+        return { id, state: "error", done: 0, total: 0, specs: [], message: "작업 정보가 없습니다 (백엔드가 다시 시작됨)" };
+      }
+      return r.ok ? await r.json() : null;
+    } catch {
+      return null;
+    }
+  },
   catalog: (series: string, refresh = false) => get<CatalogSpec[]>(`/api/catalog/${s(series)}${refresh ? "?refresh=true" : ""}`),
   notes: (spec: string) => get<Note[]>(`/api/specs/${s(spec)}/notes`),
   saveNote: async (spec: string, key: string, body: { bookmark?: boolean; text?: string; version?: string }) => {
     const r = await fetch(`/api/specs/${s(spec)}/notes/${s(key)}`, {
       method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);  // an error body is no note
     return r.json() as Promise<Note | null>;
   },
   annotations: (spec: string, v: string, key: string) =>
@@ -247,16 +307,41 @@ export const api = {
     if (!r.ok) throw new Error(await r.text());
     return r.json();
   },
-  fetchSpecs: async (specs: string[], releases: number[] | null, latestPerRelease: boolean): Promise<Job> => {
+  fetchSpecs: async (specs: string[], releases: number[] | null, latestPerRelease: boolean, onlyNewer = false): Promise<Job> => {
     const r = await fetch("/api/fetch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ specs, releases, latest_per_release: latestPerRelease }),
+      body: JSON.stringify({ specs, releases, latest_per_release: latestPerRelease, only_newer: onlyNewer }),
     });
     if (!r.ok) throw new Error(await r.text());
     return r.json();
   },
 };
+
+/** Follow a background job until it ends: ``onUpdate`` gets it while it runs and once more when it is done. Gives
+ *  up (as an error) when the backend has not answered for a minute. Returns a function that stops following;
+ *  call it when the view goes away so no timer keeps polling. */
+export function followJob(id: string, onUpdate: (j: Job) => void, everyMs = 1000): () => void {
+  let misses = 0, busy = false;
+  const t = setInterval(async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const j = await api.job(id);
+      if (!j) {
+        if (++misses * everyMs < 60000) return;
+        clearInterval(t);
+        return onUpdate({ id, state: "error", done: 0, total: 0, specs: [], message: "백엔드가 응답하지 않습니다" });
+      }
+      misses = 0;
+      if (j.state !== "running") clearInterval(t);
+      onUpdate(j);
+    } finally {
+      busy = false;
+    }
+  }, everyMs);
+  return () => clearInterval(t);
+}
 
 export function cmpVersion(a: string, b: string): number {
   const pa = a.split(".").map(Number), pb = b.split(".").map(Number);
